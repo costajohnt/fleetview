@@ -1,0 +1,5 @@
+[1mfix the flaky tests[22m [2mrepo[22m
+[32m]8;;https://github.com/o/r/pull/9#9 passing · https://github.com/o/r/pull/9]8;;[39m
+[2mopencode:[22m
+Should I delete the retry loop or raise its timeout?
+[2m> █ reply · ! runs a shell command · ← back[22m

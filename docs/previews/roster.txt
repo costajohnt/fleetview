@@ -1,0 +1,9 @@
+  [1m[90mneeds input[39m[22m
+[48;2;55;55;55m  [33m✳[39m [37mfix the flaky tests                               [39m[2m — should I delete the retry loop?[22m          [2m3m[22m[49m
+
+  [1m[90mworking[39m[22m
+  [36m✻[39m [2mport the parser                                    — rewriting tokenizer edge cases[22m           [2m3m[22m
+
+  [1m[90mcompleted[39m[22m
+  [32m•[39m [2mupdate the readme                                 [22m                                         [35m]8;;https://github.com/o/r/pull/7#7[39m]8;; [2m4m[22m]8;;
+  [31m•[39m [2mspike the importer                                [22m                                           [2m11m[22m

@@ -1,0 +1,7 @@
+  [1m[90mneeds input[39m[22m
+  [33m✳[39m [2mfix the flaky tests                                — should I delete the retry loop?[22m          [2m3m[22m
+
+  [1m[90mworking[39m[22m
+  [36m✻[39m [2mport the parser                                    — rewriting tokenizer edge cases[22m           [2m3m[22m
+
+[48;2;55;55;55m  [1m[37mcompleted (2)[39m[22m                                                                          [2m▸ collapsed[22m[49m

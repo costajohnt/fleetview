@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleetview: an agent roster TUI</title>
+<meta name="description" content="Claude Code's agent view for opencode, claude, and copilot. A roster TUI for backgrounded agent sessions.">
+<meta property="og:title" content="fleetview">
+<meta property="og:description" content="Claude Code's agent view for opencode, claude, and copilot. A roster TUI for backgrounded agent sessions.">
+<meta property="og:image" content="https://fleetview.jcosta.tech/images/roster.png">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>⚓</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <h1>fleetview <span class="badge">beta</span></h1>
+  <p class="pitch">Claude Code's agent view for opencode, claude, and copilot. A roster TUI for backgrounded agent sessions.</p>
+  <p class="note">This is a beta release, so expect rough edges and breaking changes between versions. It has been tested most with opencode in iTerm2; the claude and copilot backends are newer, and other terminals should work but have seen less use.</p>
+  <img src="images/roster.png" alt="The fleetview roster: sessions grouped under pinned, needs input, working, and completed, with an input box for dispatching a new task.">
+</header>
+
+<main>
+  <section class="install">
+    <h2>Install</h2>
+    <div class="cmd">
+      <code id="cmd">npm i -g fleetview</code>
+      <button id="copy" type="button">copy</button>
+    </div>
+    <p class="note">Needs Node 24 or newer. Then run <code>fleetview</code>.</p>
+  </section>
+
+  <section>
+    <h2>What it does</h2>
+    <ul class="features">
+      <li>
+        <h3>Multi-backend</h3>
+        <p>One roster over opencode, claude, and copilot sessions, whichever you happen to have installed.</p>
+        <img src="images/backends.png" alt="Backend picker listing opencode, claude, and copilot.">
+      </li>
+      <li>
+        <h3>Dispatch</h3>
+        <p>Describe a task in the input box and fleetview starts a backgrounded agent for it, with suggestions drawn from the repo.</p>
+        <img src="images/dispatch-suggestions.png" alt="Dispatch input showing suggested tasks below the prompt.">
+      </li>
+      <li>
+        <h3>Peek and answer</h3>
+        <p>Read an agent's latest output without attaching, and answer its question inline when it is blocked.</p>
+        <img src="images/peek.png" alt="Peek pane showing an agent's recent transcript beside the roster.">
+      </li>
+      <li>
+        <h3>Attach and detach</h3>
+        <p>Enter drops you into a live session; detach puts it back on the roster still running.</p>
+      </li>
+      <li>
+        <h3>Worktree isolation</h3>
+        <p>Dispatched agents can each get their own git worktree, so parallel work never fights over your checkout.</p>
+      </li>
+      <li>
+        <h3>PR awareness</h3>
+        <p>Sessions show the branch and pull request they belong to, so a long-running roster stays legible.</p>
+      </li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <p>Issues and pull requests are welcome. <a href="https://github.com/costajohnt/fleetview/issues">Open an issue</a> or read <a href="https://github.com/costajohnt/fleetview/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>.</p>
+  <p>
+    <a href="https://github.com/costajohnt/fleetview">GitHub</a> ·
+    <a href="https://www.npmjs.com/package/fleetview">npm</a> ·
+    ISC licensed ·
+    by <a href="https://jcosta.tech">John Costa</a>
+  </p>
+</footer>
+
+<script>
+document.getElementById('copy').addEventListener('click', async (e) => {
+  await navigator.clipboard.writeText(document.getElementById('cmd').textContent);
+  e.target.textContent = 'copied';
+  setTimeout(() => { e.target.textContent = 'copy'; }, 1500);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - docs/images/**
+      - .github/workflows/site.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # Always runs: proves the page assembles and that every image it references exists. This is
+  # the part that must stay green on a push, and it needs nothing enabled on the repo.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to commit SHAs, not tags, see the note in ci.yml.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The screenshots live in docs/images/ (the preview pipeline keeps them current) and are
+      # assembled here rather than committed a second time under site/.
+      - name: Assemble _site
+        run: |
+          mkdir -p _site/images
+          cp site/index.html site/style.css site/CNAME _site/
+          cp docs/images/roster.png docs/images/peek.png \
+             docs/images/dispatch-suggestions.png docs/images/backends.png _site/images/
+      # Every src="images/..." in the page must exist in the artifact. Catches a screenshot
+      # renamed under docs/images/ without the copy list above being updated.
+      - name: Check referenced images exist
+        run: |
+          grep -o 'src="images/[^"]*"' site/index.html | sed 's/src="//;s/"//' | while read -r ref; do
+            test -f "_site/$ref" || { echo "missing from artifact: $ref"; exit 1; }
+          done
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  # Deploy is manual for now. Pages is not enabled on this repo, and deploy-pages fails with a
+  # 404 when it isn't, which reddens every push that touches the site. Once Pages is on (repo
+  # public, source "GitHub Actions"), drop the `if` and pushes publish again.
+  deploy:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

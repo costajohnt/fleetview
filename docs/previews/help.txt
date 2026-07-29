@@ -1,0 +1,30 @@
+[1mShortcuts[22m
+[36m↑ / ↓    [39m [2mmove between rows[22m
+[36m⏎        [39m [2mattach to the selected session, or dispatch if there is text in the input[22m
+[36m⇧⏎ / ⌥⏎  [39m [2mdispatch and attach immediately[22m
+[36mspace    [39m [2mpeek at the selected session (types a space when the input has text)[22m
+[36m1..9     [39m [2min peek, answer the pending question with that choice[22m
+[36my / a / d[39m [2min peek, allow once / always allow / deny a permission[22m
+[36m! cmd    [39m [2min peek, run a shell command in that session instead of prompting[22m
+[36mtab      [39m [2min peek, fill the reply with the choice the session offered[22m
+[36m→        [39m [2mattach to the selected session[22m
+[36m^z       [39m [2mdetach from an attached session and come back here[22m
+[36m⌥1..9    [39m [2mwhile attached, jump to that row (best-effort; see FLEETVIEW_NO_ALT_SWITCH)[22m
+[36m←        [39m [2mwhile attached, back on empty prompt (opencode app_exit keybind, see README)[22m
+[36m^s       [39m [2mswitch grouping between state and project[22m
+[36m^r       [39m [2mrename the selected session[22m
+[36m^x       [39m [2mstop the session; press again within 2s to delete it[22m
+[36mesc      [39m [2mclose peek, clear the input, or quit when there is nothing to clear[22m
+[36mtab      [39m [2mapply the highlighted @ or / suggestion[22m
+[36m^j       [39m [2minsert a newline in the prompt instead of dispatching[22m
+[36m^g       [39m [2medit the prompt in $VISUAL or $EDITOR[22m
+[36m^c       [39m [2mclear the input; press twice to exit[22m
+[36m?        [39m [2mshow this list[22m
+[1mIn the input[22m
+[36m@repo    [39m [2mrun the session in that repository[22m
+[36m@agent   [39m [2mrun the session as that subagent (also works as the first word)[22m
+[36m@backend [39m [2mdispatch on a backend — @claude, @copilot (a subagent or repo of the same name wins)[22m
+[36m/command [39m [2mrun one of opencode's commands as the session's first prompt[22m
+[36m! cmd    [39m [2mrun a shell command as a job instead of starting a session[22m
+[36ms:working[39m [2mfilter the list by state (also s:blocked, s:failed, s:idle)[22m
+[2many key to close · ↓ more (1/2)[22m

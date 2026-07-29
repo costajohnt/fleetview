@@ -1,0 +1,57 @@
+{
+  "name": "fleetview",
+  "version": "0.1.0",
+  "description": "Claude Code's agent view for opencode: a roster TUI for backgrounded sessions — dispatch, watch, answer, attach",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/fix-pty-permissions.mjs",
+    "preview": "node scripts/preview.ts",
+    "shots": "node scripts/shots.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "claude-code",
+    "agent-view",
+    "tui",
+    "ink",
+    "terminal",
+    "agents",
+    "roster",
+    "cli"
+  ],
+  "author": "John Costa <costajohnt@gmail.com>",
+  "license": "ISC",
+  "type": "module",
+  "bin": {
+    "fleetview": "dist/preflight.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "ink": "^7.1.1",
+    "node-pty": "^1.1.0",
+    "react": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "ink-testing-library": "^4.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.10"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/costajohnt/fleetview.git"
+  },
+  "files": [
+    "dist",
+    "scripts/fix-pty-permissions.mjs",
+    "README.md",
+    "LICENSE"
+  ]
+}

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS bills at 10x Linux; run it on main only, PRs get Linux.
+        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+    steps:
+      # Pinned to commit SHAs, not tags: `v4` is a moving pointer its owner can repoint, so a tag ref
+      # is a standing "run whatever this org publishes next" in a job that has our checkout. The
+      # trailing comment is the version the SHA was, kept for readability only.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # The 0.2.0 breakage (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING) only shows up when the
+      # package runs from under node_modules, so the artifact has to be packed, installed and run —
+      # building dist or running it in-tree would have stayed green through it.
+      - name: Pack-and-install smoke
+        run: |
+          npm pack
+          npm i ./fleetview-*.tgz --prefix "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/node_modules/.bin/fleetview" --version
+      # Visual regression: previews are committed; a UI change must update them in the same PR,
+      # which makes the change reviewable as a before/after diff.
+      - run: npm run preview && git diff --exit-code docs/previews

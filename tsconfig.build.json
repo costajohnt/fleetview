@@ -1,0 +1,15 @@
+{
+  // The publish-time emit. Development stays build-free (bin scripts run src/*.ts via Node's
+  // type-stripping), but Node refuses to strip types under node_modules
+  // (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING) — the 0.2.0 tarball proved it on install — so
+  // the published package ships plain .js in dist/, built by prepack/prepare.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rewriteRelativeImportExtensions": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src"]
+}
