@@ -113,6 +113,64 @@ const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.
 // 640 is a generous 8x the 80-grapheme output cap, covering any run of whitespace collapsing away.
 const snippet = (text: string) => (text ? truncateGraphemes(stripControl(text.slice(0, 641).replace(/\s+/g, ' ').trim()), 80) : '') // 641: an odd cut mid-surrogate is absorbed by grapheme truncation. stripControl: this string reaches the CLI stdout raw (`ls`), so escape bytes must go before it can drive the terminal
 
+// permission.asked's verified shape is {id, sessionID, permission, patterns, metadata, always,
+// tool?} — there is no title/description field, so build the label from `permission` (+ patterns
+// when present) and only fall back to the id when `permission` itself is missing.
+// stripControl for the same reason `snippet` strips: permission names and patterns are the agent's
+// own strings off the wire, they reach raw stdout via `fleetview ls`, and Ink passes OSC 8 and DCS
+// straight through to the terminal in the TUI.
+//
+// Lives here rather than in ui/peek.ts (where it was born) because the roster row now previews the
+// same request the peek banner does, and the store is the module that owns these payloads —
+// pendingFor/pendingQuestionsFor hand out exactly this shape. ui importing core is the right
+// direction; core importing ui would drag React and Ink into `fleetview ls`.
+export const permissionLabel = (p: any) => stripControl(p.permission ? `${p.permission}${p.patterns?.length ? ` ${p.patterns.join(', ')}` : ''}` : p.id)
+
+// Verified against opencode 1.18.4's OpenAPI: question.asked is {id, sessionID, questions:
+// [{question, header, options: [{label, description}], multiple, custom}], tool?}. Earlier code
+// guessed `text`/`label` for the prompt; the field is `question`. Only the first sub-question of
+// the oldest request is shown, and its options are what the number keys pick.
+export const questionLabel = (q: any) => {
+  const first = q.questions?.[0]
+  return stripControl(first?.question ?? first?.header ?? q.tool ?? q.id)
+}
+
+// The entry with the lowest __seq — the one the user has actually been waiting on longest, and the
+// one peek offers to answer. Not `values().next()`: I3's rollback path deletes and reinserts, so
+// Map order alone can't be trusted (same reason pendingFor sorts).
+const oldestPending = <T>(m: Map<string, Pending<T>>): Pending<T> | undefined => {
+  let best: Pending<T> | undefined
+  for (const e of m.values()) if (!best || e.__seq < best.__seq) best = e
+  return best
+}
+
+// #7: what the row previews while the server has actually reported a pending request. The bug this
+// fixes: `snippetCache` is the last assistant *text*, and question.asked/permission.asked never
+// touch it — so a session blocked on a question kept previewing whatever tool-progress line the
+// model printed last, and the row read as working while the header correctly counted it as
+// awaiting input. Both signals were right about the state and the row still said the opposite.
+//
+// Permissions rank above questions, the same precedence `waitingFor` uses, so the two can never
+// disagree about which request is the one blocking the session.
+//
+// Prefixed with the same words peek's banners use (`permission:` / `question:`) but WITHOUT peek's
+// `⚠` / `?` glyphs: the row already carries a status marker in its badge, so a second glyph is
+// redundant, while the word is not — "bash git push --force" previews as a statement unless
+// something says it is a permission being requested.
+//
+// Run through `snippet` like the assistant text is: same whitespace collapse (a multi-line question
+// has to render as one row), same 80-grapheme cap, same stripControl. The row then truncates it
+// through the ordinary `snippetBudget` path, so a long question can't break the layout.
+// Returns null — not '' — so publicView can tell "no pending request" from "a request that labelled
+// to nothing" and fall back to the snippet only in the first case.
+const pendingSnippet = (r: SessionRecord): string | null => {
+  const perm = oldestPending(r.pendingPermissions)
+  if (perm) return snippet(`permission: ${permissionLabel(perm)}`)
+  const q = oldestPending(r.pendingQuestions)
+  if (q) return snippet(`question: ${questionLabel(q)}`)
+  return null
+}
+
 export function createStore() {
   const sessions = new Map<string, SessionRecord>() // `${projectKey}:${id}` → record
   // Sessions opencode reports as children of another session — the `task` tool's subagents. Agent
@@ -267,7 +325,15 @@ export function createStore() {
       ranForMs: FINISHED_STATUSES.has(status) && r.runStartedAt > 0 && r.runEndedAt >= r.runStartedAt
         ? r.runEndedAt - r.runStartedAt
         : null,
-      snippet: r.snippetCache, // I1: computed once at write time, not recomputed on every render
+      // A live pending request wins over the last assistant text (#7). Computed here rather than
+      // cached in a field, which is the opposite of I1's treatment of `snippetCache` — and
+      // deliberately so, for the same reason `waitingSince` is derived here: the pending maps are
+      // mutated at nine sites (set, delete, clear, and three seeds), and a cached field is only as
+      // good as the one mutation site nobody remembered to update. What I1 is protecting against is
+      // re-collapsing and re-segmenting a 200KB streamed reply on every render; a pending label is
+      // one short wire string, bounded by the same 80 graphemes this call already spends on
+      // `stripControl(title)` and the loop in `oldestAskedAt`.
+      snippet: pendingSnippet(r) ?? r.snippetCache, // I1: the fallback is computed once at write time, not recomputed on every render
     }
   }
 

@@ -3,6 +3,7 @@ import { basename } from 'node:path'
 import { Box, Text } from 'ink'
 import { graphemes, truncateGraphemes, osc8, stripControl } from '../text-utils.ts'
 import { prStatus, prColor } from '../pull-requests.ts'
+import { permissionLabel, questionLabel } from '../session-store.ts'
 import { theme } from './theme.ts'
 
 // Only 'text' parts are ever the actual reply — 'reasoning' parts carry `.text` too but are
@@ -35,21 +36,9 @@ export function wrapLines(text: string, columns: number) {
   })
 }
 
-// permission.asked's verified shape is {id, sessionID, permission, patterns, metadata, always,
-// tool?} — there is no title/description field, so build the label from `permission` (+ patterns
-// when present) and only fall back to the id when `permission` itself is missing.
-// stripControl for the same reason messageText strips (M12): permission names and patterns are the
-// agent's own strings off the wire, and Ink passes OSC 8 and DCS straight through to the terminal.
-const permissionLabel = (p: any) => stripControl(p.permission ? `${p.permission}${p.patterns?.length ? ` ${p.patterns.join(', ')}` : ''}` : p.id)
-
-// Verified against opencode 1.18.4's OpenAPI: question.asked is {id, sessionID, questions:
-// [{question, header, options: [{label, description}], multiple, custom}], tool?}. Earlier code
-// guessed `text`/`label` for the prompt; the field is `question`. Only the first sub-question of
-// the oldest request is shown, and its options are what the number keys pick.
-const questionLabel = (q: any) => {
-  const first = q.questions?.[0]
-  return stripControl(first?.question ?? first?.header ?? q.tool ?? q.id)
-}
+// permissionLabel/questionLabel used to live here. They moved to session-store.ts when the roster
+// row started previewing the same pending request this panel banners (#7) — one label, one place,
+// so the row and the panel can never describe the same request differently.
 
 // Stripped here rather than at each render site so peek's numbered list, the Tab suggestion and
 // use-peek's answer all get a clean label from one place. Stripping before the answer goes back on
