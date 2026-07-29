@@ -1260,3 +1260,109 @@ test('the synthetic "needs input" permission survives an authoritative pending s
   store.seedQuestions('repoA', [], store.seedMark())
   expect(store.get('repoA', 'c1').status).toBe('waiting')
 })
+
+// --- #7: a pending request preempts the assistant snippet in the row preview ---
+//
+// The field bug: the header counted the session as "awaiting input" while its row previewed
+// "Updating opencode agent context with copilot-instructions.md", the last tool-progress line the
+// model had printed. The reporter read the row and concluded the session had frozen mid-work.
+
+// Puts a session in the exact state the report describes: an assistant text part landed, and then
+// the session asked for something.
+const withAssistantText = (store: any, text: string) => {
+  store.apply('repoA', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm1', role: 'assistant' } } })
+  store.apply('repoA', { type: 'message.part.updated', properties: { sessionID: 's1', part: { type: 'text', messageID: 'm1', text } } })
+}
+
+test('#7: a pending question previews the question, not the last assistant output', () => {
+  const store: any = createStore()
+  seed(store)
+  withAssistantText(store, 'Updating opencode agent context with copilot-instructions.md')
+  store.apply('repoA', {
+    type: 'question.asked',
+    properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'Which framework should I use?' }] },
+  })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('waiting')
+  expect(row.snippet).toBe('question: Which framework should I use?')
+})
+
+test('#7: a pending permission previews the permission and its patterns', () => {
+  const store: any = createStore()
+  seed(store)
+  withAssistantText(store, 'Updating opencode agent context with copilot-instructions.md')
+  store.apply('repoA', {
+    type: 'permission.asked',
+    properties: { sessionID: 's1', id: 'p1', permission: 'bash', patterns: ['git push', 'rm -rf'] },
+  })
+  expect(store.get('repoA', 's1').snippet).toBe('permission: bash git push, rm -rf')
+})
+
+test('#7: a permission outranks a question in the preview, matching waitingFor', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'Which one?' }] } })
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
+  const row = store.get('repoA', 's1')
+  expect(row.waitingFor).toBe('permission prompt')
+  expect(row.snippet).toBe('permission: bash')
+})
+
+test('#7: answering the question hands the preview back to the assistant snippet', () => {
+  const store: any = createStore()
+  seed(store)
+  withAssistantText(store, 'assistant reply')
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'Which one?' }] } })
+  expect(store.get('repoA', 's1').snippet).toBe('question: Which one?')
+  store.apply('repoA', { type: 'question.replied', properties: { sessionID: 's1', requestID: 'q1' } })
+  expect(store.get('repoA', 's1').snippet).toBe('assistant reply')
+})
+
+test('#7 regression: with no pending request the row still previews the assistant snippet', () => {
+  const store: any = createStore()
+  seed(store)
+  withAssistantText(store, 'assistant reply')
+  const row = store.get('repoA', 's1')
+  expect(row.pendingRequest).toBe(false)
+  expect(row.snippet).toBe('assistant reply')
+})
+
+test('#7 regression: the prose-heuristic waiting case keeps previewing the assistant text', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  withAssistantText(store, 'Should I use React or Vue?')
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('waiting') // the "?" heuristic
+  expect(row.pendingRequest).toBe(false) // ...with no server-reported request behind it
+  expect(row.snippet).toBe('Should I use React or Vue?') // so there is no request text to invent
+})
+
+test('#7: control bytes in the question text are stripped from the preview', () => {
+  const store: any = createStore()
+  seed(store)
+  // An OSC 0 title spoof embedded in the question: ESC ] 0 ; ... BEL. The preview reaches raw
+  // stdout via `fleetview ls`, so the escape has to be gone before it can drive the terminal.
+  const esc = String.fromCharCode(27)
+  const bel = String.fromCharCode(7)
+  store.apply('repoA', {
+    type: 'question.asked',
+    properties: { sessionID: 's1', id: 'q1', questions: [{ question: `pick ${esc}]0;pwned${bel} one?` }] },
+  })
+  const { snippet } = store.get('repoA', 's1')
+  expect(snippet).toBe('question: pick ]0;pwned one?')
+  expect(snippet).not.toContain(esc)
+})
+
+test('#7: a long question truncates through the same 80-grapheme cap the assistant snippet uses', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', {
+    type: 'question.asked',
+    properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'x'.repeat(500) }] },
+  })
+  const { snippet } = store.get('repoA', 's1')
+  expect(snippet.length).toBe(80)
+  expect(snippet.startsWith('question: xxx')).toBe(true)
+})
