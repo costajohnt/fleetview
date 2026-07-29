@@ -2228,7 +2228,11 @@ test('the periodic reseed surfaces a permission whose permission.asked frame was
   await waitFor(() => lastFrame().includes('1 working'))
   // it has been pending server-side all along — only its event went missing
   deps.client.listPermissions = vi.fn(() => Promise.resolve([{ id: 'p1', sessionID: 's1', permission: 'bash' }]))
-  await waitFor(() => lastFrame().includes('1 awaiting input')) // recovered on the poll interval
+  // Recovery costs a whole poll pass, and the pass is a chained sequence of awaited client calls
+  // that chainSeed serialises per worktree. waitFor's 3s default is enough locally and not enough
+  // on a loaded CI runner with 40 test files competing for the event loop — this timed out once on
+  // macOS. The condition is still polled, only the ceiling moves.
+  await waitFor(() => lastFrame().includes('1 awaiting input'), 15000)
 })
 
 test('the periodic reseed does not drop a pending request the server list omits', async () => {
@@ -2240,7 +2244,7 @@ test('the periodic reseed does not drop a pending request the server list omits'
   await waitFor(() => lastFrame().includes('1 awaiting input'))
   const questionCalls = () => deps.client.listQuestions.mock.calls.length
   const at = questionCalls()
-  await waitFor(() => questionCalls() > at + 1) // two full poll passes over an empty GET /question
+  await waitFor(() => questionCalls() > at + 1, 15000) // two full poll passes over an empty GET /question; see the timeout note above
   expect(lastFrame()).toContain('1 awaiting input') // additive: it adds, it never sweeps
 })
 
