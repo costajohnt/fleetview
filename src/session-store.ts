@@ -50,6 +50,18 @@ type SessionRecord = {
   listed: boolean
   stopped: boolean
   statusSeq?: number
+  // The `seq` at which something last REMOVED pending entries from this record — a
+  // permission.replied, a question.replied/rejected, or the idle transition that clears both maps.
+  // Only the additive seed reads it, and it is the answer to the resurrection race: an additive
+  // seed carries a snapshot taken at `mark`, and any removal stamped >= mark happened after that
+  // snapshot was taken, so re-adding from it would resurrect a request the user has already
+  // answered. The plain `__seq` watermark cannot cover this on its own — it stamps entries that
+  // EXIST, and the whole problem here is an entry that no longer does, so there is nothing left to
+  // read a stamp off of. Hence one number on the record instead. Deliberately per-record rather
+  // than per-id: a tombstone map per answered id would grow without bound for the sake of letting
+  // one record take an additive add in the same tick another of its requests was answered. Coarse
+  // costs one poll interval of delay in that rare overlap; unbounded memory costs forever.
+  pendingClearedSeq: number
   // Which backend's facts this record is made of, for records that aren't opencode's (absent means
   // opencode). The store stays backend-blind about *meaning* — every rule below is still opencode's
   // semantics — but the three seeds treat one opencode GET as the full truth for a projectKey, and a
@@ -172,6 +184,7 @@ export function createStore() {
         // server reports a stopped session as plain idle, so this is fleetview-side memory of the
         // abort — cleared the moment the session runs again.
         stopped: false,
+        pendingClearedSeq: 0, // nothing has been answered on a record that has just been created
       })
     }
     return sessions.get(k)
@@ -322,6 +335,10 @@ export function createStore() {
           // running session idle, which renders as `completed` — the exact outcome the __seq
           // protocol exists to prevent, with no indication anything was stale.
           statusSeq: prev?.statusSeq,
+          // Carried for the same reason as statusSeq: this path rebuilds the record wholesale, and
+          // resetting it to 0 would fail the additive seed's guard open — re-arming exactly the
+          // resurrection that guard exists to prevent, on any tick where a relist and a reply race.
+          pendingClearedSeq: prev?.pendingClearedSeq ?? 0,
           runStartedAt: prev?.runStartedAt ?? 0,
           runEndedAt: prev?.runEndedAt ?? 0,
           errorAtServerUpdated: anchorUnknown && incoming !== undefined ? incoming : prev?.errorAtServerUpdated ?? 0,
@@ -410,6 +427,7 @@ export function createStore() {
           if (isRunOpen(r)) r.runEndedAt = Date.now() // closes the span ranForMs reports
           r.pendingPermissions.clear()
           r.pendingQuestions.clear()
+          r.pendingClearedSeq = r.statusSeq as number // this clear is a removal; reuse the stamp taken above
         }
         notify()
       } else if (event.type === 'permission.asked') {
@@ -425,6 +443,7 @@ export function createStore() {
         const r = sessions.get(key(projectKey, p.sessionID))
         if (!r) return
         r.pendingPermissions.delete(p.requestID)
+        r.pendingClearedSeq = seq++ // an additive seed holding a snapshot older than this must not re-add
         notify()
       } else if (event.type === 'question.asked') {
         const p = event.properties
@@ -444,6 +463,7 @@ export function createStore() {
         // per the OpenAPI document, and a live reply emitted exactly that. The `?? p.id` fallback
         // stays as cheap insurance against older servers, but it is no longer covering an unknown.
         r.pendingQuestions.delete(p.requestID ?? p.id)
+        r.pendingClearedSeq = seq++ // as permission.replied above
         notify()
       } else if (event.type === 'session.error') {
         const p = event.properties
@@ -660,22 +680,44 @@ export function createStore() {
     // expired while fleetview wasn't watching) UNLESS it was stamped __seq >= mark, meaning it was
     // applied live (e.g. via SSE) after this seed's GET was issued — that entry is event-fresh and
     // must survive even though the (now-stale) snapshot doesn't know about it yet.
-    seedPermissions(projectKey: string, permissionList: Array<PermissionAsked & PendingMeta>, mark = Infinity) {
+    //
+    // `additive` turns the replace off and leaves only the add half: entries the server reports and
+    // the store doesn't have are inserted, and nothing is ever deleted. That is what makes the
+    // method safe to run on a timer. The periodic pass could not use the authoritative form — an
+    // omission from one GET /permission would delete a genuinely pending request, turning a rare
+    // reconnect-only drop into a recurring one — so before this it ran statuses only, and a lost
+    // `permission.asked`/`question.asked` frame had no recovery path at all short of a reconnect or
+    // a restart. A dropped `session.status` self-healed within a poll; a dropped permission sat
+    // there rendering "working" with the run blocked behind it. The additive pass closes that,
+    // while the authoritative replace stays exclusively on the mount/reconnect path, which is the
+    // only place fleetview has actually missed the answers as well as the asks.
+    seedPermissions(projectKey: string, permissionList: Array<PermissionAsked & PendingMeta>, mark = Infinity, { additive = false }: { additive?: boolean } = {}) {
       const fresh = permissionList ?? []
       const freshIds = new Set(fresh.map((perm) => perm.id))
-      for (const r of sessions.values()) {
-        // `r.origin`: opencode's GET /permission never carries the synthetic `<id>:denied` entry a
-        // process backend's "needs input" row rests on, so an authoritative delete here would drop
-        // the one thing saying a human still has to unblock that run.
-        if (r.projectKey !== projectKey || r.origin) continue
-        for (const [id, entry] of r.pendingPermissions) {
-          if (!freshIds.has(id) && entry.__seq < mark) r.pendingPermissions.delete(id)
+      if (!additive) {
+        for (const r of sessions.values()) {
+          // `r.origin`: opencode's GET /permission never carries the synthetic `<id>:denied` entry a
+          // process backend's "needs input" row rests on, so an authoritative delete here would drop
+          // the one thing saying a human still has to unblock that run.
+          if (r.projectKey !== projectKey || r.origin) continue
+          for (const [id, entry] of r.pendingPermissions) {
+            if (!freshIds.has(id) && entry.__seq < mark) r.pendingPermissions.delete(id)
+          }
         }
       }
       fresh.forEach((perm, i) => {
         if (!perm.sessionID) return
         const r = upsert(projectKey, perm.sessionID)
         if (!r) return
+        // Additive adds only what is missing, and only where it has the right to. `r.origin`: the
+        // same rule the sweep above follows — a claude/copilot row is not opencode's to write.
+        // `pendingClearedSeq >= mark`: see the field's comment — the snapshot in hand predates an
+        // answer, so anything it still lists may already be answered. Skipping the record entirely
+        // for one interval is the honest response; the next poll re-reads the server.
+        // Not touching an entry already present is the third rule: it carries live `__seq`/
+        // `__askedAt` stamps that order the queue and drive the "waiting Nm" clock, and a seed
+        // overwrite would reset them to the moment fleetview happened to re-read the list.
+        if (additive && (r.origin || r.pendingClearedSeq >= mark || r.pendingPermissions.has(perm.id))) return
         const existing = r.pendingPermissions.get(perm.id)
         // New-from-seed entries stamp BELOW mark, preserving list (oldest-first) order — M3 — so
         // they sort ahead of anything applied live during the seed's flight (seq >= mark).
@@ -690,20 +732,24 @@ export function createStore() {
       notify()
     },
 
-    // I1/I2: same authoritative-replace + watermark contract as seedPermissions, for GET /question.
-    seedQuestions(projectKey: string, questionList: Array<QuestionAsked & PendingMeta>, mark = Infinity) {
+    // I1/I2: same authoritative-replace + watermark contract as seedPermissions, and the same
+    // `additive` mode for the periodic pass — see there for both, including the answered-race.
+    seedQuestions(projectKey: string, questionList: Array<QuestionAsked & PendingMeta>, mark = Infinity, { additive = false }: { additive?: boolean } = {}) {
       const fresh = questionList ?? []
       const freshIds = new Set(fresh.map((q) => q.id))
-      for (const r of sessions.values()) {
-        if (r.projectKey !== projectKey || r.origin) continue // same as seedPermissions: not opencode's to sweep
-        for (const [id, entry] of r.pendingQuestions) {
-          if (!freshIds.has(id) && entry.__seq < mark) r.pendingQuestions.delete(id)
+      if (!additive) {
+        for (const r of sessions.values()) {
+          if (r.projectKey !== projectKey || r.origin) continue // same as seedPermissions: not opencode's to sweep
+          for (const [id, entry] of r.pendingQuestions) {
+            if (!freshIds.has(id) && entry.__seq < mark) r.pendingQuestions.delete(id)
+          }
         }
       }
       fresh.forEach((q, i) => {
         if (!q.sessionID) return
         const r = upsert(projectKey, q.sessionID)
         if (!r) return
+        if (additive && (r.origin || r.pendingClearedSeq >= mark || r.pendingQuestions.has(q.id))) return
         const existing = r.pendingQuestions.get(q.id)
         const seedSeq = mark - fresh.length + i
         r.pendingQuestions.set(q.id, {

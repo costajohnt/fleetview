@@ -365,12 +365,20 @@ export function App({
     // `/session/status` timed out, and blind-re-add a question the fresh list had correctly
     // dropped — resurrecting a request the server has already accepted an answer for, which is
     // exactly what the fallback exists to avoid.
-    // `pending: false` seeds statuses only. The pending lists are replaced *authoritatively* — an
-    // entry missing from the response is dropped — which is right when reconnecting after missing
-    // events, but wrong to repeat on a timer: if `GET /permission` ever omitted a genuinely pending
-    // request, a rare reconnect-only drop would become a recurring one. Statuses carry no such
-    // risk and are what the periodic pass exists for, so the timer takes that half alone.
-    const seedLiveState = async (worktree: any, { pending = true, closeRuns = false, relist = false }: any = {}) => {
+    // `additive: true` is the periodic pass's form of the pending seed. The default replace is
+    // *authoritative* — an entry missing from the response is dropped — which is right when
+    // reconnecting after missing events, but wrong to repeat on a timer: if `GET /permission` ever
+    // omitted a genuinely pending request, a rare reconnect-only drop would become a recurring one.
+    // So the timer used to seed statuses only. That left a real hole: a lost `session.status` frame
+    // self-heals within one poll, but a lost `permission.asked`/`question.asked` frame had no
+    // recovery path at all, and the row sat rendering "working" with a blocked run behind it and no
+    // token spend until the user restarted. Systematic rather than rare, because opencode's event
+    // stream is per-directory and a dispatched session runs in its own git worktree — statuses for
+    // those still refresh (the poll hits GET /session/status per worktree), permissions and
+    // questions had no equivalent. The additive mode only ADDS what the store is missing and never
+    // deletes, so the timer can run it without the omission risk, and the authoritative replace
+    // stays exactly where it was: mount, reconnect, and the peek reconcile paths.
+    const seedLiveState = async (worktree: any, { pending = true, additive = false, closeRuns = false, relist = false }: any = {}) => {
       // Before anything else, because `setSessions` is the only thing that learns which sessions are
       // subagents, and every seed below can otherwise mint a row for one. A subagent spawned since
       // the last listing is unknown, so its first `session.status` creates a record; this is what
@@ -408,11 +416,11 @@ export function App({
       await Promise.all([
         client
           .listPermissions(worktree)
-          .then((p: any) => store.seedPermissions(worktree, p, mark))
+          .then((p: any) => store.seedPermissions(worktree, p, mark, { additive }))
           .catch(() => { outcome.permissions = false }),
         client
           .listQuestions(worktree)
-          .then((q: any) => store.seedQuestions(worktree, q, mark))
+          .then((q: any) => store.seedQuestions(worktree, q, mark, { additive }))
           .catch(() => { outcome.questions = false }),
       ])
       return outcome
@@ -626,7 +634,11 @@ export function App({
             // A healthy poll: a session that has gone absent finished within the last interval, so
             // its run span can be closed. The reconnect path deliberately does not pass this — the
             // stream may have been down for an hour and the run may have ended at the start of it.
-            chainSeed(p.worktree, { pending: false, closeRuns: true, relist: true })
+            // `additive`, not the default replace: the pending lists are refreshed by adding what
+            // the server reports and the store lacks — a permission.asked/question.asked frame the
+            // stream dropped — and never by deleting. See seedLiveState for why the authoritative
+            // form must not run on a timer.
+            chainSeed(p.worktree, { additive: true, closeRuns: true, relist: true })
           }
         }
       } catch {

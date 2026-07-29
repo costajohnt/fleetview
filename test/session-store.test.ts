@@ -1260,3 +1260,105 @@ test('the synthetic "needs input" permission survives an authoritative pending s
   store.seedQuestions('repoA', [], store.seedMark())
   expect(store.get('repoA', 'c1').status).toBe('waiting')
 })
+
+// --- The dropped-frame recovery path: the periodic pass reseeds pending lists ADDITIVELY ---
+//
+// Field report: three sessions dispatched against opencode, two sat rendering "working" for many
+// minutes with no token spend. They were blocked on a permission prompt whose `permission.asked`
+// frame never reached the store, so `derive` was right to say running — `pendingPermissions` was
+// genuinely empty. Nothing on a healthy stream ever re-read the server's pending lists, so there
+// was no way back short of interrupting the session or restarting fleetview.
+
+test('a dropped permission.asked is recovered by an additive seed — the row reaches waiting', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  expect(store.get('repoA', 's1').status).toBe('running') // the symptom: "working", forever
+  // s2 is blocked on a permission the store knows about and this GET happens not to list — the
+  // omission the authoritative replace would act on, and the reason it cannot run on a timer.
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's2', id: 'p2', permission: 'edit' } })
+  // the server has had this pending the whole time; its event was never delivered
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 's1', permission: 'bash' }], store.seedMark(), { additive: true })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('waiting')
+  expect(row.pendingRequest).toBe(true)
+  expect(row.waitingFor).toBe('permission prompt')
+  expect(store.pendingFor('repoA', 's2').map((p: any) => p.id)).toEqual(['p2']) // added, never swept
+})
+
+test('a dropped question.asked is recovered by an additive seed — the row reaches waiting', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  expect(store.get('repoA', 's1').status).toBe('running')
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's2', id: 'q2', questions: [] } })
+  store.seedQuestions('repoA', [{ id: 'q1', sessionID: 's1', questions: [] }], store.seedMark(), { additive: true })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('waiting')
+  expect(row.pendingRequest).toBe(true)
+  expect(row.waitingFor).toBe('input needed')
+  expect(store.pendingQuestionsFor('repoA', 's2').map((q: any) => q.id)).toEqual(['q2']) // added, never swept
+})
+
+// The answered-race. The additive seed's snapshot is taken at `mark`; a reply that lands while the
+// GET is in flight removes the entry, and a naive re-add would resurrect a request the server has
+// already accepted an answer for — the peek UI would re-open a prompt the user just dismissed.
+test('an additive seed does not resurrect a permission answered while its GET was in flight', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
+  const mark = store.seedMark() // the poll issues GET /permission here; the response will still list p1
+  store.apply('repoA', { type: 'permission.replied', properties: { sessionID: 's1', requestID: 'p1', reply: 'once' } })
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 's1', permission: 'bash' }], mark, { additive: true })
+  expect(store.pendingFor('repoA', 's1')).toEqual([])
+  expect(store.get('repoA', 's1').status).not.toBe('waiting')
+})
+
+test('an additive seed does not resurrect a question answered while its GET was in flight', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [] } })
+  const mark = store.seedMark()
+  store.apply('repoA', { type: 'question.replied', properties: { sessionID: 's1', requestID: 'q1' } })
+  store.seedQuestions('repoA', [{ id: 'q1', sessionID: 's1', questions: [] }], mark, { additive: true })
+  expect(store.pendingQuestionsFor('repoA', 's1')).toEqual([])
+})
+
+// The property the mount/reconnect path must keep: there fleetview may have missed the answers as
+// well as the asks, so the fresh list is the whole truth and an absent entry is a dropped one.
+test('the mount/reconnect path still replaces authoritatively — an absent entry is still dropped', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [] } })
+  const mark = store.seedMark()
+  store.seedPermissions('repoA', [], mark) // no options — the default is the replace
+  store.seedQuestions('repoA', [], mark)
+  expect(store.pendingFor('repoA', 's1')).toEqual([])
+  expect(store.pendingQuestionsFor('repoA', 's1')).toEqual([])
+  expect(store.get('repoA', 's1').status).toBe('idle')
+})
+
+// The additive seed inherits the sweep's rule about foreign rows: a claude/copilot row shares the
+// projectKey but is never in opencode's payloads, and its synthetic `<id>:denied` permission is
+// fleetview's own. opencode has no business writing pending state onto one.
+test('an additive seed leaves a non-opencode row alone', () => {
+  const store: any = createStore()
+  seed(store)
+  store.noteOrigin('repoA', 'c1', 'claude')
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 'c1', permission: 'bash' }], store.seedMark(), { additive: true })
+  expect(store.pendingFor('repoA', 'c1')).toEqual([])
+})
+
+// An entry the store already has keeps its own stamps: __askedAt drives the "waiting Nm" clock, and
+// re-reading the list every poll must not restart that clock at each read.
+test('an additive seed does not restamp an entry the store already has', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', {
+    type: 'permission.asked',
+    properties: { sessionID: 's1', id: 'p1', permission: 'bash', __askedAt: 1000 },
+  })
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 's1', permission: 'bash' }], store.seedMark(), { additive: true })
+  expect(store.get('repoA', 's1').waitingSince).toBe(1000)
+})
