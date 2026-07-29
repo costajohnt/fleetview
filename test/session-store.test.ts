@@ -1260,3 +1260,211 @@ test('the synthetic "needs input" permission survives an authoritative pending s
   store.seedQuestions('repoA', [], store.seedMark())
   expect(store.get('repoA', 'c1').status).toBe('waiting')
 })
+
+// --- The dropped-frame recovery path: the periodic pass reseeds pending lists ADDITIVELY ---
+//
+// Field report: three sessions dispatched against opencode, two sat rendering "working" for many
+// minutes with no token spend. They were blocked on a permission prompt whose `permission.asked`
+// frame never reached the store, so `derive` was right to say running — `pendingPermissions` was
+// genuinely empty. Nothing on a healthy stream ever re-read the server's pending lists, so there
+// was no way back short of interrupting the session or restarting fleetview.
+
+test('a dropped permission.asked is recovered by an additive seed — the row reaches waiting', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  expect(store.get('repoA', 's1').status).toBe('running') // the symptom: "working", forever
+  // s2 is blocked on a permission the store knows about and this GET happens not to list — the
+  // omission the authoritative replace would act on, and the reason it cannot run on a timer.
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's2', id: 'p2', permission: 'edit' } })
+  // the server has had this pending the whole time; its event was never delivered
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 's1', permission: 'bash' }], store.seedMark(), { additive: true })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('waiting')
+  expect(row.pendingRequest).toBe(true)
+  expect(row.waitingFor).toBe('permission prompt')
+  expect(store.pendingFor('repoA', 's2').map((p: any) => p.id)).toEqual(['p2']) // added, never swept
+})
+
+test('a dropped question.asked is recovered by an additive seed — the row reaches waiting', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  expect(store.get('repoA', 's1').status).toBe('running')
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's2', id: 'q2', questions: [] } })
+  store.seedQuestions('repoA', [{ id: 'q1', sessionID: 's1', questions: [] }], store.seedMark(), { additive: true })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('waiting')
+  expect(row.pendingRequest).toBe(true)
+  expect(row.waitingFor).toBe('input needed')
+  expect(store.pendingQuestionsFor('repoA', 's2').map((q: any) => q.id)).toEqual(['q2']) // added, never swept
+})
+
+// The answered-race. The additive seed's snapshot is taken at `mark`; a reply that lands while the
+// GET is in flight removes the entry, and a naive re-add would resurrect a request the server has
+// already accepted an answer for — the peek UI would re-open a prompt the user just dismissed.
+test('an additive seed does not resurrect a permission answered while its GET was in flight', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
+  const mark = store.seedMark() // the poll issues GET /permission here; the response will still list p1
+  store.apply('repoA', { type: 'permission.replied', properties: { sessionID: 's1', requestID: 'p1', reply: 'once' } })
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 's1', permission: 'bash' }], mark, { additive: true })
+  expect(store.pendingFor('repoA', 's1')).toEqual([])
+  expect(store.get('repoA', 's1').status).not.toBe('waiting')
+})
+
+test('an additive seed does not resurrect a question answered while its GET was in flight', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [] } })
+  const mark = store.seedMark()
+  store.apply('repoA', { type: 'question.replied', properties: { sessionID: 's1', requestID: 'q1' } })
+  store.seedQuestions('repoA', [{ id: 'q1', sessionID: 's1', questions: [] }], mark, { additive: true })
+  expect(store.pendingQuestionsFor('repoA', 's1')).toEqual([])
+})
+
+// The property the mount/reconnect path must keep: there fleetview may have missed the answers as
+// well as the asks, so the fresh list is the whole truth and an absent entry is a dropped one.
+test('the mount/reconnect path still replaces authoritatively — an absent entry is still dropped', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [] } })
+  const mark = store.seedMark()
+  store.seedPermissions('repoA', [], mark) // no options — the default is the replace
+  store.seedQuestions('repoA', [], mark)
+  expect(store.pendingFor('repoA', 's1')).toEqual([])
+  expect(store.pendingQuestionsFor('repoA', 's1')).toEqual([])
+  expect(store.get('repoA', 's1').status).toBe('idle')
+})
+
+// The additive seed inherits the sweep's rule about foreign rows: a claude/copilot row shares the
+// projectKey but is never in opencode's payloads, and its synthetic `<id>:denied` permission is
+// fleetview's own. opencode has no business writing pending state onto one.
+test('an additive seed leaves a non-opencode row alone', () => {
+  const store: any = createStore()
+  seed(store)
+  store.noteOrigin('repoA', 'c1', 'claude')
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 'c1', permission: 'bash' }], store.seedMark(), { additive: true })
+  expect(store.pendingFor('repoA', 'c1')).toEqual([])
+})
+
+// An entry the store already has keeps its own stamps: __askedAt drives the "waiting Nm" clock, and
+// re-reading the list every poll must not restart that clock at each read.
+test('an additive seed does not restamp an entry the store already has', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', {
+    type: 'permission.asked',
+    properties: { sessionID: 's1', id: 'p1', permission: 'bash', __askedAt: 1000 },
+  })
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 's1', permission: 'bash' }], store.seedMark(), { additive: true })
+  expect(store.get('repoA', 's1').waitingSince).toBe(1000)
+})
+
+// --- #7: a pending request preempts the assistant snippet in the row preview ---
+//
+// The field bug: the header counted the session as "awaiting input" while its row previewed
+// "Updating opencode agent context with copilot-instructions.md", the last tool-progress line the
+// model had printed. The reporter read the row and concluded the session had frozen mid-work.
+
+// Puts a session in the exact state the report describes: an assistant text part landed, and then
+// the session asked for something.
+const withAssistantText = (store: any, text: string) => {
+  store.apply('repoA', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm1', role: 'assistant' } } })
+  store.apply('repoA', { type: 'message.part.updated', properties: { sessionID: 's1', part: { type: 'text', messageID: 'm1', text } } })
+}
+
+test('#7: a pending question previews the question, not the last assistant output', () => {
+  const store: any = createStore()
+  seed(store)
+  withAssistantText(store, 'Updating opencode agent context with copilot-instructions.md')
+  store.apply('repoA', {
+    type: 'question.asked',
+    properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'Which framework should I use?' }] },
+  })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('waiting')
+  expect(row.snippet).toBe('question: Which framework should I use?')
+})
+
+test('#7: a pending permission previews the permission and its patterns', () => {
+  const store: any = createStore()
+  seed(store)
+  withAssistantText(store, 'Updating opencode agent context with copilot-instructions.md')
+  store.apply('repoA', {
+    type: 'permission.asked',
+    properties: { sessionID: 's1', id: 'p1', permission: 'bash', patterns: ['git push', 'rm -rf'] },
+  })
+  expect(store.get('repoA', 's1').snippet).toBe('permission: bash git push, rm -rf')
+})
+
+test('#7: a permission outranks a question in the preview, matching waitingFor', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'Which one?' }] } })
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
+  const row = store.get('repoA', 's1')
+  expect(row.waitingFor).toBe('permission prompt')
+  expect(row.snippet).toBe('permission: bash')
+})
+
+test('#7: answering the question hands the preview back to the assistant snippet', () => {
+  const store: any = createStore()
+  seed(store)
+  withAssistantText(store, 'assistant reply')
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'Which one?' }] } })
+  expect(store.get('repoA', 's1').snippet).toBe('question: Which one?')
+  store.apply('repoA', { type: 'question.replied', properties: { sessionID: 's1', requestID: 'q1' } })
+  expect(store.get('repoA', 's1').snippet).toBe('assistant reply')
+})
+
+test('#7 regression: with no pending request the row still previews the assistant snippet', () => {
+  const store: any = createStore()
+  seed(store)
+  withAssistantText(store, 'assistant reply')
+  const row = store.get('repoA', 's1')
+  expect(row.pendingRequest).toBe(false)
+  expect(row.snippet).toBe('assistant reply')
+})
+
+test('#7 regression: the prose-heuristic waiting case keeps previewing the assistant text', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  withAssistantText(store, 'Should I use React or Vue?')
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('waiting') // the "?" heuristic
+  expect(row.pendingRequest).toBe(false) // ...with no server-reported request behind it
+  expect(row.snippet).toBe('Should I use React or Vue?') // so there is no request text to invent
+})
+
+test('#7: control bytes in the question text are stripped from the preview', () => {
+  const store: any = createStore()
+  seed(store)
+  // An OSC 0 title spoof embedded in the question: ESC ] 0 ; ... BEL. The preview reaches raw
+  // stdout via `fleetview ls`, so the escape has to be gone before it can drive the terminal.
+  const esc = String.fromCharCode(27)
+  const bel = String.fromCharCode(7)
+  store.apply('repoA', {
+    type: 'question.asked',
+    properties: { sessionID: 's1', id: 'q1', questions: [{ question: `pick ${esc}]0;pwned${bel} one?` }] },
+  })
+  const { snippet } = store.get('repoA', 's1')
+  expect(snippet).toBe('question: pick ]0;pwned one?')
+  expect(snippet).not.toContain(esc)
+})
+
+test('#7: a long question truncates through the same 80-grapheme cap the assistant snippet uses', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', {
+    type: 'question.asked',
+    properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'x'.repeat(500) }] },
+  })
+  const { snippet } = store.get('repoA', 's1')
+  expect(snippet.length).toBe(80)
+  expect(snippet.startsWith('question: xxx')).toBe(true)
+})

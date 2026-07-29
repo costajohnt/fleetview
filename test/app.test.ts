@@ -2215,19 +2215,33 @@ test('an unrelated endpoint failing does not resurrect an answered question', as
   expect(lastFrame()).not.toContain('? question') // stays answered
 })
 
-// The periodic pass reconciles statuses only. Repeating the authoritative pending-replace on a
-// timer would turn any omission from GET /permission into a recurring dropped request rather than
-// a rare one, and the pending lists already self-heal on idle and on reconnect.
-test('the periodic reseed refreshes statuses without replacing pending requests', async () => {
+// The periodic pass refreshes the pending lists ADDITIVELY. Repeating the authoritative replace on
+// a timer would turn any omission from GET /permission into a recurring dropped request rather than
+// a rare one; adding what the store is missing carries no such risk, and it is the only recovery
+// path for a `permission.asked` frame the stream dropped on an otherwise healthy connection.
+test('the periodic reseed surfaces a permission whose permission.asked frame was never delivered', async () => {
   const deps = withVocab(makeDeps())
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), projectPollMs: 60 }))
   await waitFor(() => lastFrame().includes('fix tests'))
-  const statusCalls = () => deps.client.sessionStatus.mock.calls.length
-  const permissionCalls = () => deps.client.listPermissions.mock.calls.length
-  const permissionsAtStart = permissionCalls()
-  const statusesAtStart = statusCalls()
-  await waitFor(() => statusCalls() > statusesAtStart) // the timer fired and reconciled status
-  expect(permissionCalls()).toBe(permissionsAtStart) // but did not re-replace the pending lists
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  await waitFor(() => lastFrame().includes('1 working'))
+  // it has been pending server-side all along — only its event went missing
+  deps.client.listPermissions = vi.fn(() => Promise.resolve([{ id: 'p1', sessionID: 's1', permission: 'bash' }]))
+  await waitFor(() => lastFrame().includes('1 awaiting input')) // recovered on the poll interval
+})
+
+test('the periodic reseed does not drop a pending request the server list omits', async () => {
+  const deps = withVocab(makeDeps())
+  const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), projectPollMs: 60 }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  onEvent('/x/alpha', { type: 'question.asked', properties: { sessionID: 's1', id: 'q9', questions: [] } })
+  await waitFor(() => lastFrame().includes('1 awaiting input'))
+  const questionCalls = () => deps.client.listQuestions.mock.calls.length
+  const at = questionCalls()
+  await waitFor(() => questionCalls() > at + 1) // two full poll passes over an empty GET /question
+  expect(lastFrame()).toContain('1 awaiting input') // additive: it adds, it never sweeps
 })
 
 // "Clear the input; press twice to exit" — quitting on the first press lost the view for anyone
