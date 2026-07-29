@@ -690,6 +690,39 @@ async function rosterLoop(
   }
 }
 
+// Taking the terminal back from a child that owned it — an attached session, or $EDITOR — is three
+// steps, and the order matters.
+//
+// 1. Reopen the gate. That also re-arms mouse reporting and re-hides the cursor the child showed.
+// 2. `instance.clear()`. Ink erases the frame it thinks it last wrote and then re-points its
+//    skip-the-identical-frame check at that frame (ink 7's clear() calls log.sync() straight after
+//    log.clear()). Both halves are pure bookkeeping here: nothing of Ink's survived the child.
+// 3. Wipe the screen. This is the part that was missing, and without it the roster comes back
+//    wrong even though Ink does repaint. Ink's repaint is written RELATIVE to wherever the cursor
+//    happens to be: eraseLines(n) for the n lines it believes it last wrote, then the frame. The
+//    child painted the whole screen and left the cursor somewhere arbitrary, so the roster lands
+//    in the middle of the session's leftovers and erases only its own height. The fragments sit
+//    there until some later frame's erase happens to cover them — which is the reported "press any
+//    key and it fixes itself" (#5). Clearing also parks the cursor at home, so Ink's next frame
+//    lands at the top of a blank screen, the same place Ink puts one when it clears the terminal
+//    itself. It goes through the gate rather than round it, so a clear can never reach a terminal
+//    some other child already owns.
+//
+// The repaint does not need forcing on top of this: App renders null for the whole attachment
+// (`if (attached) return null`) and the roster the instant it ends, so the frame after a resume can
+// never be byte-identical to the one clear() just re-armed the skip check with, and Ink writes it.
+// Ink 7 has a public useApp().suspendTerminal() that does all of the above, but it is callable only
+// from inside the tree and it also takes over the stdin handoff that pty-host owns — not a trade
+// worth making for a screen clear.
+const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
+
+// TODO(types): `out` (gated stdout) and `instance` (Ink render handle) come from untyped modules.
+export function reclaimTerminal(out: any, instance: any) {
+  out.open()
+  instance?.clear()
+  out.write(CLEAR_SCREEN)
+}
+
 // Hands the prompt to $VISUAL/$EDITOR through a temp file and returns whatever comes back. Resolves
 // to undefined when there is no editor configured or it failed, which App reads as "leave the
 // prompt alone" — losing a half-written prompt to a missing $EDITOR would be a poor trade.
@@ -708,14 +741,12 @@ export async function editPrompt(text: string, out: any, instance: any) {
     out.close()
     // `sh -c` so EDITOR can carry flags, which is normal ("code -w", "emacsclient -nw").
     const result = spawnSync('sh', ['-c', `${editor} "$1"`, 'sh', file], { stdio: 'inherit' })
-    out.open()
-    instance?.clear()
+    reclaimTerminal(out, instance)
     if (result.error || result.status !== 0) return undefined
     // Editors add a trailing newline; a prompt should not end in one.
     return readFileSync(file, 'utf8').replace(/\n+$/, '')
   } catch {
-    out.open()
-    instance?.clear()
+    reclaimTerminal(out, instance)
     return undefined
   } finally {
     try {
@@ -762,8 +793,7 @@ export async function attachLoop(action: any, out: any, instance: any, backends:
     // cwd matches the pty path below: a process-backed resume is cwd-scoped, so without it
     // `claude --resume` fails "No conversation found" from fleetview's directory.
     const result = spawnSync(command, argv, { stdio: 'inherit', cwd: action.worktree })
-    out.open()
-    instance?.clear()
+    reclaimTerminal(out, instance)
     return result.error ? { message: `couldn't launch opencode: ${result.error.message}` } : undefined
   }
   let target = action
@@ -778,15 +808,12 @@ export async function attachLoop(action: any, out: any, instance: any, backends:
       // double-press guard. opencode sessions live on the server — detach loses nothing there.
       busyDetachGuard: (target.backend ?? DEFAULT_BACKEND) !== DEFAULT_BACKEND,
       onSuspend: () => out.close(),
-      onResume: () => {
-        out.open()
-        // Ink skips writing a frame identical to the last one it wrote. The attached session
-        // cleared the screen behind its back, so without dropping that memory the roster renders
-        // to nothing and fleetview comes back to a blank terminal.
-        instance?.clear()
-      },
+      // Every end of an attachment lands here, including an Alt+1..9 switch on its way to the next
+      // child: reclaiming and re-clearing between two children costs one wipe the next child paints
+      // straight over.
+      onResume: () => reclaimTerminal(out, instance),
     }).catch((error) => {
-      out.open()
+      reclaimTerminal(out, instance)
       return { type: 'exit', exitCode: 1, drewNothing: true, ms: 0, message: `couldn't launch opencode: ${error.message}` }
     })
     // A detach is reported back to App with which session was left behind: the roster shows the

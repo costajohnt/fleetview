@@ -856,7 +856,7 @@ const withEditor = async (script: any, fn: any) => {
   }
 }
 
-const fakeGate = () => ({ closed: 0, opened: 0, close() { this.closed++ }, open() { this.opened++ } })
+const fakeGate = () => ({ closed: 0, opened: 0, writes: [] as string[], close() { this.closed++ }, open() { this.opened++ }, write(chunk: string) { this.writes.push(chunk) } })
 
 test('editPrompt returns what the editor wrote, and hands the terminal back', async () => {
   const gate = fakeGate()
@@ -867,7 +867,10 @@ test('editPrompt returns what the editor wrote, and hands the terminal back', as
   expect(result).toBe('edited by the editor')
   // the render gate must close for the editor and reopen after, or the two draw over each other
   expect([gate.closed, gate.opened]).toEqual([1, 1])
-  expect(cleared).toHaveBeenCalled() // Ink skips a frame identical to its last; the editor cleared the screen
+  expect(cleared).toHaveBeenCalled() // drops the frame Ink thinks is still on screen
+  // …and the screen is wiped through the gate, or Ink's next frame paints relative to wherever the
+  // editor left the cursor and the editor's leftovers stay up around it (#5).
+  expect(gate.writes).toEqual(['\x1b[2J\x1b[3J\x1b[H'])
 })
 
 test('editPrompt passes the current prompt in, and strips the trailing newline editors add', async () => {
