@@ -15,8 +15,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS bills at 10x Linux; run it on main only, PRs get Linux.
-        os: ${{ github.event_name == 'push' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        # Both platforms on both events. This used to be main-only for macOS, because macOS bills
+        # at 10x Linux and the repo was private. The repo is public now and Actions on public repos
+        # run free, so the reason is gone — and it had a real cost: a test that only flaked under
+        # macOS timing reached main, because the PR that introduced it was never run there. A
+        # required status check is only worth as much as the coverage behind it.
+        os: [ubuntu-latest, macos-latest]
     steps:
       # Pinned to commit SHAs, not tags: `v4` is a moving pointer its owner can repoint, so a tag ref
       # is a standing "run whatever this org publishes next" in a job that has our checkout. The
