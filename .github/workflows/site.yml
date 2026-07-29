@@ -45,12 +45,8 @@ jobs:
         with:
           path: _site
 
-  # Deploy is manual for now. Pages is not enabled on this repo, and deploy-pages fails with a
-  # 404 when it isn't, which reddens every push that touches the site. Once Pages is on (repo
-  # public, source "GitHub Actions"), drop the `if` and pushes publish again.
   deploy:
     needs: build
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
