@@ -243,13 +243,19 @@ export function App({
   const [notice, setNotice] = useState<string | null>(null) // transient one-liner above the input (stop-arm, dispatch failure)
   // Ctrl+X is a two-stage destructive action ("Stop the session; press again within two seconds to
   // delete it"), so the arm has to survive re-renders without triggering them — a ref, not state.
-  const stopArm = useRef<{ key: string; at: number } | null>(null) // the row/group a first ^x armed, and when — a second ^x within 2s of `at` deletes
+  // `held` is where the row sat when it was armed (section key + sort time), so the stop the first
+  // press performs doesn't reshuffle the row out from under the second one — see stateGroups.
+  const stopArm = useRef<{ key: string; at: number; held?: { group: string | undefined; updatedAt: number } } | null>(null) // the row/group a first ^x armed, and when — a second ^x within 2s of `at` deletes
   // "Pasted text over 800 characters or more than two lines collapses to a [Pasted text #N]
   // placeholder." A wall of pasted text otherwise fills the prompt and pushes the roster off
   // screen; the placeholder keeps the input readable and the real text is restored on dispatch.
   const pastes = useRef<string[]>([])
   const ctrlCArmed = useRef<number | null>(null) // timestamp of a first Ctrl+C on an empty input
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The hold stateGroups applies while a ^x is armed is time-bound, and nothing else necessarily
+  // repaints when it lapses — this repaints once, so the row settles into its real section instead
+  // of sitting in the old one until some unrelated event happens to render.
+  const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [target, setTarget] = useState<any>(null) // {projectKey, id, title} captured when a dialog opens; store churn must not retarget it
   // True while a child PTY owns the terminal. Every input hook goes inactive so Ink releases
   // stdin, and the render collapses to nothing so a background status change can't repaint over
@@ -815,7 +821,14 @@ export function App({
     // for an empty one, so the view keeps its shape. Assignment is first-match-wins so the groups
     // stay a partition and ↑/↓ never visits a session twice: a waiting session with an open pull
     // request is ready for review, because agent view puts that group higher.
-    const groupFor = (s: any) => STATE_GROUPS.find((g) => g.match(s))?.key
+    // #15: the first ^x stops the session, and a stopped session belongs in `completed` — but
+    // moving it there while the confirming second press is still pending makes the user chase the
+    // row down the board. While the arm is live the row keeps the section and sort position it had
+    // when armed; by the time the arm lapses the row is either deleted or no longer armed.
+    const held = stopArm.current?.held && Date.now() - stopArm.current.at < 2000 ? stopArm.current : null
+    const isHeld = (s: any) => held?.key === `${s.projectKey}:${s.id}`
+    const groupFor = (s: any) => (isHeld(s) ? held!.held!.group : STATE_GROUPS.find((g) => g.match(s))?.key)
+    const sortTime = (s: any) => (isHeld(s) ? held!.held!.updatedAt : s.updatedAt)
     return STATE_GROUPS.map((g) => ({
       projectKey: `state:${g.key}`,
       repoName: g.label,
@@ -831,7 +844,7 @@ export function App({
           (a: any, b: any) =>
             (a.rank ?? Infinity) - (b.rank ?? Infinity) ||
             (isProtectedFromFold(a) ? -1 : 0) - (isProtectedFromFold(b) ? -1 : 0) ||
-            b.updatedAt - a.updatedAt,
+            sortTime(b) - sortTime(a),
         ),
     })).filter((g) => g.sessions.length > 0 || g.empty)
   }
@@ -995,6 +1008,7 @@ export function App({
     }, ms)
   }, [])
   useEffect(() => () => { if (noticeTimer.current) clearTimeout(noticeTimer.current) }, [])
+  useEffect(() => () => { if (armTimer.current) clearTimeout(armTimer.current) }, [])
 
   // Attaching no longer ends fleetview. The host runs `opencode attach` in a child PTY and hands back
   // a promise that settles on detach, so this component stays mounted — streams included — and
@@ -1425,7 +1439,11 @@ export function App({
       return
     }
     const armedAt = Date.now()
-    stopArm.current = { key: armKey, at: armedAt }
+    // Where the row is right now, before the abort marks it stopped — stateGroups holds it here
+    // until the arm lapses so the confirming press targets a row that hasn't moved (#15).
+    stopArm.current = { key: armKey, at: armedAt, held: { group: STATE_GROUPS.find((g) => g.match(row))?.key, updatedAt: row.updatedAt } }
+    if (armTimer.current) clearTimeout(armTimer.current)
+    armTimer.current = setTimeout(rerender, 2050) // just past the window, so the released row repaints
     // The arm is immediate — the two-press window must not wait on the network — but the notice
     // reports the outcome, not the intention. It used to say `stopped "<title>"` before the abort
     // had even been sent, and never corrected itself when the abort threw: a session that is still
