@@ -1614,10 +1614,12 @@ test('M4: successful stop on a heuristic-waiting session clears the heuristic �
   stdin.write('\x18')
   await tick()
   expect(deps.client.abortSession).toHaveBeenCalledWith('s1', '/x/alpha')
+  // The notice reads stopped, not completed — the user stopped it, no result. It lands while the
+  // row is still held in needs input by the pending second ^x (#15).
+  await waitFor(() => lastFrame().includes('stopped'))
   // The header text always shows now (empty categories keep their placeholder), so the proof the
-  // row left waiting is that needs input is back to its placeholder and the row reads stopped.
-  await waitFor(() => sectionBody(lastFrame(), 'needs input').includes('a session is asking you something'))
-  expect(lastFrame()).toContain('stopped') // not 'completed' — the user stopped it, no result
+  // row left waiting is that needs input falls back to its placeholder once the arm lapses.
+  await waitFor(() => sectionBody(lastFrame(), 'needs input').includes('a session is asking you something'), 5000)
 })
 
 test('main: ^x on an idle session still stops it, and arms the delete', async () => {
@@ -1666,6 +1668,33 @@ test('a failed session renders red and lands in the completed group', async () =
 })
 
 // --- Phase 2: agent-view grouping ---
+
+// #15: the stop the first ^x performs would otherwise re-sort the row into completed while the
+// confirming press is still pending, leaving the user to hunt it down the board.
+test('a first ^x holds the row in its section until the arm lapses, then lets it fall into completed', async () => {
+  const deps = makeDeps()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  // sectionBody keys off the first line holding the label, which for these two is the header's
+  // summary count ("1 working · 0 completed") — match the section header line itself instead.
+  const sectionOf = (title: string) => {
+    const lines = lastFrame().split('\n')
+    const row = lines.findIndex((l) => l.includes(title))
+    const headers = lines.map((l, i) => [l.trim(), i] as const).filter(([l]) => STATE_HEADERS.includes(l))
+    return headers.filter(([, i]) => i < row).at(-1)?.[0]
+  }
+  await waitFor(() => sectionOf('fix tests') === 'working')
+  stdin.write('\x18')
+  await waitFor(() => deps.client.abortSession.mock.calls.length > 0)
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } }) // what the server reports once the abort lands
+  // Wait for the stop to have actually landed — that is the moment the row would otherwise be
+  // re-sorted, and asserting any earlier proves nothing.
+  await waitFor(() => lastFrame().includes('stopped "fix tests"'))
+  expect(sectionOf('fix tests')).toBe('working') // held where it was, not re-sorted under the cursor
+  await waitFor(() => sectionOf('fix tests') === 'completed', 5000) // arm lapsed, row settles
+}, 10000) // the 2s arm window is real time, so this test outlasts the default per-test timeout
 
 test('stopping a session moves it under completed without losing the selection (second ^x still lands)', async () => {
   const deps = makeDeps()
