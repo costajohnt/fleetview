@@ -10,7 +10,7 @@ Try it without installing first with `npx fleetview` — same thing, nothing lef
 Type a task and press ⏎: a session starts on it. With the input empty, ⏎ on a row attaches to
 that session, and `^z` detaches and leaves it running in the background.
 
-![The fleetview roster: a pixel-mascot header, then sessions grouped by state — pinned, needs input, working, completed](docs/images/roster.png)
+![The fleetview roster: a task is dispatched from the input, isolates into its own worktree, streams progress, blocks on a question that is answered with a single keypress, and lands in completed](docs/demo.gif)
 
 Requirements: Node 24 or newer, macOS or Linux, and at least one of the `opencode`, `claude` or
 `copilot` CLIs on `PATH` (each optional, one is enough).
