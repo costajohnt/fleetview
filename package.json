@@ -8,6 +8,7 @@
     "postinstall": "node scripts/fix-pty-permissions.mjs",
     "preview": "node scripts/preview.ts",
     "shots": "node scripts/shots.ts",
+    "demo": "vhs demo.tape",
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
     "prepare": "npm run build"
