@@ -1,6 +1,6 @@
 import { test, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
-import { attachPty, chordFor, makeChordReader, DETACH } from '../src/pty-host.ts'
+import { attachPty, chordFor, makeChordReader, DETACH, RESUME_DRAIN_MS } from '../src/pty-host.ts'
 import { gatedStdout } from '../src/gated-stdout.ts'
 
 // A stand-in for node-pty's child: records what was written to it and lets a test drive its
@@ -448,4 +448,47 @@ test('busy guard off (the opencode default): a chord detaches immediately even m
   t = 1100
   stdin.emit('data', Buffer.from(DETACH))
   expect(await done).toEqual({ type: 'detach' })
+})
+
+// #19: Ink hands stdin back asynchronously, so the raw flag sampled at attach time is not evidence
+// of anything by the time the attachment ends. fleetview's roster is always raw while it owns the
+// terminal — the only cooked restore that is ever right is the one on process exit.
+test('detaching leaves the terminal in raw mode even when it looked cooked at attach time', async () => {
+  const { child, stdin, stdout, spawn } = harness()
+  const deferred: (() => void)[] = []
+  stdin.isTTY = true
+  stdin.isRaw = false // Ink mid-teardown: the flag lies
+  stdin.rawCalls = [] as boolean[]
+  stdin.setRawMode = (on: boolean) => { stdin.rawCalls.push(on); stdin.isRaw = on }
+  const done = attachPty({
+    command: 'opencode', args: [], spawn, stdin, stdout,
+    setTimer: () => 0, defer: (fn: () => void) => deferred.push(fn),
+  })
+  stdin.emit('data', Buffer.from(DETACH))
+  await done
+  expect(stdin.rawCalls.at(-1)).toBe(true)
+  deferred.forEach((fn) => fn()) // the tick Ink re-registers on
+  expect(stdin.rawCalls).not.toContain(false)
+  expect(stdin.isRaw).toBe(true)
+  expect(child.killed).toBe(true)
+})
+
+// #19: with no reader on stdin the bytes typed across the handoff queue up and are replayed into
+// Ink as one late chunk — the phantom text in the dispatch input. A sink for the window drops them.
+test('stdin keeps a reader for the drain window after a detach, then lets go', async () => {
+  const { stdin, stdout, spawn } = harness()
+  let fire: (() => void) | null = null
+  let drainMs = 0
+  const done = attachPty({
+    command: 'opencode', args: [], spawn, stdin, stdout,
+    setTimer: (fn: () => void, ms: number) => { fire = fn; drainMs = ms; return 0 },
+    defer: () => 0,
+  })
+  stdin.emit('data', Buffer.from(DETACH))
+  await done
+  expect(stdin.listenerCount('data')).toBe(1) // the sink, not the chord reader
+  stdin.emit('data', Buffer.from('\x1b[A')) // an arrow still in flight: swallowed, not queued
+  expect(drainMs).toBe(RESUME_DRAIN_MS)
+  fire!()
+  expect(stdin.listenerCount('data')).toBe(0)
 })

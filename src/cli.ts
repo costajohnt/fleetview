@@ -716,10 +716,20 @@ async function rosterLoop(
 // worth making for a screen clear.
 const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
 
+// A child killed with child.kill() never gets to put back the input modes it turned on, and every
+// one of them keeps sending fleetview bytes it never asked for: focus reporting answers a window
+// focus change with ESC[I / ESC[O, bracketed paste wraps pastes in ESC[200~ … ESC[201~, application
+// cursor keys re-spell the arrows, and modifyOtherKeys / kitty keyboard re-spell everything else.
+// Those sequences arrive fragmented often enough that their printable tails land in the dispatch
+// input as phantom characters (#20). Reclaiming the terminal means reclaiming its modes, so reset
+// the ones an attached TUI plausibly set — a terminal ignores a reset for a mode it never had on.
+const RESET_INPUT_MODES = '\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[>4;0m\x1b[<u'
+
 // TODO(types): `out` (gated stdout) and `instance` (Ink render handle) come from untyped modules.
 export function reclaimTerminal(out: any, instance: any) {
   out.open()
   instance?.clear()
+  out.write(RESET_INPUT_MODES)
   out.write(CLEAR_SCREEN)
 }
 
