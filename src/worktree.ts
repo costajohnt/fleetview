@@ -24,6 +24,24 @@ export function sandboxParents(projects: Project[] = []) {
   return parents
 }
 
+// Sandbox classification is sticky for the life of the process (#22). The project list keeps a
+// vanished project (repoll unions in what's fresh and never drops, so an OFFLINE repository keeps
+// its rows), but a worktree deleted with `^x^x` also leaves its repository's `sandboxes` — so a
+// parent map rebuilt from fresh data alone stops calling that stale record a sandbox and promotes
+// it to a plain repo: an empty browse group, an `@name repo` completion, and a dispatch target
+// pointing at a directory that no longer exists. Once seen as a sandbox, always a sandbox; the
+// record then leaves browse, `@repo` and dispatch candidates by the same worktree filter that
+// already keeps live worktrees out of them.
+export function rememberSandboxes(sticky: Map<string, string>, projects: Project[] = []) {
+  for (const [dir, parent] of sandboxParents(projects)) sticky.set(dir, parent)
+  return sticky
+}
+
+// opencode publishes a synthetic `global` project whose worktree is the filesystem root (#25). It is
+// not a repository anyone chose: as a browse group it renders as a bare `/`, and as a dispatch
+// candidate it would run a session against `/`. Its sessions still stream like any other directory's.
+export const isRootProject = (p: Project) => p.worktree === '/' || p.id === 'global'
+
 // Every directory fleetview has to talk to: the projects opencode lists, plus each worktree named in a
 // project's `sandboxes`. The two are not the same set — a worktree is not reliably published as a
 // project row of its own, and verified live: a repository listed its sandbox while the sandbox

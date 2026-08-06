@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { basename } from 'node:path'
+import { existsSync } from 'node:fs'
 import { Box, Text, useInput, useApp, useStdout } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { graphemes } from './text-utils.ts'
@@ -18,7 +19,7 @@ import { Peek } from './ui/peek.ts'
 import { usePeek } from './use-peek.ts'
 import { pickTarget, repoChoices } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
-import { sandboxParents, displayProject, isSandbox, shouldIsolate, worktreeName, worktreeSafety, allProjectDirectories } from './worktree.ts'
+import { sandboxParents, rememberSandboxes, isRootProject, displayProject, isSandbox, shouldIsolate, worktreeName, worktreeSafety, allProjectDirectories } from './worktree.ts'
 import { fetchPullRequests, branchOf, byBranch, hasOpenPr } from './pull-requests.ts'
 import { theme } from './ui/theme.ts'
 import type { OpencodeEvent } from './types.ts'
@@ -149,6 +150,7 @@ type AppProps = {
   branchOfImpl?: any
   cwd?: string
   worktreeSafetyImpl?: any
+  dirExistsImpl?: (dir: string) => boolean
 }
 
 export function App({
@@ -184,6 +186,9 @@ export function App({
   // Injected so the branch that decides whether deleting a session destroys committed work can be
   // tested without building a git repository per case. Defaults to the real thing.
   worktreeSafetyImpl = worktreeSafety,
+  // Injected for the same reason: dispatch refuses a target directory that is gone (#22), and the
+  // test corpus dispatches into paths that never existed on disk.
+  dirExistsImpl = existsSync,
 }: AppProps): any {
   const { exit } = useApp()
   const { stdout } = useStdout()
@@ -290,6 +295,7 @@ export function App({
   const rerender = useCallback(() => force((n) => n + 1), [])
   const seededProjectKeys = useRef(new Set<string>()) // worktrees that successfully listSessions'd this process lifetime
   const knownWorktrees = useRef(new Set<string>()) // worktrees already handed to seedAndStream (new-vs-repeat gate for repoll)
+  const knownSandboxes = useRef(new Map<string, string>()) // every worktree ever listed in a project's `sandboxes` -> its repo (#22)
   const conns = useRef(new Map<string, any>()) // worktree -> stream handle, for unmount cleanup
   // onEvent below is captured once by the mount-only discovery effect, so it can't read fresh
   // rosterState from a render closure — this ref is the escape hatch (F1).
@@ -694,7 +700,10 @@ export function App({
   // publishes as a project of its own AND lists in its repository's `sandboxes`. Rows are grouped by
   // the repository throughout — a worktree is machinery for running the session safely, not a place
   // the user chose, and agent view likewise groups by directory while isolating underneath.
-  const parents = sandboxParents(projects)
+  // Sticky, not rebuilt from scratch: a worktree deleted server-side drops out of its repository's
+  // `sandboxes` while its stale project record lives on (mergeProjects never drops — that is what
+  // keeps an OFFLINE project's rows), and a fresh-only map would promote that record to a repo (#22).
+  const parents = rememberSandboxes(knownSandboxes.current, projects)
   const repoOf = (projectKey: any) => displayProject(parents, projectKey)
 
   // Groups come from the projects list (not the store) so a freshly-discovered,
@@ -750,7 +759,9 @@ export function App({
     new Set([...byProjectSessions.values()].flat().map((s: any) => s.backend ?? DEFAULT_BACKEND)).size > 1
   // Worktrees are never rows of their own in a project listing — their sessions are already shown
   // under the repository, and a second group named after a hashed cache path helps nobody.
-  const repoProjects = projects.filter((p) => !isSandbox(parents, p.worktree))
+  // opencode's synthetic `global` project (worktree `/`) is filtered out with them: it is nobody's
+  // repository, renders as a bare `/` group, and as a dispatch target would run a session in `/` (#25).
+  const repoProjects = projects.filter((p) => !isSandbox(parents, p.worktree) && !isRootProject(p))
 
   const browseGroupsWith = (cap: number) =>
     repoProjects.map((p) => {
@@ -1128,6 +1139,7 @@ export function App({
     const text = expandPastes(rawText)
     const target = dispatchTarget(repo)
     if (!target) return flash('no projects discovered yet')
+    if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
     const typed = input
     setInput('')
     try {
@@ -1173,6 +1185,11 @@ export function App({
     const effectiveAgent = agent ?? initialAgent ?? undefined
     const target = dispatchTarget(repo)
     if (!target) return flash('no opencode projects discovered yet')
+    // A target can outlive the directory (#22): a project record survives the listing that dropped
+    // it, so a deleted session's worktree is still nameable, and dispatching into one is accepted
+    // silently — the server creates a session against a path that is gone. Refuse before anything is
+    // created, and before `setInput('')`, so the prompt is still in the input to retarget.
+    if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
     const typed = input // put it back if the dispatch fails; retyping a lost prompt is miserable
     let dispatched = false
     setInput('')

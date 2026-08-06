@@ -71,6 +71,9 @@ function makeDeps(): any {
     // membership model keep working without every test wiring up dispatch/browse first.
     roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 's1', addedAt: 1 }] },
     persistRoster: vi.fn(),
+    // Dispatch refuses a target directory that is gone (#22); these fixtures' paths never existed
+    // on disk, so the on-disk check is stubbed to "present" unless a test says otherwise.
+    dirExistsImpl: () => true,
   }
 }
 
@@ -721,20 +724,63 @@ test('dispatch targets the selected row\'s project, so a repoll reorder cannot r
   }
 })
 
-test('worktree "/" renders its own name as the group header, not empty (F5)', async () => {
+// Supersedes F5 ("worktree / renders its own name as the group header"): opencode's synthetic
+// `global` project is no longer a group at all, so there is no header to name.
+test('the synthetic global project (worktree "/") is neither a browse group nor an @repo target (#25)', async () => {
   const deps = makeDeps()
-  const rootProject = { id: 'r-1', worktree: '/', vcs: 'git', time: { created: 1, updated: 1 } }
-  deps.client.listProjects = vi.fn(() => Promise.resolve([rootProject]))
+  const rootProject = { id: 'global', worktree: '/', vcs: 'git', time: { created: 1, updated: 1 } }
+  deps.client.listProjects = vi.fn(() => Promise.resolve([rootProject, project]))
   deps.client.listSessions = vi.fn(() => Promise.resolve([]))
-  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), cwd: '/x/alpha' }))
   await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
   stdin.write('\x02')
+  await waitFor(() => lastFrame().includes('alpha')) // browse rendered, with the real repo in it
   // Header rows carry padding and, when selected, a right-edge tail — normalise before matching.
-  await waitFor(() =>
+  expect(
     lastFrame()
       .split('\n')
       .some((l) => ['/', '/ ▾ expanded'].includes(l.replace(/\s+/g, ' ').trim())),
+  ).toBe(false)
+})
+
+// #22: the worktree of a session deleted with ^x^x vanishes from its repository's `sandboxes` while
+// its own project record survives the merge (vanished projects are kept on purpose, so an OFFLINE
+// project keeps its rows). Sticky sandbox classification is what stops it being promoted to a repo.
+test('a deleted session worktree never becomes a browse group or an @repo completion (#22)', async () => {
+  const deps = makeDeps()
+  let deleted = false
+  const alpha = (sandboxes: string[]) => ({ ...project, sandboxes })
+  deps.client.listProjects = vi.fn(() =>
+    Promise.resolve(deleted ? [alpha([])] : [alpha(['/x/wt/sleepy'])]),
   )
+  deps.client.listSessions = vi.fn(() => Promise.resolve([]))
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), cwd: '/x/alpha', projectPollMs: 15 }),
+  )
+  await waitFor(() => deps.client.listSessions.mock.calls.some((c: any) => c[0] === '/x/wt/sleepy'))
+  deleted = true
+  const polls = deps.client.listProjects.mock.calls.length
+  await waitFor(() => deps.client.listProjects.mock.calls.length > polls + 1)
+  stdin.write('\x02')
+  await waitFor(() => lastFrame().includes('alpha'))
+  expect(lastFrame()).not.toContain('sleepy') // no group of its own, empty or otherwise
+  stdin.write('\x02') // back out of browse
+  stdin.write('@sleep')
+  await waitFor(() => lastFrame().includes('@sleep'))
+  expect(lastFrame()).not.toContain('sleepy') // and not offered as a dispatch target
+})
+
+test('dispatch into a directory that no longer exists is refused and keeps the prompt (#22)', async () => {
+  const deps = makeDeps()
+  deps.dirExistsImpl = () => false
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  stdin.write('say hi')
+  await waitFor(() => lastFrame().includes('say hi'))
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('no longer exists'))
+  expect(deps.client.createSession).not.toHaveBeenCalled()
+  expect(lastFrame()).toContain('say hi') // the prompt is still there to retarget
 })
 
 test('esc quits from the unreachable screen (F6)', async () => {
