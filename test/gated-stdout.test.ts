@@ -91,7 +91,11 @@ test('App re-lays-out for the new width when the terminal resizes', async () => 
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 's1', addedAt: 1 }] },
       persistRoster: vi.fn(),
     }),
-    { stdout: gate as any, stdin: new FakeStdin() as any, exitOnCtrlC: false, patchConsole: false },
+    // `interactive: true` is what makes this test run the same on a laptop and on CI. Ink decides
+    // interactivity with `interactive ?? (!isInCi && stdout.isTTY)` (ink 7 `ink.js:707`), and a
+    // non-interactive Ink writes only the final frame at unmount — so under GitHub Actions, which
+    // is-in-ci detects, there are no mid-run frames to measure and nothing resize-related runs at all.
+    { stdout: gate as any, stdin: new FakeStdin() as any, interactive: true, exitOnCtrlC: false, patchConsole: false },
   )
   // Ink writes control-only chunks (cursor, title, synchronised-update markers) between frames;
   // the widest line of the newest chunk that actually drew text is the laid-out width.
