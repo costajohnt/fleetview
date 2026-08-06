@@ -3344,3 +3344,81 @@ test('after backgrounding, the final Esc re-opens that conversation instead of e
   await waitFor(() => lastFrame().includes('fix tests'))
   await pressUntil(stdin, '\x1B', () => onAction.mock.calls.some((c: any) => c[0].type === 'quit'))
 })
+
+// --- #34: ghost roster members (the session is gone server-side) ---
+
+// A member whose session no longer exists used to render no row at all: the state groups partition
+// `allMembers`, which only holds members whose sessions are in the store. Nothing on screen, ↑/↓
+// could never land on it, ^x could never remove it, and it survived every restart.
+test('#34: a member whose session is gone renders a selectable row and ^x drops the membership', async () => {
+  const deps = makeDeps()
+  deps.roster = { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'g1', addedAt: 1, prompt: 'phantom dispatch' }] }
+  deps.client.listSessions = vi.fn(() => Promise.resolve([])) // seeds successfully, and the session is not there
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  // The stored prompt stands in for the title, behind the `∙` "nothing is behind this" glyph.
+  await waitFor(() => lastFrame().includes('∙ phantom dispatch'))
+  // Under `completed` — the section for rows nothing more is going to happen to. Compared by line
+  // order rather than sectionBody, whose first `completed` match is the header's count line.
+  const lines = lastFrame().split('\n')
+  expect(lines.findIndex((l) => l.includes('phantom dispatch'))).toBeGreaterThan(
+    lines.findIndex((l) => l.trim() === 'completed'),
+  )
+  stdin.write('\x18') // one press: there is no server call to confirm, only a membership to drop
+  await waitFor(() => !lastFrame().includes('phantom dispatch'))
+  expect(deps.persistRoster).toHaveBeenCalledWith(expect.objectContaining({ sessions: [] }))
+  // Nothing was asked of the server: there is no session to abort, delete, or clean a worktree for.
+  expect(deps.client.abortSession).not.toHaveBeenCalled()
+  expect(deps.client.deleteSession).not.toHaveBeenCalled()
+})
+
+// F1's offline protection is load-bearing and the ghost row must not weaken it: a project whose
+// stream is down has members that are coming back, and eating them on a dropped connection would
+// be far worse than the bug being fixed.
+test('#34: a member of an OFFLINE project is not treated as a ghost', async () => {
+  const deps = makeDeps()
+  deps.roster = { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'g1', addedAt: 1, prompt: 'phantom dispatch' }] }
+  deps.client.listSessions = vi.fn(() => Promise.resolve([]))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('phantom dispatch'))
+  // The project's stream drops. The member is now indistinguishable from one that is merely
+  // unreachable, so the ghost row goes away rather than offering to delete a live membership.
+  deps.connectEventsImpl.mock.calls[0][1].onOffline('/x/alpha')
+  await waitFor(() => !lastFrame().includes('phantom dispatch'))
+  // And ^x with nothing selected must not have removed it behind the scenes either.
+  stdin.write('\x18')
+  await tick()
+  expect(deps.persistRoster).not.toHaveBeenCalled()
+})
+
+// --- #35: space on a group header ---
+
+// The peek branch requires a selected session; on a header there is none, so the space used to
+// fall through to the text handler and silently type a leading space into the dispatch input.
+test('#35: space on a selected header collapses it instead of typing into the input', async () => {
+  const deps = makeDeps()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('\x1B[A') // up from the only session row onto its `completed` header
+  await waitFor(() => lastFrame().includes('▾ expanded'))
+  stdin.write(' ')
+  // Collapsed, which is only reachable if the space was read as the header verb.
+  await waitFor(() => lastFrame().includes('▸ collapsed'))
+  expect(lastFrame()).not.toContain('fix tests')
+  // The input is still empty: Enter on a header with an empty input toggles the collapse back. A
+  // space that had landed in the input would have made this a dispatch instead.
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('fix tests'))
+  expect(deps.client.createSession).not.toHaveBeenCalled()
+})
+
+// The other half of the strict qualification: a project whose worktree has never been listed
+// successfully this run can't tell "gone" from "never seen", so its members stay put too.
+test('#34: a member of a project that never seeded is not treated as a ghost', async () => {
+  const deps = makeDeps()
+  deps.roster = { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'g1', addedAt: 1, prompt: 'phantom dispatch' }] }
+  deps.client.listSessions = vi.fn(() => Promise.reject(new Error('down')))
+  const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => deps.client.listSessions.mock.calls.length > 0)
+  await tick()
+  expect(lastFrame()).not.toContain('phantom dispatch')
+})

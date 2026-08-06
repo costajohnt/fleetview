@@ -14,6 +14,10 @@ const STATE: Record<string, { color: string; label: string; glyph: string; dim?:
   done: { color: theme.accent, label: 'completed', glyph: '•' },
   error: { color: theme.danger, label: 'failed', glyph: '•' },
   stopped: { color: theme.muted, label: 'stopped', glyph: '•' },
+  // #34: not a status any backend reports — fleetview mints it for a roster member whose session
+  // no longer exists server-side. The `∙` is the same "nothing is behind this" glyph an offline
+  // row gets, because that is exactly what it means here, permanently.
+  gone: { color: theme.muted, dim: true, label: 'gone', glyph: '∙' },
 }
 
 // `∙` process gone. fleetview's liveness signal is the project's SSE stream: opencode has no
