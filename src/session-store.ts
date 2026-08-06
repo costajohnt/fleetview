@@ -3,6 +3,8 @@ import type { OpencodeEvent, OpencodeSessionStatus, PermissionAsked, QuestionAsk
 
 // A pending request as the store keeps it: the wire payload plus the monotonic stamps fleetview
 // adds on the way in (always set at insert time, hence required here — see apply/seed* below).
+// `__seq` is monotonic, not necessarily integral: #55's seeded entries land strictly inside
+// (mark-1, mark). Nothing reads it but `<` comparisons and two sorts, so fractions are inert.
 type Pending<T> = T & { __seq: number; __askedAt: number }
 
 export type SessionStatus = 'waiting' | 'running' | 'error' | 'stopped' | 'done' | 'idle'
@@ -113,6 +115,15 @@ const isAbortError = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'MessageAbortedError'
 
 const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.test(title)
+
+// #52: the one definition of "the server says this session is working". `retry` is a full opencode
+// wire status (types.ts), and `derive` has always ranked it as running — but the two bookkeeping
+// gates (apply, seedStatuses) tested `busy` alone, so a run whose FIRST observed status was `retry`
+// never recorded hasRun/runStartedAt and never cleared lastError/stopped. It then rendered `idle`,
+// a stale `stopped`, or a stale `error` printing the PREVIOUS run's text as the row snippet. Hoisted
+// rather than fixed twice: the predicate is read at four sites and four copies is four chances for
+// one to drift back.
+const isRunningStatus = (s: string) => s === 'busy' || s === 'retry'
 
 // M5: grapheme-safe — a raw slice(0, 80) can chop a surrogate pair in half at the boundary.
 // I1: pre-slice to 640 code units BEFORE the whitespace collapse + grapheme truncation — a 200KB
@@ -269,6 +280,8 @@ export function createStore() {
   // re-insertion order alone can't survive that round trip. I2 also uses it as a watermark: a
   // seed reseed can tell "existed before this seed started" (safe to drop if the fresh list
   // doesn't have it) from "arrived live while the seed GET was in flight" (must survive).
+  // The counter itself only ever takes integral values; a stamp READ off an entry is monotonic but
+  // not necessarily integral — see #55 at the seeds below.
   let seq = 0
 
   // Returns undefined for a session already known to be a subagent, so no path can re-create a
@@ -341,7 +354,7 @@ export function createStore() {
     // is working, and saying so is the honest answer. An error raised mid-turn surfaces the moment
     // the turn ends. The alternative — error winning — would freeze a row as `failed` while work
     // is visibly continuing, which is the worse lie.
-    if (r.lastStatus === 'busy' || r.lastStatus === 'retry') return 'running'
+    if (isRunningStatus(r.lastStatus)) return 'running'
     if (r.lastError) return 'error' // I2: error outranks a stale "?" heuristic
     // Ranks below error but above done: a stopped session did run, and "stopped" is the more
     // specific truth about why it isn't running now. It never outranks a live pending request,
@@ -489,7 +502,13 @@ export function createStore() {
           // Only a retiring listing confers this. A refresh listing (dispatch, /fork) must not, or it
           // would arm the very record the sweep below must not touch — see there.
           listed: retire || (prev?.listed ?? false),
-          stopped: prev?.stopped ?? Boolean(persisted?.stopped),
+          // #53: a persisted stop is retired by the same server-clock signal `hasRun` above rests
+          // on. Without it, one and the same listing inferred `hasRun` from `updatedAt >
+          // persisted.updated` AND restored `stopped` — and `derive` ranks stopped above done, so a
+          // session stopped with ^x and later run to completion outside fleetview rendered
+          // `stopped` forever and re-persisted itself as stopped on every save. `lastError` has had
+          // this retirement all along (see staleError); `stopped` had none.
+          stopped: prev?.stopped ?? Boolean(persisted?.stopped && !(updatedAt > persisted.updated)),
           // Carried like statusSeq: this path rebuilds the record wholesale, and a backend listing
           // (streamBackend re-lists every poll) would otherwise erase the tag the seeds check.
           origin: prev?.origin,
@@ -547,9 +566,9 @@ export function createStore() {
         // seedStatuses' watermark can tell a live status applied after the seed's GET was issued
         // (must win) from one that's merely stale (safe to overwrite with the fresh snapshot).
         r.statusSeq = seq++
-        const wasRunning = r.lastStatus === 'busy' || r.lastStatus === 'retry'
+        const wasRunning = isRunningStatus(r.lastStatus)
         r.lastStatus = p.status?.type ?? 'idle'
-        if (r.lastStatus === 'busy') {
+        if (isRunningStatus(r.lastStatus)) {
           r.hasRun = true
           r.lastError = null
           r.errorAtServerUpdated = 0
@@ -805,7 +824,31 @@ export function createStore() {
         if (!r) continue
         if ((r.statusSeq as number) >= mark) continue // I2: a live status applied after the mark wins over this stale seed
         r.lastStatus = status?.type ?? 'idle'
-        if (r.lastStatus === 'busy') {
+        // #48: the seed path's idle now clears pending state exactly as the event path's does. The
+        // event branch (see apply's `session.status`) was the ONLY channel that could remove a
+        // pending entry on a healthy stream — the periodic pending seed is additive by design (see
+        // seedPermissions' note, which stays true) — so a permission answered off-stream left the
+        // row rendering `waiting` forever, with the header count and tab title inflated and every
+        // later state masked, because `derive` ranks pending above everything.
+        //
+        // Only for a session GET /session/status EXPLICITLY names idle: that is a positive server
+        // claim, and opencode holds a session busy while it is blocked, so an explicitly-idle
+        // session with an outstanding request is contradictory and the server wins. Deliberately
+        // NOT done in the absence sweep below — absence is the low-confidence signal that code
+        // already hedges, and it is not trustworthy enough to destroy pending state.
+        // `!r.origin`: same rule the sweep and the seeds follow — a claude/copilot row's synthetic
+        // "needs input" permission is not opencode's to clear.
+        if (r.lastStatus === 'idle' && !r.origin) {
+          if (isRunOpen(r)) r.runEndedAt = Date.now() // closes the span ranForMs reports
+          r.pendingPermissions.clear()
+          r.pendingQuestions.clear()
+          // Must be >= mark, or the SAME seedLiveState call's additive seedPermissions/seedQuestions
+          // re-inserts everything this just cleared (they skip a record whose pendingClearedSeq >=
+          // their mark). `seq++` when no mark was passed: an unbounded Infinity here would block
+          // additive re-adds on that record forever, and the live counter is what the event path uses.
+          r.pendingClearedSeq = Number.isFinite(mark) ? mark : seq++
+        }
+        if (isRunningStatus(r.lastStatus)) {
           r.hasRun = true
           r.lastError = null
           r.errorAtServerUpdated = 0
@@ -876,9 +919,14 @@ export function createStore() {
         // overwrite would reset them to the moment fleetview happened to re-read the list.
         if (additive && (r.origin || r.pendingClearedSeq >= mark || r.pendingPermissions.has(perm.id))) return
         const existing = r.pendingPermissions.get(perm.id)
-        // New-from-seed entries stamp BELOW mark, preserving list (oldest-first) order — M3 — so
-        // they sort ahead of anything applied live during the seed's flight (seq >= mark).
-        const seedSeq = mark - fresh.length + i
+        // #55: strictly inside (mark-1, mark) — above every already-issued integer stamp (all
+        // <= mark-1), below anything applied live during the seed's flight (>= mark), and preserving
+        // the server's oldest-first order among the seeded entries. `mark - fresh.length + i` claimed
+        // the same property and delivered the opposite: it landed in [mark-N, mark-1], the band
+        // already handed out to real events, so a request the store MISSED sorted BELOW entries it
+        // already held (and went negative once N exceeded the events seen), making peek and the row
+        // preview offer the newer request ahead of the genuinely oldest one.
+        const seedSeq = mark - 1 + (i + 1) / (fresh.length + 1)
         r.pendingPermissions.set(perm.id, {
           ...perm,
           __seq: existing?.__seq ?? perm.__seq ?? seedSeq,
@@ -908,7 +956,7 @@ export function createStore() {
         if (!r) return
         if (additive && (r.origin || r.pendingClearedSeq >= mark || r.pendingQuestions.has(q.id))) return
         const existing = r.pendingQuestions.get(q.id)
-        const seedSeq = mark - fresh.length + i
+        const seedSeq = mark - 1 + (i + 1) / (fresh.length + 1) // #55: see seedPermissions
         r.pendingQuestions.set(q.id, {
           ...q,
           __seq: existing?.__seq ?? q.__seq ?? seedSeq,

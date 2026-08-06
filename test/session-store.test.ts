@@ -1658,3 +1658,158 @@ test('#32: a 2000-character member prompt is truncated to one row, not printed w
   const title = memberTitle('New session - 2026-07-22T19:51:37.625Z', { prompt: 'x'.repeat(2000) })
   expect(title.length).toBe(80)
 })
+
+test('#48: the seed path\'s explicit idle clears a permission answered off-stream, so 10 healthy polls heal the row', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'perm1', permission: 'bash' } })
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's2', id: 'q1', questions: [{ question: 'proceed?' }] } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's2', status: { type: 'busy' } } })
+  expect(store.get('repoA', 's1').status).toBe('waiting')
+  for (let i = 0; i < 10; i++) {
+    // exactly the periodic seedLiveState pass: explicit idle + the additive-only pending seeds
+    const mark = store.seedMark()
+    store.seedStatuses('repoA', { s1: { type: 'idle' }, s2: { type: 'idle' } }, mark, { closeRuns: true })
+    store.seedPermissions('repoA', [], mark, { additive: true })
+    store.seedQuestions('repoA', [], mark, { additive: true })
+  }
+  const perm = store.get('repoA', 's1')
+  expect(perm.pendingRequest).toBe(false)
+  expect(perm.status).toBe('done') // was 'waiting' forever: no poll-path channel could remove a pending entry
+  expect(perm.waitingFor).toBe(undefined)
+  expect(perm.waitingSince).toBe(0) // the climbing "waiting Nm" clock stops too
+  expect(store.get('repoA', 's2').pendingRequest).toBe(false) // same hole for questions
+})
+
+test('#48: pendingClearedSeq >= mark, so the same poll\'s additive seed cannot re-insert what the explicit idle just cleared', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'perm1', permission: 'bash' } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  const mark = store.seedMark()
+  store.seedStatuses('repoA', { s1: { type: 'idle' } }, mark, { closeRuns: true })
+  // The GET /permission snapshot in hand still lists the answered request — the clear has to outrank it.
+  store.seedPermissions('repoA', [{ sessionID: 's1', id: 'perm1', permission: 'bash' }], mark, { additive: true })
+  store.seedQuestions('repoA', [], mark, { additive: true })
+  expect(store.get('repoA', 's1').pendingRequest).toBe(false)
+  expect(store.get('repoA', 's1').status).toBe('done')
+})
+
+test('#48 control: the ABSENCE sweep still does NOT clear pending state — absence is the low-confidence signal', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'perm1', permission: 'bash' } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  const mark = store.seedMark()
+  store.seedStatuses('repoA', {}, mark, { closeRuns: true }) // s1 merely absent, never named idle
+  expect(store.get('repoA', 's1').pendingRequest).toBe(true)
+  expect(store.get('repoA', 's1').status).toBe('waiting')
+})
+
+test('#52: a run first seen as `retry` is recorded as a run — retry → idle renders done with a real duration', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'retry', attempt: 1, message: 'overloaded', next: 0 } } })
+  expect(store.get('repoA', 's1').status).toBe('running')
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('done') // was 'idle': the bookkeeping gate tested `busy` alone, so no run was ever recorded
+  expect(row.ranForMs).not.toBeNull()
+})
+
+test('#52: seedStatuses records a run for a session it first sees as `retry`', () => {
+  const store: any = createStore()
+  seed(store)
+  const mark = store.seedMark()
+  store.seedStatuses('repoA', { s1: { type: 'retry', attempt: 1 } }, mark, { closeRuns: true })
+  expect(store.get('repoA', 's1').status).toBe('running')
+  store.seedStatuses('repoA', {}, store.seedMark(), { closeRuns: true }) // the retry finished; s1 drops off the map
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('done')
+  expect(row.ranForMs).not.toBeNull()
+})
+
+test('#52: a retry-first run clears the previous run\'s error instead of printing it as the row snippet (#24)', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'APIError', data: { message: 'OLD boom' } } } })
+  expect(store.get('repoA', 's1').status).toBe('error')
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'retry', attempt: 1 } } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('done') // was 'error', on the previous run's failure
+  expect(row.snippet).not.toContain('OLD boom')
+})
+
+test('#52: a retry-first run also retires a stale persisted stop', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'a', time: { updated: 100 } }], { 'repoA:s1': { updated: 100, hasRun: true, stopped: true } })
+  expect(store.get('repoA', 's1').status).toBe('stopped')
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'retry', attempt: 1 } } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('done')
+})
+
+test('#53: a persisted stop is retired when the server reports activity after it (session completed elsewhere)', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'a', time: { updated: 500 } }], { 'repoA:s1': { updated: 100, hasRun: false, stopped: true } })
+  expect(store.get('repoA', 's1').status).toBe('done') // was 'stopped', permanently and self-reinforcingly
+  // and the lie is no longer written back to seen.json on every save
+  expect(store.snapshot()['repoA:s1']).toEqual({ updated: 500, hasRun: true, stopped: false })
+})
+
+test('#53 control: a persisted stop with no server activity since it still renders stopped', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'a', time: { updated: 100 } }], { 'repoA:s1': { updated: 100, hasRun: true, stopped: true } })
+  expect(store.get('repoA', 's1').status).toBe('stopped')
+  expect(store.snapshot()['repoA:s1'].stopped).toBe(true)
+})
+
+test('#55: seeded pending stamps sort above every pre-mark live entry and below one applied during the seed\'s flight', () => {
+  const store: any = createStore()
+  seed(store)
+  // p1 is live and genuinely the oldest outstanding request
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash live-oldest' } })
+  const mark = store.seedMark()
+  // p2 arrives live while the seed GET is in flight — it must stay last
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p2', permission: 'bash live-newest' } })
+  // the server's snapshot: p1 plus two asks the stream dropped
+  store.seedPermissions(
+    'repoA',
+    [
+      { sessionID: 's1', id: 'pA', permission: 'bash missed-A' },
+      { sessionID: 's1', id: 'p1', permission: 'bash live-oldest' },
+      { sessionID: 's1', id: 'pB', permission: 'bash missed-B' },
+    ],
+    mark,
+    { additive: true },
+  )
+  const stamps = store.pendingFor('repoA', 's1')
+  expect(stamps.map((p: any) => p.id)).toEqual(['p1', 'pA', 'pB', 'p2']) // was ['pA','p1','pB','p2'], pA at -2
+  for (const p of stamps.filter((p: any) => p.id === 'pA' || p.id === 'pB')) {
+    expect(p.__seq).toBeGreaterThan(mark - 1) // above every already-issued integer stamp, never negative
+    expect(p.__seq).toBeLessThan(mark) // below anything applied live during the flight
+  }
+  // and peek/the row preview offer the genuinely oldest request, not the newer missed one
+  expect(store.get('repoA', 's1').snippet).toBe('permission: bash live-oldest')
+})
+
+test('#55: seedQuestions stamps the same interval, preserving the server\'s oldest-first order', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'live-oldest?' }] } })
+  const mark = store.seedMark()
+  store.apply('repoA', { type: 'question.asked', properties: { sessionID: 's1', id: 'q2', questions: [{ question: 'live-newest?' }] } })
+  store.seedQuestions(
+    'repoA',
+    [
+      { sessionID: 's1', id: 'qA', questions: [{ question: 'missed-A?' }] },
+      { sessionID: 's1', id: 'q1', questions: [{ question: 'live-oldest?' }] },
+      { sessionID: 's1', id: 'qB', questions: [{ question: 'missed-B?' }] },
+    ],
+    mark,
+    { additive: true },
+  )
+  expect(store.pendingQuestionsFor('repoA', 's1').map((q: any) => q.id)).toEqual(['q1', 'qA', 'qB', 'q2'])
+})
