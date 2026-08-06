@@ -57,7 +57,11 @@ const STATE_GROUPS = [
   // is only worth its rows if it teaches a first-time user what the three sections mean.
   { key: 'waiting', label: 'needs input', hint: 'a session is asking you something', match: (s: any) => s.status === 'waiting' },
   { key: 'running', label: 'working', hint: 'a session is running right now', match: (s: any) => s.status === 'running' },
-  { key: 'completed', label: 'completed', hint: 'finished, failed, or stopped sessions land here', match: (s: any) => FINISHED_STATUSES.has(s.status) },
+  // #34: ghost rows (members whose session is gone server-side) land here too. They are finished in
+  // every sense the user cares about, and `completed` is the section that already collects rows
+  // nothing is going to happen to. `ghost` rather than a status test so FINISHED_STATUSES stays
+  // exactly what session-store's `derive` can mint.
+  { key: 'completed', label: 'completed', hint: 'finished, failed, or stopped sessions land here', match: (s: any) => FINISHED_STATUSES.has(s.status) || Boolean(s.ghost) },
 ]
 
 // "Completed sessions that don't fit on screen fold into a `… N more` row. Failures and sessions
@@ -743,6 +747,34 @@ export function App({
   // FLEETVIEW_NOTIFY_CMD — and `^b` did the same. It also kept the header honest: the counts used to
   // fall to zero under a filter while the roster beside them still listed the sessions.
   const allMembers = [...byProjectSessions.values()].flat().filter((s: any) => isMember(s.projectKey, s.id))
+  // #34: a roster member whose session is gone server-side used to render no row at all — the state
+  // groups partition `allMembers`, which by construction only holds members whose sessions are in
+  // the store — so it was invisible, ↑/↓ could never land on it, ^x could never remove it, and it
+  // sat in roster.json forever. These synthesize a row out of the stored member so the membership
+  // has a visible exit; `ghost: true` marks it as having nothing behind it, which is what keeps
+  // attach, peek and delete off the network.
+  //
+  // The qualification is deliberately strict, because F1's offline protection is load-bearing: a
+  // member is only gone for good if its worktree HAS been listed successfully this run
+  // (seededProjectKeys) and its project is not currently flagged offline. A project that never
+  // seeded, or whose stream is down, is merely unreachable — its members must survive untouched,
+  // or a dropped connection would start eating the roster.
+  const ghostMembers = rosterState.sessions
+    .filter((m: any) => seededProjectKeys.current.has(m.worktree) && !offlineProjects.has(m.worktree))
+    .filter((m: any) => !(byProjectSessions.get(m.worktree) ?? []).some((s: any) => s.id === m.id))
+    .map((m: any) => ({
+      id: m.id,
+      projectKey: m.worktree,
+      ghost: true,
+      status: 'gone',
+      // The member's stored fields are all that is left of it. The dispatch prompt is the closest
+      // thing to a title (it is what the session was for), the worktree says which project it
+      // belonged to, and `addedAt` is the only timestamp there has ever been.
+      title: (typeof m.prompt === 'string' && m.prompt) || m.id,
+      snippet: basename(m.worktree) || m.worktree,
+      updatedAt: typeof m.addedAt === 'number' ? m.addedAt : 0,
+      prs: [],
+    }))
   // "Rows carry a backend tag when more than one is active" — counted over the sessions that exist,
   // not over the backends fleetview could drive, so launching with `--backend claude` in a directory
   // that has no claude sessions yet still renders the opencode-only view unchanged.
@@ -816,7 +848,11 @@ export function App({
   })
 
   const stateGroups = () => {
-    const members = applyFilter(allMembers, activeFilter, agentOf, promptOf)
+    // #34: ghosts join here rather than in `allMembers`, which is deliberately "every member's
+    // session" — the header counts, the notification snapshot and the tab title all read that and
+    // must keep describing sessions that exist. This is the one view that has to show a membership
+    // with nothing behind it, because it is the only one ^x can reach.
+    const members = applyFilter([...allMembers, ...ghostMembers], activeFilter, agentOf, promptOf)
     // All groups are always returned, empty or not — the roster renders a "no items" placeholder
     // for an empty one, so the view keeps its shape. Assignment is first-match-wins so the groups
     // stay a partition and ↑/↓ never visits a session twice: a waiting session with an open pull
@@ -1021,6 +1057,9 @@ export function App({
     // value can never see an attachment that began while the dispatch was in flight, which is the
     // one case this guard exists for.
     if (attachedRef.current) return
+    // #34: there is no session to hand the terminal over to. Say so and name the key that ends it,
+    // rather than launching a CLI against an id the server has never heard of.
+    if (row.ghost) return flash(`"${row.title}" is gone — ^x removes it from the roster`, 4000)
     const done = onAction({
       type: 'enter',
       sessionId: row.id,
@@ -1030,7 +1069,11 @@ export function App({
       // only when it isn't opencode: the host defaults to opencode for a target that names none, so
       // an opencode-only roster hands over exactly the payload it always did.
       ...(backendNameOf(row) === DEFAULT_BACKEND ? {} : { backend: backendNameOf(row) }),
-      siblings: flat.map((s: any) => ({ id: s.id, projectKey: s.projectKey, ...(s.backend ? { backend: s.backend } : {}) })),
+      // #34: ghost rows are dropped from the sibling list — Alt+1..9 hands the host a session to
+      // resume, and a session that no longer exists is not one.
+      siblings: flat
+        .filter((s: any) => !s.ghost)
+        .map((s: any) => ({ id: s.id, projectKey: s.projectKey, ...(s.backend ? { backend: s.backend } : {}) })),
     })
     if (done && typeof done.then === 'function') {
       attachedRef.current = true
@@ -1384,6 +1427,12 @@ export function App({
     // Sequential rather than parallel: each one may take its worktree with it, and the safety
     // check reads git state that the previous removal just changed.
     for (const row of rows) {
+      // #34: a ghost in the group is just a membership — drop it and move on. Reaching deleteRow
+      // with it would fail and flag the whole project offline over a session that is already gone.
+      if (row.ghost) {
+        updateRoster((prev: any) => withoutMember(prev, row.projectKey, row.id))
+        continue
+      }
       // A backend that can't delete is skipped rather than throwing into the catch below, which
       // would flag the whole project offline over a session that was never deletable to begin with.
       if (!capabilitiesOf(row).delete) {
@@ -1409,6 +1458,14 @@ export function App({
   }
 
   const stopOrDelete = async (row: any) => {
+    // #34: nothing exists server-side, so there is nothing to abort, nothing to delete and no
+    // worktree the session still owns — the only thing ^x can mean on a ghost is "drop the
+    // membership". It takes effect on the first press rather than arming a confirmation: the
+    // two-press gate exists to guard a destructive server call, and there is no server call.
+    if (row.ghost) {
+      updateRoster((prev: any) => withoutMember(prev, row.projectKey, row.id))
+      return flash(`removed "${row.title}"`)
+    }
     const armKey = `${row.projectKey}:${row.id}`
     const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < 2000
     if (armed) {
@@ -1666,6 +1723,15 @@ export function App({
         return exit()
       }
       if (key.backspace || key.delete) return setInput((t) => graphemes(t).slice(0, -1).join(''))
+      // #35: a group header has no `current`, so this used to fall through to the text handler and
+      // silently type a leading space into the dispatch input — nothing on screen distinguishes
+      // that from a peek that failed to open, so the next keystrokes joined a prompt the user
+      // never meant to start and Enter dispatched it. On a header, space means what Enter means
+      // there: collapse. Only with an empty input — text in the prompt means the user is typing,
+      // and a space inside a sentence is a space.
+      if (empty && ch === ' ' && selectedHeader) return toggleCollapsed(selectedHeader)
+      // #34: peek reads a conversation that isn't there any more.
+      if (empty && ch === ' ' && current?.ghost) return flash(`"${current.title}" is gone — ^x removes it from the roster`, 4000)
       if (empty && ch === ' ' && current) return openPeek(current)
       if (empty && ch === '?') return setMode('help')
       // A paste arrives as one chunk, so `ch` can carry newlines and other control bytes. Newlines
