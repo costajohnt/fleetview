@@ -1,5 +1,5 @@
 
-[36m ▟▀▙ [39m  [1mfleetview[22m [2mv0.1.0[22m
+[36m ▟▀▙ [39m  [1mfleetview[22m [2mv0.2.0[22m
 [36m  █  [39m  [2mdefault model · repo[22m
 [36m▙▄█▄▟[39m  [2m0 awaiting input · 1 working · 2 completed · 1 failed[22m
 
