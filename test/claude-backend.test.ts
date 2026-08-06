@@ -119,6 +119,49 @@ test('a spawn failure writes a failed result to the log, so the row can leave wo
   expect(JSON.parse(lines.at(-1)!)).toEqual({ type: 'result', is_error: true, subtype: 'error_during_execution', session_id: ref.id })
 })
 
+// The gap 'error' does not cover: the spawn succeeded and the CLI itself rejected the run — an
+// unknown flag, an older CLI refusing --agent/--model/--session-id, an auth failure. It exits
+// non-zero having written plain text, which parseStreamChunk drops, so without an exit handler no
+// `result` is ever folded and the row renders `idle`: indistinguishable from a session created and
+// never used.
+test('a run that exits non-zero writes a failed result, and a clean exit writes nothing', async () => {
+  const spawnFor = (code: number | null) => (): any => ({
+    pid: 4242,
+    on: (event: string, cb: (arg: any) => void) => {
+      if (event === 'exit') cb(code)
+    },
+    unref: vi.fn(),
+  })
+  const failedDir = join(tmp('runs'), 'claude-runs')
+  const failed = await createClaudeBackend({ runDir: failedDir, spawnImpl: spawnFor(1), home: tmp('home') }).dispatch({ prompt: 'go', directory: '/repo/alpha' })
+  const lines = readFileSync(join(failedDir, `${failed.id}.jsonl`), 'utf8').trim().split('\n')
+  expect(JSON.parse(lines.at(-1)!)).toEqual({ type: 'result', is_error: true, subtype: 'error_during_execution', session_id: failed.id })
+
+  // A run that exits 0 reported its own outcome in the stream; a synthetic line here would
+  // contradict it.
+  const okDir = join(tmp('runs'), 'claude-runs')
+  const ok = await createClaudeBackend({ runDir: okDir, spawnImpl: spawnFor(0), home: tmp('home') }).dispatch({ prompt: 'go', directory: '/repo/alpha' })
+  expect(readFileSync(join(okDir, `${ok.id}.jsonl`), 'utf8')).toBe('')
+})
+
+// 'error' and 'exit' can both fire for the same child (a spawn failure is reported as an error and
+// then an exit), and two terminal lines in one log is a contradiction the fold would have to
+// arbitrate.
+test('error and exit together write exactly one synthetic result', async () => {
+  const spawnImpl: any = () => ({
+    pid: undefined,
+    on: (event: string, cb: (arg: any) => void) => {
+      if (event === 'error') cb(new Error('spawn claude ENOENT'))
+      if (event === 'exit') cb(127)
+    },
+    unref: vi.fn(),
+  })
+  const runDir = join(tmp('runs'), 'claude-runs')
+  const ref = await createClaudeBackend({ runDir, spawnImpl, home: tmp('home') }).dispatch({ prompt: 'go', directory: '/repo/alpha' })
+  const lines = readFileSync(join(runDir, `${ref.id}.jsonl`), 'utf8').trim().split('\n')
+  expect(lines).toHaveLength(1)
+})
+
 // Resume is scoped by cwd — the same id from a sibling directory fails with "No conversation found"
 // before any API call — so the follow-up has to be spawned in the session's own directory.
 test('a follow-up prompt resumes the session in its own directory', async () => {
