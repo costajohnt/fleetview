@@ -90,3 +90,41 @@ test('merged and closed pull requests do not protect a completed session', () =>
 test('a session with no prs field does not throw', () => {
   expect(() => foldCompleted([completedOf(plain(6))], 3)).not.toThrow()
 })
+
+// #49: the fold used to drop the row the user was standing on. `navRows` is built from the
+// rendered groups, so a folded-away selection was in neither the key lookup nor the identity
+// re-resolution, and the next key acted on whatever the fallback landed on — normally a running
+// session. The selected row is protected like a failure or an open pull request.
+//
+// Deliberately NOT done by sorting the selection to the front of `completed`: that makes the row
+// jump the instant it is selected, so walking ↓ through completed rows would reshuffle the list
+// under the cursor. The slice keeps positional order and swaps the selected row in for the last
+// row of the prefix instead.
+test('#49: the selected completed row survives the fold and the list keeps its order', () => {
+  const groups = [completedOf(plain(6))] // used = 1 header + 6 rows = 7
+  const folded = foldCompleted(groups, 4, { projectKey: '/x/a', id: 'd5' })[0] // room = 2
+  expect(folded.sessions.map((s: any) => s.id)).toEqual(['d0', 'd5']) // not ['d5', 'd0'] — no jump
+  expect(folded.hidden).toBe(4)
+})
+
+// The row displaced by the swap is never a protected one: protected rows sort to the front and the
+// selection adds at most one to protectedCount, so index room-1 is always unprotected.
+test('#49: keeping the selected row does not displace a failure', () => {
+  const sessions = [{ projectKey: '/x/a', id: 'boom', status: 'error' }, ...plain(5)]
+  const folded = foldCompleted([completedOf(sessions)], 4, { projectKey: '/x/a', id: 'd4' })[0]
+  expect(folded.sessions.map((s: any) => s.id)).toEqual(['boom', 'd4'])
+})
+
+test('#49: a selected row already inside the prefix is left exactly where it is', () => {
+  const folded = foldCompleted([completedOf(plain(6))], 4, { projectKey: '/x/a', id: 'd0' })[0]
+  expect(folded.sessions.map((s: any) => s.id)).toEqual(['d0', 'd1'])
+})
+
+// A selection pointing at a row in another group (or at nothing) must not perturb the fold — this
+// is the common case, since `completed` is not usually where the cursor is.
+test('#49: a selection outside completed folds exactly as before', () => {
+  const groups = [completedOf(plain(6))]
+  expect(foldCompleted(groups, 4, { projectKey: '/x/a', id: 'elsewhere' })[0].sessions.map((s: any) => s.id)).toEqual(
+    foldCompleted(groups, 4)[0].sessions.map((s: any) => s.id),
+  )
+})
