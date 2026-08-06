@@ -47,17 +47,28 @@ export const stripControl = (text: string): string => {
 //
 // Deliberately a closed list of unambiguous shapes rather than "anything starting with `[`": a
 // prompt legitimately starts with `[ok]` or `[1] retry`, and eating those would be the worse bug.
+// A generic `^\[[0-9;]+[a-z]` is where false positives start (`[2fix that` would die), so every
+// shape here ends in a terminator no prose reaches for, or is matched whole-remnant only.
 // Only a leading remnant is stripped — mid-text these shapes are far likelier to be prose.
 const RESIDUE = [
-  /^\[20[01]~/, // bracketed paste start/end
+  /^O[A-Z]$/, // SS3 arrow/F-key, e.g. `OA` — whole-remnant only, so `OK done` survives (#58)
   /^\[[IO]$/, // focus in/out — whole-remnant only, so `[Inbox]` survives
   /^\[[0-9]+;[0-9]+R/, // cursor position report
+  /^\[[0-9;]+u/, // kitty CSI-u key, e.g. `[97;5u` (#58)
+  /^\[[0-9;]+~/, // modifyOtherKeys / tilde keys, e.g. `[27;5;99~`; paste markers are a subset (#58)
+  /^\[[0-9]*n$/, // device status report, e.g. `[0n` — whole-remnant only, it is the loosest shape (#58)
   /^\[\?[0-9;]*[a-zA-Z]/, // device attributes and mode reports, e.g. `[?65;4c`
-  /^\][0-9]+;[\s\S]*$/, // OSC answer tail, e.g. `]11;rgb:1c1c/1c1c/1c1c`
+  /^\][0-9]+;\S*$/, // OSC answer tail, e.g. `]11;rgb:1c1c/1c1c/1c1c` — whole-remnant and
+  // whitespace-free, or a prompt like `]0;title of the thing` would be eaten to end of chunk (#58)
 ]
 
+// The paste terminator is the one shape that can never be leading — by definition it follows the
+// pasted text — so the leading-only loop below could never remove it, and it fires on every paste
+// while bracketed paste is left on (#58).
+const PASTE_TERMINATOR = /\[201~/g
+
 export const stripEscapeResidue = (text: string): string => {
-  let out = text
+  let out = text.replace(PASTE_TERMINATOR, '')
   for (let matched = true; matched && out; ) {
     matched = false
     for (const pattern of RESIDUE) {
