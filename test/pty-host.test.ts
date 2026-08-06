@@ -380,10 +380,11 @@ test('cursor visibility follows the gate: hidden while fleetview owns the termin
 
 // --- busy-detach guard: process-backed attaches (claude/copilot) ---
 //
-// Detaching kills the child, and for those backends the child IS the in-flight turn. Fresh output
-// (< 2s old) means "still working", so the first chord arms and paints a last-row notice; a second
-// chord within 3s of arming detaches for real. opencode never sets the option — its sessions live
-// on a server and lose nothing on detach.
+// Leaving the attachment kills the child, and for those backends the child IS the in-flight turn.
+// Fresh output (< 2s old) means "still working", so the first chord arms and paints a last-row
+// notice; a second chord within 3s of arming goes through for real. Both chord types are guarded —
+// Alt+N kills the turn exactly as dead as Ctrl+Z (#56). opencode never sets the option — its
+// sessions live on a server and lose nothing on detach.
 
 test('busy guard: fresh output arms on the first chord, and the second chord within 3s detaches', async () => {
   const { child, stdin, stdout, spawn } = harness()
@@ -399,7 +400,7 @@ test('busy guard: fresh output arms on the first chord, and the second chord wit
   expect(settled).toBe(false)
   expect(child.written).toEqual([]) // the chord is a chord, never input for the child
   const painted = stdout.written.join('')
-  expect(painted).toContain('still working — press again to detach')
+  expect(painted).toContain('still working — press again')
   expect(painted).toContain('\x1b7') // cursor saved…
   expect(painted).toContain('\x1b8') // …and restored around the transient notice
   t = 3500
@@ -437,6 +438,55 @@ test('busy guard: a second chord past the 3s window re-arms instead of detaching
   t = 6000
   stdin.emit('data', Buffer.from(DETACH)) // within 3s of the re-arm
   expect(await done).toEqual({ type: 'detach' })
+})
+
+// #56: Alt+N used to bypass the guard entirely and kill the in-flight turn with no warning.
+test('busy guard: Alt+N on a busy child arms instead of switching, and a second Alt+N switches', async () => {
+  const { child, stdin, stdout, spawn } = harness()
+  let t = 0
+  const done = attachPty({ command: 'claude', args: [], spawn, stdin, stdout, busyDetachGuard: true, now: () => t })
+  let settled = false
+  done.then(() => { settled = true })
+  t = 1000
+  child.emitData('streaming tokens')
+  t = 1500
+  stdin.emit('data', Buffer.from('\x1b2')) // Alt+2, 500ms after output → busy → arm, no switch
+  await Promise.resolve()
+  expect(settled).toBe(false)
+  expect(child.written).toEqual([]) // the chord is a chord, never input for the child
+  expect(stdout.written.join('')).toContain('still working — press again')
+  t = 3000
+  stdin.emit('data', Buffer.from('\x1b2')) // within the 3s arm window → the switch goes through
+  expect(await done).toEqual({ type: 'switch', index: 1 })
+})
+
+// guardArmedAt is shared across chord types, so arming with Ctrl+Z and confirming with Alt+2 works.
+test('busy guard: an armed Ctrl+Z followed by Alt+2 performs the switch, not a detach', async () => {
+  const { child, stdin, stdout, spawn } = harness()
+  let t = 0
+  const done = attachPty({ command: 'claude', args: [], spawn, stdin, stdout, busyDetachGuard: true, now: () => t })
+  let settled = false
+  done.then(() => { settled = true })
+  t = 1000
+  child.emitData('streaming tokens')
+  t = 1500
+  stdin.emit('data', Buffer.from(DETACH)) // arms
+  await Promise.resolve()
+  expect(settled).toBe(false)
+  t = 2000
+  stdin.emit('data', Buffer.from('\x1b2'))
+  expect(await done).toEqual({ type: 'switch', index: 1 })
+})
+
+test('busy guard: a stale child switches on the first Alt+N', async () => {
+  const { child, stdin, stdout, spawn } = harness()
+  let t = 0
+  const done = attachPty({ command: 'claude', args: [], spawn, stdin, stdout, busyDetachGuard: true, now: () => t })
+  t = 1000
+  child.emitData('done a while ago')
+  t = 4000
+  stdin.emit('data', Buffer.from('\x1b2')) // 3s since output → idle → straight through
+  expect(await done).toEqual({ type: 'switch', index: 1 })
 })
 
 test('busy guard off (the opencode default): a chord detaches immediately even mid-output', async () => {
