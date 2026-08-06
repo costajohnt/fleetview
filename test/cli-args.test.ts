@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { parseArgs, sessionJson, filterForList, underCwd, formatRow, parseModel, USAGE } from '../src/cli-args.ts'
+import { parseArgs, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, MIN_SESSION_ID_CHARS, USAGE } from '../src/cli-args.ts'
 
 test('parseModel splits provider/model and rejects a bare word', () => {
   expect(parseModel('anthropic/claude-opus-5')).toEqual({ providerID: 'anthropic', id: 'claude-opus-5' })
@@ -154,4 +154,24 @@ test('--backend takes a name and rides the same value branch as --model', () => 
 test('the help names the backend flag and its default', () => {
   expect(USAGE).toContain('--backend <name>')
   expect(USAGE).toContain('$FLEETVIEW_BACKEND')
+})
+
+// --- #33: a degenerate session id must not prefix-match every session ---
+
+test('#33: an empty or whitespace id is rejected, naming the unset-variable case that produces it', () => {
+  expect(sessionIdProblem('')).toMatch(/empty/)
+  expect(sessionIdProblem('   ')).toMatch(/empty/)
+  expect(sessionIdProblem(undefined)).toMatch(/empty/)
+})
+
+test('#33: an id too short to resolve is rejected with the length it needs', () => {
+  expect(sessionIdProblem('s')).toContain('too short')
+  expect(sessionIdProblem('ses')).toContain('too short')
+  expect(sessionIdProblem('ses')).toContain(String(MIN_SESSION_ID_CHARS))
+})
+
+test('#33: a usable prefix and a whole id both pass', () => {
+  expect(sessionIdProblem('ses_')).toBe(null)
+  expect(sessionIdProblem('ses_abc1')).toBe(null)
+  expect(sessionIdProblem('  ses_abc1  ')).toBe(null) // trimmed before measuring, not after
 })
