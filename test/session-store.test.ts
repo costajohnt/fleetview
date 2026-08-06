@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { createStore } from '../src/session-store.ts'
+import { createStore, errorLabel } from '../src/session-store.ts'
 
 const seed = (store: any) =>
   store.setSessions('repoA', [
@@ -279,6 +279,83 @@ test('session.error marks lastError and derives error status once the session go
   store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'UnknownError' } } })
   store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
   expect(store.get('repoA', 's1').status).toBe('error')
+})
+
+// --- #24: a failed row says why ---
+
+test('errorLabel: the live shape — name plus data.message', () => {
+  // Verbatim from the failure that motivated #24 (an OpenRouter model without tool support).
+  const err = { name: 'APIError', data: { message: 'No endpoints found that support tool use. Try disabling "bash".' } }
+  expect(errorLabel(err)).toBe('APIError: No endpoints found that support tool use. Try disabling "bash".')
+})
+
+test('errorLabel: thinner shapes — name only, message only, a bare string', () => {
+  expect(errorLabel({ name: 'UnknownError' })).toBe('UnknownError')
+  expect(errorLabel({ data: { message: 'boom' } })).toBe('boom')
+  expect(errorLabel({ message: 'boom' })).toBe('boom')
+  expect(errorLabel('boom')).toBe('boom')
+})
+
+test('errorLabel: no text worth showing is null, not a fabricated line', () => {
+  expect(errorLabel(true)).toBeNull() // session.error's sentinel: a failure happened, nothing said about it
+  expect(errorLabel(undefined)).toBeNull()
+  expect(errorLabel({})).toBeNull()
+  expect(errorLabel('')).toBeNull()
+})
+
+test('errorLabel: strips escapes — the error text is model/server output bound for raw stdout', () => {
+  expect(errorLabel({ name: 'APIError', data: { message: 'a\u001B]0;spoofed\u0007b' } })).toBe('APIError: a]0;spoofedb')
+})
+
+test('a failed row previews the error message instead of the assistant text it did not get', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', {
+    type: 'session.error',
+    properties: { sessionID: 's1', error: { name: 'APIError', data: { message: 'No endpoints found that support tool use.' } } },
+  })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('error')
+  expect(row.snippet).toBe('APIError: No endpoints found that support tool use.')
+})
+
+test('a session that did not fail keeps its ordinary snippet', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm0', role: 'assistant' } } })
+  store.apply('repoA', {
+    type: 'message.part.updated',
+    properties: { sessionID: 's1', part: { type: 'text', messageID: 'm0', text: 'all done' } },
+  })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').snippet).toBe('all done')
+})
+
+test('a failed row with a text-less error keeps the snippet it did have', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm0', role: 'assistant' } } })
+  store.apply('repoA', {
+    type: 'message.part.updated',
+    properties: { sessionID: 's1', part: { type: 'text', messageID: 'm0', text: 'running tests' } },
+  })
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1' } }) // the `true` sentinel path
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('error')
+  expect(row.snippet).toBe('running tests')
+})
+
+test('a pending request still outranks the error message in the snippet', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'APIError', data: { message: 'boom' } } } })
+  store.apply('repoA', { type: 'permission.asked', properties: { id: 'p1', sessionID: 's1', permission: 'bash', patterns: ['git push'] } })
+  expect(store.get('repoA', 's1').snippet).toBe('permission: bash git push')
 })
 
 test('a subsequent busy status clears lastError', () => {

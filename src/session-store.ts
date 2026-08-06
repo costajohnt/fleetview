@@ -135,6 +135,24 @@ export const questionLabel = (q: any) => {
   return stripControl(first?.question ?? first?.header ?? q.tool ?? q.id)
 }
 
+// #24: the human sentence behind a failure. Two payloads carry the same union — `session.error`'s
+// `error` and an assistant message's `info.error` — and the sentence lives in `data.message`
+// (verified live: `{name: 'APIError', data: {message: 'No endpoints found that support tool use…'}}`),
+// while thinner frames carry only a `name`, a bare string, or the `true` sentinel session.error
+// falls back to. Returns null whenever there is no text worth showing, so every caller can fall
+// back rather than print `error: undefined`.
+// Lives here for the same reason permissionLabel does: the store, peek and `fleetview logs` all
+// describe the same failure, and one label means they can never describe it differently.
+export const errorLabel = (err: unknown): string | null => {
+  if (typeof err === 'string') return stripControl(err) || null
+  if (!err || typeof err !== 'object') return null
+  const e = err as any
+  const message = typeof e.data?.message === 'string' ? e.data.message : typeof e.message === 'string' ? e.message : null
+  const name = typeof e.name === 'string' ? e.name : null
+  const text = name && message ? `${name}: ${message}` : message ?? name
+  return text ? stripControl(text) : null
+}
+
 // The entry with the lowest __seq — the one the user has actually been waiting on longest, and the
 // one peek offers to answer. Not `values().next()`: I3's rollback path deletes and reinserts, so
 // Map order alone can't be trusted (same reason pendingFor sorts).
@@ -169,6 +187,19 @@ const pendingSnippet = (r: SessionRecord): string | null => {
   const q = oldestPending(r.pendingQuestions)
   if (q) return snippet(`question: ${questionLabel(q)}`)
   return null
+}
+
+// #24: what a failed row previews. The bug this fixes is the mirror of #7's: at the moment a turn
+// fails, `snippetCache` holds whatever the model printed before failing — usually nothing at all —
+// so the row went red and said nothing about why, and the error text the server did send was
+// dropped on the floor. No `error: ` prefix, unlike the pending labels: the row's own badge already
+// reads `failed`, so the word would be the redundant half of the pair the glyph note above draws.
+// Run through `snippet` like everything else the row shows: same collapse, same 80-grapheme cap,
+// same stripControl. Null — not '' — when the error carries no text (the `true` sentinel), so a
+// failed row keeps the snippet it did have rather than losing it.
+const errorSnippet = (r: SessionRecord): string | null => {
+  const label = errorLabel(r.lastError)
+  return label ? snippet(label) : null
 }
 
 export function createStore() {
@@ -333,7 +364,12 @@ export function createStore() {
       // re-collapsing and re-segmenting a 200KB streamed reply on every render; a pending label is
       // one short wire string, bounded by the same 80 graphemes this call already spends on
       // `stripControl(title)` and the loop in `oldestAskedAt`.
-      snippet: pendingSnippet(r) ?? r.snippetCache, // I1: the fallback is computed once at write time, not recomputed on every render
+      // A live pending request still wins, then the error (#24), then the cached assistant text.
+      // The error is derived here rather than cached in a field for the same reason `pendingSnippet`
+      // is: `lastError` is written at two sites and cleared at four, and a parallel snippet field is
+      // only as good as the one site nobody remembered — where it would show a stale reason for a
+      // session that has since recovered. It is one short wire object, not a 200KB streamed reply.
+      snippet: pendingSnippet(r) ?? (status === 'error' ? errorSnippet(r) : null) ?? r.snippetCache, // I1: the last fallback is computed once at write time, not recomputed on every render
     }
   }
 

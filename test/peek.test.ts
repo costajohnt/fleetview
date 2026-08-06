@@ -48,6 +48,49 @@ test('Peek: escape sequences in a message body are stripped before render (M12)'
   expect(frame).toContain('a]8;;http://evil.exampleclick]8;;bPq;danger\\c') // payload rendered as inert text
 })
 
+// --- Peek: a failed turn's error (#24) ---
+
+test('Peek: an assistant message with info.error renders the reason instead of an empty reply', () => {
+  const frame = render(
+    React.createElement(Peek, {
+      target: { title: 't', projectKey: '/p' },
+      messages: [
+        { info: { role: 'user' }, parts: [{ type: 'text', text: 'do the thing' }] },
+        // The live shape: the turn failed server-side, so it carries no text parts at all.
+        { info: { role: 'assistant', error: { name: 'APIError', data: { message: 'No endpoints found that support tool use.' } } }, parts: [] },
+      ],
+      columns: 200,
+    }),
+  ).lastFrame()!
+  expect(frame).toContain('error: APIError: No endpoints found that support tool use.')
+})
+
+test('Peek: a turn that said something before failing keeps both the text and the error', () => {
+  const frame = render(
+    React.createElement(Peek, {
+      target: { title: 't', projectKey: '/p' },
+      messages: [
+        { info: { role: 'assistant', error: { name: 'APIError', data: { message: 'boom' } } }, parts: [{ type: 'text', text: 'starting' }] },
+      ],
+      columns: 200,
+    }),
+  ).lastFrame()!
+  expect(frame).toContain('starting')
+  expect(frame).toContain('error: APIError: boom')
+})
+
+test('Peek: a message with no error renders no error line', () => {
+  const frame = render(
+    React.createElement(Peek, {
+      target: { title: 't', projectKey: '/p' },
+      messages: [{ info: { role: 'assistant' }, parts: [{ type: 'text', text: 'all good' }] }],
+      columns: 200,
+    }),
+  ).lastFrame()!
+  expect(frame).toContain('all good')
+  expect(frame).not.toContain('error:')
+})
+
 // --- Peek: truncation counts rendered rows, not message entries (F3) ---
 
 // --- pending permission banner (Wave B) ---
