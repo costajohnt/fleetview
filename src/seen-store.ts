@@ -12,8 +12,12 @@ const baseDir = () => {
 export const defaultSeenFile = () =>
   join((process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? baseDir(), 'seen.json')
 
-// { "<repoId>:<sessionId>": { updated: <ms>, hasRun: <bool> } }
-export type SeenEntry = { updated: number; hasRun: boolean }
+// { "<repoId>:<sessionId>": { updated: <ms>, hasRun: <bool>, stopped?: <bool> } }
+// #53: `stopped` is written by the store's snapshot() and read back by setSessions — the server
+// reports an aborted session as plain idle, so the flag is fleetview's own memory of the abort. It
+// was on disk but missing from this declaration, which made reading it off the typed loadSeen
+// return a type error for a field that really is there.
+export type SeenEntry = { updated: number; hasRun: boolean; stopped?: boolean }
 export type SeenMap = Record<string, SeenEntry>
 
 export function loadSeen(file: string): SeenMap {
