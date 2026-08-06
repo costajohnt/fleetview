@@ -51,7 +51,10 @@ export type TextPart = Part & { type: 'text'; text: string }
 
 // GET /session/:id/message item — the {info, parts} envelope peek renders
 // (schemas: Message + Part). fleetview reads info.role and text parts' .text.
-export type MessageInfo = { id?: string; role?: string }
+// `error` is opencode's error union (NamedError: {name, data}) recorded on the assistant message
+// whose turn failed — #24's `{name: 'APIError', data: {message: '…'}}`. Left `unknown`: the union
+// has a dozen members and fleetview only ever hands it to errorLabel, which narrows defensively.
+export type MessageInfo = { id?: string; role?: string; error?: unknown }
 export type OpencodeMessage = { info?: MessageInfo; parts?: Part[] }
 
 // permission.asked payload (schema: EventPermissionAsked.properties).

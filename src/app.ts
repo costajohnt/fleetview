@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { basename } from 'node:path'
-import { Box, Text, useInput, useApp, useStdout } from 'ink'
+import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
@@ -189,6 +189,13 @@ export function App({
 }: AppProps): any {
   const { exit } = useApp()
   const { stdout } = useStdout()
+  // Terminal size has to come from the hook, not from `stdout.columns`/`stdout.rows` read during
+  // render. Ink's own resize handler re-lays-out the last React output it has — it never re-invokes
+  // the components — so a width read at render time stays at the old value and the frame keeps the
+  // layout it had before the resize until some unrelated state change re-renders App. `useWindowSize`
+  // subscribes to the stdout resize event (gated-stdout forwards the real terminal's) and re-renders
+  // with the new size, which is the repaint that was missing.
+  const { columns: termColumns, rows: termRows } = useWindowSize()
   const store = useMemo(() => createStore(), [])
   const [, force] = useState(0)
   // A caller that passes no registry gets the opencode adapter built off the client it already
@@ -235,6 +242,11 @@ export function App({
   // to `completed` mid-keystroke, and an index would silently retarget the second Ctrl+X at
   // whatever slid into that slot. The index is derived from this on every render.
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  // ...but the key alone is not that identity: row keys are namespaced by the group they render in
+  // (`state:running:<id>`), so the key of a session changes when the session changes state group.
+  // This remembers which session the current selection means, so it can be re-resolved to whatever
+  // key that session has now (#18).
+  const selectedSessionRef = useRef<{ projectKey: string; id: string } | null>(null)
   const [view, setView] = useState('main') // main | browse
   const [rosterState, setRosterState] = useState<RosterState>(roster)
   const [mode, setMode] = useState('roster') // roster | rename | peek | help
@@ -876,7 +888,7 @@ export function App({
   // the roster out of the region Ink can repaint.
   //
   // Each of those components now truncates to one row per line, so counting lines is sound.
-  const columns = stdout?.columns ?? 80
+  const columns = termColumns
   // One name for "the moved-to-the-background line is on screen": chromeRows, the mouse y→row
   // mapping and the render condition must never disagree about this row, or clicks land one line
   // off (that bug shipped once).
@@ -894,7 +906,7 @@ export function App({
     (mode === 'peek' ? 0 : INPUT_BOX_ROWS) +
     1 + // hints
     (serverDown ? 1 : 0)
-  const maxRows = Math.max(1, (stdout?.rows ?? 24) - chromeRows)
+  const maxRows = Math.max(1, termRows - chromeRows)
   const groups =
     view === 'browse'
       ? browseGroups()
@@ -918,11 +930,36 @@ export function App({
   // same helper the roster draws with, so navigation can never point at a row that isn't there.
   const navRows = navigableRows(groups, collapsed)
   const keyOf = (row: any) => `${row.projectKey}:${row.id}`
-  const navIndex = navRows.findIndex((r) => r.key === selectedKey)
+  const keyedIndex = navRows.findIndex((r) => r.key === selectedKey)
+  // The key went stale — either the selected session moved groups (its key is namespaced by the
+  // group, so stopping a running session renames its row out from under the selection) or the row
+  // is really gone. Re-resolve by identity first: without this the selection silently jumps to the
+  // first session in the list, and a second Ctrl+X lands on an unrelated running session (#18).
+  const navIndex =
+    keyedIndex >= 0
+      ? keyedIndex
+      : navRows.findIndex(
+          (r: any) =>
+            r.type === 'session' &&
+            r.session.id === selectedSessionRef.current?.id &&
+            r.session.projectKey === selectedSessionRef.current?.projectKey,
+        )
   // Falls back to the first session rather than the first header: landing on a header at startup
   // would make Enter collapse a group when the user expected it to attach.
   const navSel = navIndex >= 0 ? navIndex : Math.max(0, navRows.findIndex((r) => r.type === 'session'))
   const navRow = navRows[navSel]
+  // Remember what the selection currently *means*, including the implicit startup selection nobody
+  // pressed a key for — that is the identity the lookup above re-resolves against on the render
+  // where the key stops matching. A header selection records nothing: it is a group, not a session,
+  // and must not be dragged onto a session row later.
+  if (navRow) selectedSessionRef.current = navRow.type === 'session' ? { projectKey: navRow.session.projectKey, id: navRow.session.id } : null
+  // Write the re-resolved key back to state so everything keyed off `selectedKey` (peek's
+  // selection-follow, the roster's highlight) stays in step with the identity resolution above.
+  // Only fires when a session was actually re-found, so the plain fallback can't loop.
+  const rekeyed = keyedIndex < 0 && navIndex >= 0 ? navRows[navIndex].key : null
+  useEffect(() => {
+    if (rekeyed) setSelectedKey(rekeyed)
+  }, [rekeyed])
 
   // Resolve a by-identity selection request against whatever rows actually exist this render. The
   // requester (the detach handler) cannot build the key itself: keys are namespaced by the live
@@ -1708,7 +1745,7 @@ export function App({
       // Paging keys stay in help; anything else closes it, per "any key to close".
       // Clamp on the way up as well as down: letting the counter climb past the last page made ↑
       // look broken until it had been pressed as many times as ↓ had been over-pressed.
-      const lastPage = helpPage(helpLines(), stdout?.rows ?? 24, 0).pages - 1
+      const lastPage = helpPage(helpLines(), termRows, 0).pages - 1
       if (key.downArrow || key.pageDown || ch === ' ') return setHelpPageIndex((p) => Math.min(lastPage, p + 1))
       if (key.upArrow || key.pageUp) return setHelpPageIndex((p) => Math.max(0, p - 1))
       setHelpPageIndex(0)
@@ -1745,7 +1782,7 @@ export function App({
   // Help is an overlay, so it gets the whole terminal — but bounded, because it is 30-odd rows
   // and a standard terminal is 24. `↓` pages it.
   if (mode === 'help') {
-    return React.createElement(Help, { maxRows: stdout?.rows ?? 24, columns, page: helpPageIndex })
+    return React.createElement(Help, { maxRows: termRows, columns, page: helpPageIndex })
   }
 
   if (mode === 'rename' && target) {
@@ -1779,7 +1816,7 @@ export function App({
   // the other direction — content taller than the terminal breaks Ink's repaint region.
   return React.createElement(
     Box,
-    { flexDirection: 'column', height: stdout?.rows ?? 24 },
+    { flexDirection: 'column', height: termRows },
     // allMembers, not the rendered rows: the header describes the fleet, so a filter that hides a
     // blocked session must not make the summary contradict the roster directly under it.
     React.createElement(Header, { sessions: allMembers, model: dispatchModel, cwd, columns }),

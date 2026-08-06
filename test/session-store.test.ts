@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { createStore } from '../src/session-store.ts'
+import { createStore, memberTitle, messageBody, errorLabel } from '../src/session-store.ts'
 
 const seed = (store: any) =>
   store.setSessions('repoA', [
@@ -281,6 +281,83 @@ test('session.error marks lastError and derives error status once the session go
   expect(store.get('repoA', 's1').status).toBe('error')
 })
 
+// --- #24: a failed row says why ---
+
+test('errorLabel: the live shape — name plus data.message', () => {
+  // Verbatim from the failure that motivated #24 (an OpenRouter model without tool support).
+  const err = { name: 'APIError', data: { message: 'No endpoints found that support tool use. Try disabling "bash".' } }
+  expect(errorLabel(err)).toBe('APIError: No endpoints found that support tool use. Try disabling "bash".')
+})
+
+test('errorLabel: thinner shapes — name only, message only, a bare string', () => {
+  expect(errorLabel({ name: 'UnknownError' })).toBe('UnknownError')
+  expect(errorLabel({ data: { message: 'boom' } })).toBe('boom')
+  expect(errorLabel({ message: 'boom' })).toBe('boom')
+  expect(errorLabel('boom')).toBe('boom')
+})
+
+test('errorLabel: no text worth showing is null, not a fabricated line', () => {
+  expect(errorLabel(true)).toBeNull() // session.error's sentinel: a failure happened, nothing said about it
+  expect(errorLabel(undefined)).toBeNull()
+  expect(errorLabel({})).toBeNull()
+  expect(errorLabel('')).toBeNull()
+})
+
+test('errorLabel: strips escapes — the error text is model/server output bound for raw stdout', () => {
+  expect(errorLabel({ name: 'APIError', data: { message: 'a\u001B]0;spoofed\u0007b' } })).toBe('APIError: a]0;spoofedb')
+})
+
+test('a failed row previews the error message instead of the assistant text it did not get', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', {
+    type: 'session.error',
+    properties: { sessionID: 's1', error: { name: 'APIError', data: { message: 'No endpoints found that support tool use.' } } },
+  })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('error')
+  expect(row.snippet).toBe('APIError: No endpoints found that support tool use.')
+})
+
+test('a session that did not fail keeps its ordinary snippet', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm0', role: 'assistant' } } })
+  store.apply('repoA', {
+    type: 'message.part.updated',
+    properties: { sessionID: 's1', part: { type: 'text', messageID: 'm0', text: 'all done' } },
+  })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').snippet).toBe('all done')
+})
+
+test('a failed row with a text-less error keeps the snippet it did have', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm0', role: 'assistant' } } })
+  store.apply('repoA', {
+    type: 'message.part.updated',
+    properties: { sessionID: 's1', part: { type: 'text', messageID: 'm0', text: 'running tests' } },
+  })
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1' } }) // the `true` sentinel path
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('error')
+  expect(row.snippet).toBe('running tests')
+})
+
+test('a pending request still outranks the error message in the snippet', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'APIError', data: { message: 'boom' } } } })
+  store.apply('repoA', { type: 'permission.asked', properties: { id: 'p1', sessionID: 's1', permission: 'bash', patterns: ['git push'] } })
+  expect(store.get('repoA', 's1').snippet).toBe('permission: bash git push')
+})
+
 test('a subsequent busy status clears lastError', () => {
   const store: any = createStore()
   seed(store)
@@ -292,6 +369,50 @@ test('a subsequent busy status clears lastError', () => {
   expect(store.get('repoA', 's1').status).toBe('running')
   store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
   expect(store.get('repoA', 's1').status).toBe('done')
+})
+
+// #21: aborting a run makes opencode emit a session.error carrying MessageAbortedError. Recording
+// that as a failure rendered every Ctrl+X as `failed` and inflated the header's failed count, while
+// `ls` (reading the persisted stopped flag) said `stopped`.
+test('an abort error renders stopped, not error, when the user stopped the session', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.markStopped('repoA', 's1')
+  store.apply('repoA', {
+    type: 'session.error',
+    properties: { sessionID: 's1', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } },
+  })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('stopped')
+})
+
+// The abort name is unambiguous, so a stop fleetview didn't issue itself — another instance, or
+// opencode's own TUI — is still a stop, and must render the same way the local one does. That also
+// keeps the persisted flag (and therefore `ls`) in step with what the live roster showed.
+test('an abort error alone marks the session stopped even without a local markStopped', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', {
+    type: 'session.error',
+    properties: { sessionID: 's1', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } },
+  })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('stopped')
+  expect(store.snapshot()['repoA:s1'].stopped).toBe(true)
+})
+
+// The other half of #21: only the abort name is exempt. A genuine failure still outranks the stop,
+// including one the user then aborted out of — the failure is the news.
+test('a non-abort error still renders error, even on a stopped session', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'UnknownError' } } })
+  store.markStopped('repoA', 's1')
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('error')
 })
 
 test('error takes priority over done but not over waiting/running', () => {
@@ -1467,4 +1588,73 @@ test('#7: a long question truncates through the same 80-grapheme cap the assista
   const { snippet } = store.get('repoA', 's1')
   expect(snippet.length).toBe(80)
   expect(snippet.startsWith('question: xxx')).toBe(true)
+})
+
+// --- #32: messageBody / memberTitle ---
+
+test('#32: a message with text parts renders its text, and its tool output stays out of the way', () => {
+  const m = {
+    parts: [
+      { type: 'text', text: 'here is the answer' },
+      { type: 'tool', state: { output: 'ls: a\nb\nc' } },
+    ],
+  }
+  expect(messageBody(m)).toBe('here is the answer')
+})
+
+test('#32: a shell job — no text parts at all — renders its tool output instead of nothing', () => {
+  const m = { info: { role: 'assistant' }, parts: [{ type: 'tool', state: { output: 'shell-job-done\n' } }] }
+  expect(messageBody(m)).toBe('shell-job-done\n')
+})
+
+test('#32: several tool parts join one per line, and a tool part with no output contributes nothing', () => {
+  const m = {
+    parts: [
+      { type: 'tool', state: { output: 'first' } },
+      { type: 'tool', state: {} },
+      { type: 'tool', state: { output: 'second' } },
+    ],
+  }
+  expect(messageBody(m)).toBe('first\nsecond')
+})
+
+test('#32: tool output is stripped of control sequences like every other body (M12)', () => {
+  const esc = String.fromCharCode(27)
+  const m = { parts: [{ type: 'tool', state: { output: `${esc}]0;pwned${String.fromCharCode(7)}done` } }] }
+  expect(messageBody(m)).not.toContain(esc)
+  expect(messageBody(m)).toContain('done')
+})
+
+test('#32: a message with neither text nor tool parts, or no parts at all, is empty rather than a throw', () => {
+  expect(messageBody({ parts: [] })).toBe('')
+  expect(messageBody({})).toBe('')
+  expect(messageBody(null)).toBe('')
+  expect(messageBody({ parts: [{ type: 'reasoning', text: 'thinking out loud' }] })).toBe('')
+})
+
+test('#32: a real server title always wins over the roster member prompt', () => {
+  expect(memberTitle('fix the flaky test', { prompt: 'sleep 5', shell: true })).toBe('fix the flaky test')
+})
+
+test('#32: the placeholder title falls back to a shell member prompt, rendered as the `! cmd` the roster shows', () => {
+  expect(memberTitle('New session - 2026-07-22T19:51:37.625Z', { prompt: 'sleep 5 && echo shell-job-done', shell: true })).toBe(
+    '! sleep 5 && echo shell-job-done',
+  )
+})
+
+test('#32: a non-shell member falls back to its bare prompt, with no `!` invented', () => {
+  expect(memberTitle('New session - 2026-07-22T19:51:37.625Z', { prompt: 'write the docs' })).toBe('write the docs')
+})
+
+test('#32: no member, no prompt, or a blank prompt leaves the placeholder alone rather than blanking the row', () => {
+  const placeholder = 'New session - 2026-07-22T19:51:37.625Z'
+  expect(memberTitle(placeholder, undefined)).toBe(placeholder)
+  expect(memberTitle(placeholder, {})).toBe(placeholder)
+  expect(memberTitle(placeholder, { prompt: '   ' })).toBe(placeholder)
+  expect(memberTitle(placeholder, { prompt: 42 as any })).toBe(placeholder)
+})
+
+test('#32: a 2000-character member prompt is truncated to one row, not printed whole into `ls`', () => {
+  const title = memberTitle('New session - 2026-07-22T19:51:37.625Z', { prompt: 'x'.repeat(2000) })
+  expect(title.length).toBe(80)
 })
