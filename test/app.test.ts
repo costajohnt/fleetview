@@ -3422,3 +3422,167 @@ test('#34: a member of a project that never seeded is not treated as a ghost', a
   await tick()
   expect(lastFrame()).not.toContain('phantom dispatch')
 })
+
+// --- #49 / #60 / #59 / #47: the selection must survive the fold, and the roster must not act on
+// bytes it has no business reading ---
+
+// ink-testing-library's stdout reports 100 columns and no rows, so App falls back to whatever the
+// runner's terminal is. Defining `rows` and emitting `resize` is what drives useWindowSize — the
+// only way to make `maxRows` (and therefore the fold) deterministic from a test.
+const setRows = (stdout: any, rows: number) => {
+  Object.defineProperty(stdout, 'rows', { value: rows, configurable: true })
+  stdout.emit('resize')
+}
+
+// #49: `navRows` is built from the *rendered* groups, so a completed row folded into `… N more`
+// was in neither the key lookup nor the identity re-resolution added for #18 — the selection
+// silently fell back to the first session on screen (a running one) and the next key acted on
+// that. The first ^x is not gated by the two-press arm, so it aborted a session the user never
+// selected. One row less of terminal is all it takes.
+test('#49: a selected completed row that would fold away stays selected, and ^x targets it', async () => {
+  const deps = makeDeps()
+  const now = Date.now()
+  deps.client.listSessions = vi.fn(() =>
+    Promise.resolve([
+      ...Array.from({ length: 3 }, (_, i) => ({ id: `r${i}`, title: `running job ${i}`, time: { updated: now - i } })),
+      ...Array.from({ length: 6 }, (_, i) => ({ id: `c${i}`, title: `finished job ${i}`, time: { updated: now - 1000 - i * 10 } })),
+    ]),
+  )
+  deps.roster = {
+    groupBy: 'state',
+    sessions: [
+      ...Array.from({ length: 3 }, (_, i) => ({ worktree: '/x/alpha', id: `r${i}`, addedAt: i })),
+      ...Array.from({ length: 6 }, (_, i) => ({ worktree: '/x/alpha', id: `c${i}`, addedAt: 10 + i })),
+    ],
+  }
+  const { stdin, lastFrame, stdout } = render(React.createElement(App, { ...deps, onAction: vi.fn() })) as any
+  await tick() // let useWindowSize's resize listener mount before driving the terminal size
+  setRows(stdout, 40) // roomy: nothing folds yet
+  await waitFor(() => lastFrame().includes('finished job 5'))
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  for (let i = 0; i < 3; i++) onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: `r${i}`, status: { type: 'busy' } } })
+  // sectionBody() can't be used here: the header summary line also contains every category word.
+  const sectionOf = (title: string) => {
+    const lines: string[] = lastFrame().split('\n')
+    const row = lines.findIndex((l) => l.includes(title))
+    const headers = lines.map((l, i) => [l.trim(), i] as const).filter(([l]) => STATE_HEADERS.includes(l))
+    return headers.filter(([, i]) => i < row).at(-1)?.[0]
+  }
+  await waitFor(() => sectionOf('running job 0') === 'working' && sectionOf('finished job 5') === 'completed')
+  // ↓ clamps at the last nav row, which is the oldest completed session — no need to count rows or
+  // read the highlight out of the ANSI. Extra presses are idempotent at the clamp.
+  for (let i = 0; i < 20; i++) {
+    stdin.write('\x1B[B')
+    await tick()
+  }
+  // Shrink one row at a time until the list first stops fitting, rather than computing chromeRows
+  // here — that arithmetic is the thing under test, not the test's job to reproduce.
+  const allShown = () => Array.from({ length: 6 }, (_, i) => `finished job ${i}`).every((t) => lastFrame().includes(t))
+  for (let rows = 40; rows > 8 && allShown(); rows--) {
+    setRows(stdout, rows - 1)
+    await tick()
+  }
+  expect(allShown()).toBe(false) // a completed row no longer fits
+  expect(lastFrame()).toContain('finished job 5') // ...and it is not the selected one
+  expect(lastFrame()).toMatch(/… \d+ more/) // the row that went is folded away, not scrolled off
+  await pressUntil(stdin, '\x18', () => deps.client.abortSession.mock.calls.length > 0)
+  expect(deps.client.abortSession).toHaveBeenCalledWith('c5', '/x/alpha')
+}, 20000)
+
+// #60: Ink 7 turns one stdin read into several key events and dispatches them all in a single
+// synchronous pass, but `isActive: false` only lands on the next render — so `→` and `^X` typed
+// fast enough to coalesce (key repeat, paste, or a render stalling the loop) both reached the
+// roster and the ^X stopped the very row being attached to.
+test('#60: → and ^X in one stdin read attach the row without aborting it', async () => {
+  const deps = makeDeps()
+  const onAction = vi.fn((a: any) => (a.type === 'enter' ? new Promise(() => {}) : undefined))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  // One write, two keys. Retried because Node can drop a stdin chunk wholesale (see pressUntil) —
+  // a dropped chunk delivers neither key, so the retry cannot mask the bug.
+  await pressUntil(stdin, '\x1B[C\x18', () => onAction.mock.calls.some((c: any) => c[0].type === 'enter'))
+  await tick()
+  expect(deps.client.abortSession).not.toHaveBeenCalled()
+  expect(onAction.mock.calls.filter((c: any) => c[0].type === 'enter')).toHaveLength(1)
+})
+
+// #59: `if (backgrounded) setBackgrounded(null)` ran before every other branch, so any byte in the
+// post-resume quiet window — a fragment of the child's terminal-query answers, a mouse report —
+// destroyed the Esc-undo. Unlike clearing the input, that one is not recoverable.
+//
+// RESUME_QUIET_MS is 50ms of real time and Ink's re-render after a detach occasionally takes
+// longer than that on a loaded machine, so the attach/detach is retried until one press really
+// lands inside the window. Retrying can only make the assertion easier to fail, never to pass.
+test('#59: a byte inside the post-resume quiet window does not dismiss the background notice', async () => {
+  const deps = makeDeps()
+  let detach: any
+  const onAction = vi.fn((a: any) => (a.type === 'enter' ? new Promise((r) => { detach = r }) : undefined))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  const gone = () => !lastFrame().includes('moved to the background')
+  let landed = false
+  for (let attempt = 0; attempt < 8 && !landed; attempt++) {
+    await pressUntil(stdin, '\r', () => Boolean(detach)) // empty input → attach
+    await waitFor(() => lastFrame() === '')
+    const settle = detach
+    detach = undefined
+    const resumed = Date.now()
+    settle({ detached: true, sessionId: 's1', worktree: '/x/alpha' })
+    await waitFor(() => !gone(), 3000, 1)
+    if (Date.now() - resumed >= 40) {
+      await pressUntil(stdin, '\x1B[B', gone) // missed the window — spend the notice and retry
+      continue
+    }
+    // A storm of presses, not one: Node can drop the first stdin chunk written after a detach
+    // re-activates useInput (see pressUntil), and a dropped byte would pass this test on the
+    // unfixed code by never reaching the handler at all.
+    while (Date.now() - resumed < 45) {
+      stdin.write('\x1B[B')
+      await new Promise((r) => setTimeout(r, 2))
+    }
+    expect(lastFrame()).toContain('moved to the background')
+    landed = true
+    // Once the window has lapsed the notice dismisses exactly as it always did.
+    await pressUntil(stdin, '\x1B[B', gone)
+  }
+  expect(landed, 'no press landed inside the quiet window').toBe(true)
+}, 30000)
+
+// #47: ^G hands the terminal to $EDITOR through a blocking spawnSync, so Ink never suspends and
+// never drains — bytes the editor leaves unread arrive as roster keystrokes. A bare ESC among them
+// hit `if (!empty) return setInput('')` and wiped the prompt that had just been edited, after the
+// temp file backing it was already deleted. The quiet-window guard now covers the whole branch.
+test('#47: Escape inside the post-resume quiet window does not clear the just-edited prompt', async () => {
+  const deps = makeDeps()
+  let finishEdit: any
+  const onAction = vi.fn((a: any) => (a.type === 'edit' ? new Promise((r) => { finishEdit = r }) : undefined))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  const cleared = () => !lastFrame().includes('edited prompt text')
+  let landed = false
+  for (let attempt = 0; attempt < 8 && !landed; attempt++) {
+    await pressUntil(stdin, '\x07', () => Boolean(finishEdit)) // ^G
+    const settle = finishEdit
+    finishEdit = undefined
+    const resumed = Date.now()
+    settle('edited prompt text')
+    await waitFor(() => !cleared(), 3000, 1)
+    if (Date.now() - resumed >= 40) {
+      await pressUntil(stdin, '\x1B', cleared) // missed the window — clear it and retry
+      continue
+    }
+    // A storm of presses, not one: Node can drop the first stdin chunk written after the editor
+    // hand-back re-activates useInput (see pressUntil), and a dropped byte would pass this test on
+    // the unfixed code by never reaching the handler at all.
+    while (Date.now() - resumed < 45) {
+      stdin.write('\x1B')
+      await new Promise((r) => setTimeout(r, 2))
+    }
+    expect(lastFrame()).toContain('edited prompt text')
+    landed = true
+  }
+  expect(landed, 'no press landed inside the quiet window').toBe(true)
+  expect(onAction).not.toHaveBeenCalledWith({ type: 'quit' })
+  // And after the window a typed Escape clears it, so the guard is a delay and not a new dead key.
+  await pressUntil(stdin, '\x1B', cleared)
+}, 30000)
