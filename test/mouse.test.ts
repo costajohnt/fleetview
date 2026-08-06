@@ -16,6 +16,14 @@ test('parseMouseEvents reads SGR press, release, and wheel — with or without t
   expect(parseMouseEvents('')).toEqual([])
 })
 
+// #57: fleetview only ever turns on ?1000/?1006, but an attached child can leave motion tracking
+// on — and reopening the gate puts SGR encoding back, so movement would report as a press.
+test('MOUSE_OFF resets the motion-tracking modes an attached child may have left on', () => {
+  for (const mode of ['1000', '1002', '1003', '1006', '1015']) expect(MOUSE_OFF).toContain(mode)
+  expect(MOUSE_OFF).toBe('\x1b[?1000;1002;1003;1006;1015l')
+  expect(MOUSE_ON).toBe('\x1b[?1000;1006h') // unchanged: fleetview still asks for press/release only
+})
+
 test('gatedStdout with mouse: on at creation, off when the gate closes, on again when it reopens', () => {
   const writes: any[] = []
   const target = { write: (c: any) => (writes.push(c), true), isTTY: true, columns: 80, rows: 24 }

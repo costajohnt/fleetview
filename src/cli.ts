@@ -599,6 +599,24 @@ export async function main() {
 
 type Launch = { launchModel?: { providerID: string; id: string } | null; launchAgent?: string | null; launchBackend?: string }
 
+// A child killed with child.kill() never gets to put back the input modes it turned on, and every
+// one of them keeps sending fleetview bytes it never asked for: focus reporting answers a window
+// focus change with ESC[I / ESC[O, bracketed paste wraps pastes in ESC[200~ … ESC[201~, application
+// cursor keys re-spell the arrows, and modifyOtherKeys / kitty keyboard re-spell everything else.
+// Those sequences arrive fragmented often enough that their printable tails land in the dispatch
+// input as phantom characters (#20). Reclaiming the terminal means reclaiming its modes, so reset
+// the ones an attached TUI plausibly set — a terminal ignores a reset for a mode it never had on.
+// Declared above runRoster because RESTORE_SCREEN needs it too (#57).
+export const RESET_INPUT_MODES = '\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[>4;0m\x1b[<u'
+
+// What the exit/signal path puts back. Mouse-off belongs here: a crash must never leave the user's
+// shell interpreting clicks. `?25h` too: the crash path must never leave the user's shell without a
+// cursor now that the gate hides it while fleetview owns the terminal. And RESET_INPUT_MODES (#57):
+// a signal or crash while attached is exactly the case that constant exists for, yet it used to be
+// written only on the clean resume path (reclaimTerminal) — leaving bracketed paste, focus
+// reporting, DECCKM and the kitty stack on in the shell fleetview hands back.
+export const RESTORE_SCREEN = `${MOUSE_OFF}${RESET_INPUT_MODES}\x1b[?25h\x1b[?1049l`
+
 async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = {}) {
   const rosterFile = defaultRosterFile()
   const ensureServer = makeEnsureServer({ isServerHealthy, isAuthEnforced, probeServer, spawnServer, saveServer, serverFile })
@@ -610,10 +628,7 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
   // them too (Node kills the process without it otherwise). Skipped when stdout isn't a TTY so
   // piping fleetview's output somewhere doesn't emit escape garbage.
   const tty = process.stdout.isTTY
-  // Mouse-off belongs here too: a crash must never leave the user's shell interpreting clicks.
-  // `?25h` too: the crash path must never leave the user's shell without a cursor now that the
-  // gate hides it while fleetview owns the terminal.
-  const restoreScreen = () => process.stdout.write(`${MOUSE_OFF}\x1b[?25h\x1b[?1049l`)
+  const restoreScreen = () => process.stdout.write(RESTORE_SCREEN)
   if (tty) {
     process.stdout.write('\x1b[?1049h')
     process.on('exit', restoreScreen)
@@ -750,15 +765,6 @@ async function rosterLoop(
 // from inside the tree and it also takes over the stdin handoff that pty-host owns — not a trade
 // worth making for a screen clear.
 const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
-
-// A child killed with child.kill() never gets to put back the input modes it turned on, and every
-// one of them keeps sending fleetview bytes it never asked for: focus reporting answers a window
-// focus change with ESC[I / ESC[O, bracketed paste wraps pastes in ESC[200~ … ESC[201~, application
-// cursor keys re-spell the arrows, and modifyOtherKeys / kitty keyboard re-spell everything else.
-// Those sequences arrive fragmented often enough that their printable tails land in the dispatch
-// input as phantom characters (#20). Reclaiming the terminal means reclaiming its modes, so reset
-// the ones an attached TUI plausibly set — a terminal ignores a reset for a mode it never had on.
-const RESET_INPUT_MODES = '\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[>4;0m\x1b[<u'
 
 // TODO(types): `out` (gated stdout) and `instance` (Ink render handle) come from untyped modules.
 export function reclaimTerminal(out: any, instance: any) {
