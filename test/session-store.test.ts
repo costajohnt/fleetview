@@ -371,6 +371,50 @@ test('a subsequent busy status clears lastError', () => {
   expect(store.get('repoA', 's1').status).toBe('done')
 })
 
+// #21: aborting a run makes opencode emit a session.error carrying MessageAbortedError. Recording
+// that as a failure rendered every Ctrl+X as `failed` and inflated the header's failed count, while
+// `ls` (reading the persisted stopped flag) said `stopped`.
+test('an abort error renders stopped, not error, when the user stopped the session', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.markStopped('repoA', 's1')
+  store.apply('repoA', {
+    type: 'session.error',
+    properties: { sessionID: 's1', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } },
+  })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('stopped')
+})
+
+// The abort name is unambiguous, so a stop fleetview didn't issue itself — another instance, or
+// opencode's own TUI — is still a stop, and must render the same way the local one does. That also
+// keeps the persisted flag (and therefore `ls`) in step with what the live roster showed.
+test('an abort error alone marks the session stopped even without a local markStopped', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', {
+    type: 'session.error',
+    properties: { sessionID: 's1', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } },
+  })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('stopped')
+  expect(store.snapshot()['repoA:s1'].stopped).toBe(true)
+})
+
+// The other half of #21: only the abort name is exempt. A genuine failure still outranks the stop,
+// including one the user then aborted out of — the failure is the news.
+test('a non-abort error still renders error, even on a stopped session', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'UnknownError' } } })
+  store.markStopped('repoA', 's1')
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('error')
+})
+
 test('error takes priority over done but not over waiting/running', () => {
   const store: any = createStore()
   seed(store)

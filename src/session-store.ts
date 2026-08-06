@@ -105,6 +105,13 @@ const isQuestion = (text: string) => {
 // refresh after the error adopts whatever the server reports; only a later bump retires it.
 const ERROR_ANCHOR_UNKNOWN = -1
 
+// #21: opencode reports an aborted run through the same session.error channel as a real failure,
+// carrying `{ name: 'MessageAbortedError', data: { message } }` (verified against the 1.18.5
+// binary, which builds that exact name for any aborted/interrupted message). The name is the only
+// thing that distinguishes a stop the user asked for from a failure they didn't.
+const isAbortError = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'MessageAbortedError'
+
 const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.test(title)
 
 // M5: grapheme-safe — a raw slice(0, 80) can chop a surrogate pair in half at the boundary.
@@ -572,6 +579,21 @@ export function createStore() {
         if (!p.sessionID) return
         const r = upsert(projectKey, p.sessionID)
         if (!r) return // a subagent's failure surfaces through its parent
+        // #21: an aborted run emits an error frame of its own, and recording it as `lastError`
+        // made every Ctrl+X render as `failed` (and inflate the header's failure count) because
+        // `derive` ranks error above stopped. An abort is the user's own instruction, not a
+        // failure, so it never becomes an error: it marks the session stopped instead — the same
+        // conclusion `ls` reaches from the persisted flag, so live and seeded rows now agree.
+        // opencode's own TUI drops this frame the same way (`error.name === 'MessageAbortedError'`
+        // → no error toast), and the name is unambiguous, so the stop is recorded even when the
+        // abort came from another fleetview instance or opencode's TUI rather than from app.ts.
+        if (isAbortError(p.error)) {
+          r.stopped = true
+          if (isRunOpen(r)) r.runEndedAt = Date.now()
+          r.updatedAt = Date.now()
+          notify()
+          return
+        }
         r.lastError = p.error ?? true
         // UNKNOWN, not "the last value we happened to hear". Recording an error bumps the
         // session's server-side time.updated, and fleetview learns that value from a separate
