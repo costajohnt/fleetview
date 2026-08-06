@@ -4,7 +4,26 @@ import { mkdtempSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSy
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
-import { makeEnsureServer, makePersistSeen, editPrompt, looksLikeOpencodeServer, matchSessions, runBg, runServer } from '../src/cli.ts'
+import { makeEnsureServer, makePersistSeen, editPrompt, looksLikeOpencodeServer, matchSessions, runBg, runServer, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
+import { MOUSE_OFF } from '../src/ui/mouse.ts'
+
+// #57: the exit/signal path (restoreScreen, registered on `exit` and reached from SIGTERM/HUP/INT)
+// used to put back only the screen, leaving bracketed paste, focus reporting, DECCKM, modifyOtherKeys
+// and any kitty stack entry on in the shell fleetview hands back.
+test('restoreScreen puts back the input modes as well as the mouse, cursor and alternate screen', () => {
+  const written: string[] = []
+  const restoreScreen = () => written.push(RESTORE_SCREEN) // exactly what runRoster writes to stdout
+  restoreScreen()
+  const out = written.join('')
+  expect(out.startsWith(MOUSE_OFF)).toBe(true)
+  expect(out).toContain(RESET_INPUT_MODES)
+  expect(out).toContain('\x1b[?2004l') // bracketed paste
+  expect(out).toContain('\x1b[?1004l') // focus reporting
+  expect(out).toContain('\x1b[?1l') // DECCKM (application cursor keys)
+  expect(out).toContain('\x1b[>4;0m') // modifyOtherKeys
+  expect(out).toContain('\x1b[<u') // kitty keyboard stack pop
+  expect(out.endsWith('\x1b[?25h\x1b[?1049l')).toBe(true)
+})
 
 const server = { host: '127.0.0.1', port: 4900, pid: null }
 
