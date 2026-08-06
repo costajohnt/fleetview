@@ -71,7 +71,11 @@ const STATE_GROUPS = [
 // like any other success. Protected rows are sorted to the front of the group so the cap can only
 // ever eat unprotected ones, and counted here so the cap never cuts into them.
 const isProtectedFromFold = (s: any) => s.status === 'error' || hasOpenPr(s.prs)
-export function foldCompleted(groups: any[], maxRows: number) {
+// #49: the row the user is standing on is protected too, or the fold silently retargets the next
+// key at whatever ends up first on screen (`navRows` only sees drawn rows). `sel` is an identity
+// ({projectKey, id}), not a key: keys are namespaced by the live grouping and go stale exactly
+// when a row changes section, which is one of the moments this has to survive.
+export function foldCompleted(groups: any[], maxRows: number, sel?: any) {
   // Each group draws its header (1) plus its sessions; an empty always-shown group draws one
   // "no items" placeholder row in place of sessions. Counting those placeholders keeps the fold
   // honest now that needs-input/working are shown even when empty.
@@ -80,16 +84,24 @@ export function foldCompleted(groups: any[], maxRows: number) {
     Math.max(0, groups.length - 1) // one spacer row between adjacent groups
   const completed = groups.find((g: any) => g.projectKey === 'state:completed')
   if (!completed || used <= maxRows) return groups
-  const protectedCount = completed.sessions.filter(isProtectedFromFold).length
+  const isSelected = (s: any) => Boolean(sel) && s.id === sel.id && s.projectKey === sel.projectKey
+  const protectedCount = completed.sessions.filter((s: any) => isProtectedFromFold(s) || isSelected(s)).length
   // The fold costs a row of its own — the `… N more` line — so dropping k sessions only recovers
   // k-1 lines. Without the extra -1 the list still overflows by one and picks up a spurious
   // scroll indicator.
   const room = Math.max(protectedCount, completed.sessions.length - (used - maxRows) - 1)
   if (room >= completed.sessions.length) return groups
+  // #49: "prefix ∪ selected", NOT a sort. The selected row is kept by swapping it in for the last
+  // row of the prefix, so the list keeps its recency order and the highlighted row does not jump
+  // to the top of `completed` the instant it is selected — walking ↓ through completed rows would
+  // otherwise reshuffle the list under the cursor on every press. The row it displaces is never a
+  // protected one: protected rows are sorted to the front and the selected row adds at most one to
+  // `protectedCount`, so index `room - 1` is always unprotected when the swap runs.
+  const prefix = completed.sessions.slice(0, room)
+  const selectedRow = sel && !prefix.some(isSelected) ? completed.sessions.find(isSelected) : undefined
+  const kept = selectedRow ? [...prefix.slice(0, room - 1), selectedRow] : prefix
   return groups.map((g: any) =>
-    g === completed
-      ? { ...g, sessions: g.sessions.slice(0, room), hidden: g.sessions.length - room }
-      : g,
+    g === completed ? { ...g, sessions: kept, hidden: g.sessions.length - kept.length } : g,
   )
 }
 
@@ -959,7 +971,9 @@ export function App({
       ? browseGroups()
       : rosterState.groupBy === 'project'
         ? projectMemberGroups()
-        : foldCompleted(stateGroups(), maxRows)
+        : // #49: the fold must know what is selected, or it drops that row and the next key acts
+          // on whatever the fallback below lands on — a running session the user never picked.
+          foldCompleted(stateGroups(), maxRows, selectedSessionRef.current)
   // The same groups without the fold/slice that fit them to the screen. deleteGroup ("^x on a header
   // deletes every session in the group") must act on all of them, not just the rows currently drawn:
   // the state view folds `completed` to `… N more` and browse caps each project at
@@ -999,7 +1013,14 @@ export function App({
   // pressed a key for — that is the identity the lookup above re-resolves against on the render
   // where the key stops matching. A header selection records nothing: it is a group, not a session,
   // and must not be dragged onto a session row later.
-  if (navRow) selectedSessionRef.current = navRow.type === 'session' ? { projectKey: navRow.session.projectKey, id: navRow.session.id } : null
+  // #49: a blind fallback (navIndex < 0 — neither the key nor the identity was found) must NOT
+  // write its guess back. Doing so destroyed the real selection permanently, so a row that came
+  // back on a later render could never be recovered; keeping the old identity lets the next render
+  // re-resolve it. The implicit startup selection is still recorded, because there is no identity
+  // to lose then. Out of scope for #49: the collapsed-group and browse-cap paths still take this
+  // fallback — only recovery is fixed there, not the drop itself.
+  if (navRow && (navIndex >= 0 || !selectedSessionRef.current))
+    selectedSessionRef.current = navRow.type === 'session' ? { projectKey: navRow.session.projectKey, id: navRow.session.id } : null
   // Write the re-resolved key back to state so everything keyed off `selectedKey` (peek's
   // selection-follow, the roster's highlight) stays in step with the identity resolution above.
   // Only fires when a session was actually re-found, so the plain fallback can't loop.
@@ -1628,12 +1649,21 @@ export function App({
 
   useInput(
     (ch, key) => {
+      // #60: Ink 7 splits one stdin read into several key events and dispatches them all in one
+      // synchronous pass, but `isActive: false` only takes effect at the next render — so a `→`
+      // and a `^X` arriving in the SAME chunk both reach the roster and the ^X stops the row being
+      // attached to. The ref is synchronous, mirroring the same guard in `attach` above.
+      if (attachedRef.current) return
       if (mode !== 'roster') return
       // The "moved to the background" state lasts exactly until the next interaction — any key or
       // click dismisses it whole. The Esc branch below still sees this press's value through the
       // render closure, which is what makes Esc-right-after-detach the undo and every later Esc a
       // normal quit.
-      if (backgrounded) setBackgrounded(null)
+      //
+      // #59: except inside the post-resume quiet window. Dismissing costs nothing when the user
+      // typed it, but a stray byte left over from the child's terminal destroys the Esc-undo with
+      // no way back — unlike clearing the input, this one is not recoverable.
+      if (backgrounded && Date.now() - resumedAt.current >= RESUME_QUIET_MS) setBackgrounded(null)
       const mouse = parseMouseEvents(ch)
       if (mouse.length) {
         for (const ev of mouse) handleMouse(ev)
@@ -1763,6 +1793,13 @@ export function App({
       }
       if (key.rightArrow && current) return attach(current)
       if (key.escape) {
+        // #47: the whole branch is gated, not just the quit. `^G` hands the terminal to $EDITOR
+        // via a blocking spawnSync, so Ink never suspends and never drains — the editor's leftover
+        // terminal-query bytes arrive as roster keystrokes, and a bare ESC among them hit
+        // `setInput('')` below and wiped the prompt that was just edited, after editPrompt's
+        // `finally` had already removed the temp file. Ignoring a genuinely-typed Escape within
+        // 50ms of a resume costs nothing against a human reaction window.
+        if (Date.now() - resumedAt.current < RESUME_QUIET_MS) return
         if (!empty) return setInput('')
         if (view === 'browse') {
           setView('main')
@@ -1782,10 +1819,9 @@ export function App({
           const live = allMembers.find((s: any) => s.id === backgrounded.id && s.projectKey === backgrounded.projectKey)
           if (live) return attach(live)
         }
-        // Quitting is the one irreversible thing Esc does, so it is the one press that has to be
-        // sure the Escape was typed rather than left over from the handoff. Everything above still
-        // runs in the window: clearing the input or undoing a switch costs nothing if it was junk.
-        if (Date.now() - resumedAt.current < RESUME_QUIET_MS) return
+        // Quitting is the one irreversible thing Esc does — the quiet-window guard that protects
+        // it now sits at the top of this branch (#47), because clearing a just-edited prompt is
+        // destructive too and the temp file backing it is already gone.
         onAction({ type: 'quit' })
         return exit()
       }
