@@ -29,7 +29,7 @@ import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from './bac
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
 import { loadRoster, saveRoster, makePersistRoster, defaultRosterFile } from './roster-store.ts'
 import { attachPty } from './pty-host.ts'
-import { createStore, memberTitle, messageBody } from './session-store.ts'
+import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
 import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories } from './worktree.ts'
 import { parseArgs, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, USAGE } from './cli-args.ts'
 import { stripControl } from './text-utils.ts'
@@ -532,6 +532,11 @@ export async function main() {
       // write, OSC 0/2 title spoof) would drive the terminal.
       const text = messageBody(m, '')
       if (text.trim()) console.log(`${role === 'user' ? 'you' : 'opencode'}: ${text}`)
+      // #24: a failed turn's only content is `info.error` — without this, `logs` on a session that
+      // failed every dispatch printed the user's own prompt and nothing else. errorLabel strips it
+      // for the same reason the body above is stripped.
+      const failure = errorLabel(m?.info?.error)
+      if (failure) console.log(`error: ${failure}`)
     }
     return
   }
