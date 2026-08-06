@@ -91,6 +91,12 @@ export function applyEvent(state: ClaudeRunState, event: unknown): ClaudeRunStat
     return text === undefined ? state : { ...state, lastOutput: text }
   }
   if (e?.type === 'result') {
+    // First result wins. A run that writes a valid `result` and *then* exits non-zero gets a
+    // synthetic failure line appended by the backend's exit handler, and a second terminal line
+    // must not overwrite what the run itself reported. Mirrors copilot's `if (run.exitCode !==
+    // null) return run` in events.ts. An `init` (a resume) puts the state back to 'working', so a
+    // follow-up prompt's own result still lands.
+    if (state.status === 'completed' || state.status === 'failed' || state.status === 'needs-input') return state
     const denials = Array.isArray(e.permission_denials) ? e.permission_denials : []
     const errors = Array.isArray(e.errors) ? e.errors.filter((x: unknown) => typeof x === 'string') : []
     // The child exits 0 whether the run worked or not (a resume against an unknown session exits 0

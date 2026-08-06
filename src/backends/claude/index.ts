@@ -9,7 +9,7 @@ import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync,
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
-import { configDir, envWithoutServerPassword } from '../../registry.ts'
+import { configDir, childEnv } from '../../registry.ts'
 import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
 import { PID_MATCH_SLACK_MS, psInfo, type PidInfo } from '../ps.ts'
@@ -118,21 +118,37 @@ export function createClaudeBackend({
   function run(argv: string[], id: string, directory: string) {
     ensureRunDir()
     const fd = openSync(logPath(id), 'a', 0o600)
-    // env without the opencode server password: a dispatched agent runs attacker-influenced prompts,
-    // and that credential would hand it ungated shell on the server (see envWithoutServerPassword).
-    const child = spawnImpl('claude', argv, { cwd: directory, detached: true, stdio: ['ignore', fd, fd], env: envWithoutServerPassword() })
+    // env without the opencode server password, and without this process's Claude Code session
+    // markers: a dispatched agent runs attacker-influenced prompts, and that credential would hand
+    // it ungated shell on the server; the markers make the child think it is a nested run of
+    // fleetview's own session (see childEnv).
+    const child = spawnImpl('claude', argv, { cwd: directory, detached: true, stdio: ['ignore', fd, fd], env: childEnv() })
     // An async spawn failure (ENOENT for a missing claude) would otherwise be an unhandled error
     // event that crashes out-of-band. Writing a synthetic failed `result` into the log instead means
     // events() tails it like any other terminal line and the row goes `failed` through the normal
     // path, rather than sitting on `working` forever because nothing ever wrote to its log. Same
     // shape stream.ts reads as a failure (is_error + non-success subtype), keyed to the session so
     // the normaliser can attribute it.
-    child.on('error', () => {
+    // Written at most once per spawn: 'error' and 'exit' can both fire for the same child, and two
+    // terminal lines in one log is a contradiction the fold would have to arbitrate.
+    let wroteSynthetic = false
+    const appendSyntheticResult = () => {
+      if (wroteSynthetic) return
+      wroteSynthetic = true
       try {
         appendFileSync(logPath(id), `${JSON.stringify({ type: 'result', is_error: true, subtype: 'error_during_execution', session_id: id })}\n`)
       } catch {
         // the log is gone; the session is unreadable either way
       }
+    }
+    child.on('error', appendSyntheticResult)
+    // 'error' covers only a *spawn* failure (ENOENT/EACCES on the exec). A spawn that succeeds and
+    // then exits non-zero — an unknown flag, an older CLI refusing --agent/--model/--session-id, an
+    // auth or config error — writes plain text that parseStreamChunk drops, so no `result` is ever
+    // folded and the row renders `idle`: indistinguishable from a session created and never used.
+    // The child is detached and unref'd, so this listener costs nothing.
+    child.on('exit', (code) => {
+      if (code) appendSyntheticResult()
     })
     child.unref()
     // The child duplicated the descriptor; the parent's copy is dead weight and would leak one fd

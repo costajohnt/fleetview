@@ -388,6 +388,42 @@ test('a session fleetview just dispatched is visible before copilot has written 
   expect(onEvent.mock.calls[0][1]).toMatchObject({ sessionId: 'session-1', status: 'working' })
 })
 
+// The gap the spawn-failure handler doesn't cover: copilot started, rejected the argv, and exited
+// non-zero with plain text on stdout. No state directory is ever written, so the id never reaches
+// disk and never leaves `started` (only abort() removes entries), and `child.on('error')` never
+// fires because that is a spawn failure only. Hardcoding `running: true` for pending entries left
+// such a session claiming `working` until fleetview restarted.
+test('a pending session whose process is gone reads as failed, and one still alive stays working', async () => {
+  const dead = harness({
+    killImpl: vi.fn((_pid: number, signal?: any) => {
+      if (signal === 0) throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
+    }),
+  })
+  await dead.backend.dispatch({ prompt: 'go', directory: '/repo/alpha' })
+  const deadEvents = vi.fn()
+  const deadSub = dead.backend.events({ directory: '/repo/alpha' }, { onEvent: deadEvents })
+  await vi.waitFor(() => expect(deadEvents).toHaveBeenCalled())
+  deadSub.stop()
+  await deadSub.done
+  expect(deadEvents.mock.calls[0][1]).toMatchObject({ sessionId: 'session-1', status: 'failed' })
+  // The probe is signal 0 against the pid `started` recorded, not a signal that would end the run.
+  expect(dead.killImpl).toHaveBeenCalledWith(4242, 0)
+
+  // EPERM means the process exists and belongs to somebody else — still alive, still working.
+  const live = harness({
+    killImpl: vi.fn((_pid: number, signal?: any) => {
+      if (signal === 0) throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' })
+    }),
+  })
+  await live.backend.dispatch({ prompt: 'go', directory: '/repo/alpha' })
+  const liveEvents = vi.fn()
+  const liveSub = live.backend.events({ directory: '/repo/alpha' }, { onEvent: liveEvents })
+  await vi.waitFor(() => expect(liveEvents).toHaveBeenCalled())
+  liveSub.stop()
+  await liveSub.done
+  expect(liveEvents.mock.calls[0][1]).toMatchObject({ sessionId: 'session-1', status: 'working' })
+})
+
 test('a dispatch that could not spawn is reported as failed rather than staying working', async () => {
   const { backend, child } = harness()
   await backend.dispatch({ prompt: 'go', directory: '/repo/alpha' })

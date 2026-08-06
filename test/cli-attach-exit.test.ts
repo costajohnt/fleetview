@@ -58,3 +58,32 @@ test('resuming from an attachment reopens the gate, drops Ink’s frame memory, 
   // Two writes: the input-mode resets the dead child left behind (#20), then the wipe.
   expect(order).toEqual(['open', 'clear', 'write', 'write'])
 })
+
+// #50: an attached `claude --resume` runs the same session on the same attacker-influenced history
+// with the same tool access as a dispatch, so it gets the same scoped env — no opencode server
+// password, and none of this process's Claude Code session markers, which silently turn transcript
+// saving off in the child (the very transcript fleetview's claude backend reads).
+test('a process-backed attach gets the scoped child env, and opencode keeps the password', async () => {
+  process.env.OPENCODE_SERVER_PASSWORD = 'secret'
+  process.env.CLAUDE_CODE_CHILD_SESSION = '1'
+  process.env.CLAUDE_CONFIG_DIR = '/home/u/.config/claude'
+  try {
+    attachPty.mockResolvedValueOnce({ type: 'exit', exitCode: 0, drewNothing: false, ms: 100 })
+    const claudeBackends = { claude: { attach: ({ id }: any) => ['claude', '--resume', id] } } as any
+    await attachLoop({ backend: 'claude', sessionId: 'c1', worktree: '/repo/alpha' }, out(), null, claudeBackends)
+    const scoped = attachPty.mock.calls.at(-1)![0].env
+    expect(scoped.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+    expect(scoped.CLAUDE_CODE_CHILD_SESSION).toBeUndefined()
+    expect(scoped.CLAUDE_CONFIG_DIR).toBe('/home/u/.config/claude') // legitimate config, not a marker
+
+    // `opencode attach` authenticates with that password: stripping it there would break the attach
+    // this is meant to protect.
+    attachPty.mockResolvedValueOnce({ type: 'exit', exitCode: 0, drewNothing: false, ms: 100 })
+    await attachLoop({ backend: 'opencode', sessionId: 's1', worktree: '/repo/alpha' }, out(), null, backends)
+    expect(attachPty.mock.calls.at(-1)![0].env.OPENCODE_SERVER_PASSWORD).toBe('secret')
+  } finally {
+    delete process.env.OPENCODE_SERVER_PASSWORD
+    delete process.env.CLAUDE_CODE_CHILD_SESSION
+    delete process.env.CLAUDE_CONFIG_DIR
+  }
+})

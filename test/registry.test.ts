@@ -2,7 +2,7 @@ import { test, expect } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadServer, saveServer } from '../src/registry.ts'
+import { loadServer, saveServer, childEnv } from '../src/registry.ts'
 
 const tmpFile = () => join(mkdtempSync(join(tmpdir(), 'fleetview-')), 'server.json')
 
@@ -92,4 +92,55 @@ test('loopback hosts still load', () => {
     saveServer(file, { host, port: 4900, pid: 1 })
     expect(loadServer(file)?.host).toBe(host)
   }
+})
+
+// A claude/copilot child inheriting this process's Claude Code session markers believes it is a
+// nested run of the session fleetview was launched from: an interactive `claude --resume` then
+// silently stops writing the transcript fleetview's own backend reads.
+test('childEnv strips the server password and the session markers', () => {
+  const out = childEnv({
+    OPENCODE_SERVER_PASSWORD: 'secret',
+    CLAUDECODE: '1',
+    CLAUDE_CODE_SESSION_ID: 'parent-uuid',
+    CLAUDE_CODE_CHILD_SESSION: '1',
+    CLAUDE_CODE_ENTRYPOINT: 'cli',
+    CLAUDE_CODE_EXECPATH: '/usr/local/bin/claude',
+    CLAUDE_PID: '123',
+    CLAUDE_EFFORT: 'high',
+    CLAUDE_JOB_DIR: '/tmp/job',
+    CLAUDE_CODE_TASK_LIST_ID: 'tl-1',
+    CLAUDE_CODE_BRIDGE_SESSION_ID: 'bridge-1',
+    CLAUDE_CODE_INVOKED_SKILLS: 'a,b',
+    AI_AGENT: 'claude',
+    TRACEPARENT: '00-abc-def-01',
+    PATH: '/usr/bin',
+  })
+  expect(Object.keys(out)).toEqual(['PATH'])
+})
+
+// Deliberately a denylist and not a /^CLAUDE(CODE)?_/ regex: these four are legitimate user
+// configuration, and stripping them would break every Bedrock/Vertex user and anyone with a
+// relocated config dir — a worse bug than the one being fixed.
+test('childEnv preserves legitimate claude configuration', () => {
+  const out = childEnv({
+    CLAUDE_CONFIG_DIR: '/home/u/.config/claude',
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    CLAUDE_CODE_USE_VERTEX: '1',
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8192',
+    CLAUDECODE: '1',
+  })
+  expect(out).toEqual({
+    CLAUDE_CONFIG_DIR: '/home/u/.config/claude',
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    CLAUDE_CODE_USE_VERTEX: '1',
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8192',
+  })
+})
+
+// It takes a copy: mutating process.env while composing a child's environment would strip the
+// parent's own markers for the rest of the session.
+test('childEnv does not mutate the environment it was given', () => {
+  const env = { CLAUDECODE: '1', OPENCODE_SERVER_PASSWORD: 'secret' }
+  childEnv(env)
+  expect(env).toEqual({ CLAUDECODE: '1', OPENCODE_SERVER_PASSWORD: 'secret' })
 })
