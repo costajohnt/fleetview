@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { basename } from 'node:path'
-import { Box, Text, useInput, useApp, useStdout } from 'ink'
+import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { graphemes } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
@@ -187,6 +187,13 @@ export function App({
 }: AppProps): any {
   const { exit } = useApp()
   const { stdout } = useStdout()
+  // Terminal size has to come from the hook, not from `stdout.columns`/`stdout.rows` read during
+  // render. Ink's own resize handler re-lays-out the last React output it has — it never re-invokes
+  // the components — so a width read at render time stays at the old value and the frame keeps the
+  // layout it had before the resize until some unrelated state change re-renders App. `useWindowSize`
+  // subscribes to the stdout resize event (gated-stdout forwards the real terminal's) and re-renders
+  // with the new size, which is the repaint that was missing.
+  const { columns: termColumns, rows: termRows } = useWindowSize()
   const store = useMemo(() => createStore(), [])
   const [, force] = useState(0)
   // A caller that passes no registry gets the opencode adapter built off the client it already
@@ -870,7 +877,7 @@ export function App({
   // the roster out of the region Ink can repaint.
   //
   // Each of those components now truncates to one row per line, so counting lines is sound.
-  const columns = stdout?.columns ?? 80
+  const columns = termColumns
   // One name for "the moved-to-the-background line is on screen": chromeRows, the mouse y→row
   // mapping and the render condition must never disagree about this row, or clicks land one line
   // off (that bug shipped once).
@@ -888,7 +895,7 @@ export function App({
     (mode === 'peek' ? 0 : INPUT_BOX_ROWS) +
     1 + // hints
     (serverDown ? 1 : 0)
-  const maxRows = Math.max(1, (stdout?.rows ?? 24) - chromeRows)
+  const maxRows = Math.max(1, termRows - chromeRows)
   const groups =
     view === 'browse'
       ? browseGroups()
@@ -1693,7 +1700,7 @@ export function App({
       // Paging keys stay in help; anything else closes it, per "any key to close".
       // Clamp on the way up as well as down: letting the counter climb past the last page made ↑
       // look broken until it had been pressed as many times as ↓ had been over-pressed.
-      const lastPage = helpPage(helpLines(), stdout?.rows ?? 24, 0).pages - 1
+      const lastPage = helpPage(helpLines(), termRows, 0).pages - 1
       if (key.downArrow || key.pageDown || ch === ' ') return setHelpPageIndex((p) => Math.min(lastPage, p + 1))
       if (key.upArrow || key.pageUp) return setHelpPageIndex((p) => Math.max(0, p - 1))
       setHelpPageIndex(0)
@@ -1730,7 +1737,7 @@ export function App({
   // Help is an overlay, so it gets the whole terminal — but bounded, because it is 30-odd rows
   // and a standard terminal is 24. `↓` pages it.
   if (mode === 'help') {
-    return React.createElement(Help, { maxRows: stdout?.rows ?? 24, columns, page: helpPageIndex })
+    return React.createElement(Help, { maxRows: termRows, columns, page: helpPageIndex })
   }
 
   if (mode === 'rename' && target) {
@@ -1764,7 +1771,7 @@ export function App({
   // the other direction — content taller than the terminal breaks Ink's repaint region.
   return React.createElement(
     Box,
-    { flexDirection: 'column', height: stdout?.rows ?? 24 },
+    { flexDirection: 'column', height: termRows },
     // allMembers, not the rendered rows: the header describes the fleet, so a filter that hides a
     // blocked session must not make the summary contradict the roster directly under it.
     React.createElement(Header, { sessions: allMembers, model: dispatchModel, cwd, columns }),
