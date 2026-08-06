@@ -24,7 +24,7 @@ import { App } from './app.ts'
 import { OpencodeClient } from './backends/opencode/client.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, isBackendName } from './backends/index.ts'
-import { loadServer, saveServer, defaultServerFile } from './registry.ts'
+import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
 import { loadRoster, saveRoster, makePersistRoster, defaultRosterFile } from './roster-store.ts'
@@ -855,6 +855,12 @@ export async function attachLoop(action: any, out: any, instance: any, backends:
       args: argv,
       cwd: target.worktree,
       spawn: pty.spawn,
+      // A process-backed child gets the scoped env the dispatch path already uses: it must not
+      // inherit the opencode server password (an attached `claude --resume` runs the same
+      // attacker-influenced history with the same tool access as a dispatch) nor this process's
+      // Claude Code session markers, which silently turn transcript saving off in the child.
+      // opencode's attach is excluded — it authenticates with that password.
+      env: (target.backend ?? DEFAULT_BACKEND) === DEFAULT_BACKEND ? process.env : childEnv(),
       // Detaching mid-turn kills a process-backed child's in-flight work, so claude/copilot get the
       // double-press guard. opencode sessions live on the server — detach loses nothing there.
       busyDetachGuard: (target.backend ?? DEFAULT_BACKEND) !== DEFAULT_BACKEND,

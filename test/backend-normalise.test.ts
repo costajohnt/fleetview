@@ -104,9 +104,15 @@ test('two claude sessions in one directory fold independently', () => {
 })
 
 test('claude transcripts normalise into rows the store can list', () => {
-  expect(normaliseSessions('claude', [{ id: 'c1', title: 'fix tests', updatedAt: 1234, directory: '/x/alpha' }])).toEqual([
-    { id: 'c1', title: 'fix tests', time: { created: 1234, updated: 1234 } },
+  // `created` is the session's own first-record timestamp, `updated` the transcript's mtime: the age
+  // column would otherwise read time-since-last-activity for claude rows and time-since-creation for
+  // every other kind.
+  expect(normaliseSessions('claude', [{ id: 'c1', title: 'fix tests', createdAt: 1000, updatedAt: 1234, directory: '/x/alpha' }])).toEqual([
+    { id: 'c1', title: 'fix tests', time: { created: 1000, updated: 1234 } },
   ])
+  // No parseable timestamp anywhere in the transcript: `created` is 0 and ageLabel's
+  // `createdAt || updatedAt` falls back to the mtime, which is what this row rendered before.
+  expect(normaliseSessions('claude', [{ id: 'c3', title: 'no timestamp', createdAt: 0, updatedAt: 1234 }])[0].time).toEqual({ created: 0, updated: 1234 })
   // A transcript too young to have a title is identified by its id rather than rendering blank.
   expect(normaliseSessions('claude', [{ id: 'c2', title: '', updatedAt: 0 }])[0].title).toBe('c2')
 })

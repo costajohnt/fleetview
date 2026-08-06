@@ -29,10 +29,12 @@ export function normaliseSessions(backend: string, rows: any[] | null | undefine
   const list = rows ?? []
   if (backend === 'opencode') return list
   if (backend === 'claude') {
-    // A transcript has one timestamp (its mtime) and no creation record, so `created` is the same
-    // value rather than 0: a row with no creation time renders no age at all, and "as old as its
-    // last activity" is a better answer for a discovered session than a blank.
-    return list.map((s: any) => ({ id: s.id, title: s.title || s.id, time: { created: s.updatedAt ?? 0, updated: s.updatedAt ?? 0 } }))
+    // `created` is the transcript's first record timestamp (projects.ts reads it out during the
+    // scan it already runs), not its mtime: the age column means time-since-creation on every other
+    // row, and using the mtime made a nine-day-old claude session that had just replied render
+    // `now`. 0 when no record carried a parseable timestamp — ageLabel's `createdAt || updatedAt`
+    // then falls back to the mtime, which is the behaviour this row had before.
+    return list.map((s: any) => ({ id: s.id, title: s.title || s.id, time: { created: s.createdAt ?? 0, updated: s.updatedAt ?? 0 } }))
   }
   if (backend === 'copilot') {
     // Already carries id/title/time in milliseconds (sessions.ts converts them deliberately), so

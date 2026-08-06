@@ -82,3 +82,28 @@ test('events the stream carries but fleetview does not read leave the state alon
   const after = applyEvent(before, { type: 'system', subtype: 'thinking_tokens', estimated_tokens: 42 })
   expect(after).toEqual(before)
 })
+
+// The backend appends a synthetic failed `result` when a run exits non-zero, and a run that wrote
+// its own `result` first and *then* exited non-zero produces two terminal lines. The first one is
+// the run's own account of itself and must win — same rule copilot's foldEvents already applies
+// with `if (run.exitCode !== null) return run`.
+test('the first result wins: a later one cannot overwrite a finished run', () => {
+  let state = emptyRunState()
+  state = applyEvent(state, { type: 'result', subtype: 'success', is_error: false, result: 'all done', total_cost_usd: 0.02 })
+  expect(state.status).toBe('completed')
+  const after = applyEvent(state, { type: 'result', is_error: true, subtype: 'error_during_execution' })
+  expect(after).toEqual(state)
+  // …and the same for a run that already failed, or that is waiting on a denial.
+  const failed = applyEvent(applyEvent(emptyRunState(), { type: 'result', is_error: true, subtype: 'error_during_execution' }), { type: 'result', subtype: 'success', is_error: false })
+  expect(failed.status).toBe('failed')
+})
+
+// A resume appends a second run's events to the same log, and its `init` puts the state back to
+// working — so the first-result rule must not strand a resumed session on its previous outcome.
+test('a resume can still report its own result after an earlier one', () => {
+  let state = applyEvent(emptyRunState(), { type: 'result', is_error: true, subtype: 'error_during_execution' })
+  state = applyEvent(state, { type: 'system', subtype: 'init', session_id: 's1' })
+  expect(state.status).toBe('working')
+  state = applyEvent(state, { type: 'result', subtype: 'success', is_error: false, result: 'fixed it' })
+  expect(state).toMatchObject({ status: 'completed', lastOutput: 'fixed it' })
+})

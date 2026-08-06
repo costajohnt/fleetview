@@ -29,6 +29,41 @@ export const envWithoutServerPassword = (env: NodeJS.ProcessEnv = process.env): 
   return rest
 }
 
+// Per-session markers Claude Code stamps on its own children (its own MCP-server scrub list keeps
+// the same kind of denylist). Inheriting them makes fleetview's child believe it is a nested run of
+// the session fleetview was launched from: an interactive `claude --resume` then suppresses
+// transcript persistence — the very file this repo's claude backend reads — and a proxied
+// WebFetch/WebSearch is attributed to the parent session.
+//
+// An explicit list, deliberately not a /^CLAUDE(CODE)?_/ regex: CLAUDE_CONFIG_DIR,
+// CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_MAX_OUTPUT_TOKENS are legitimate
+// user configuration, and blanket-stripping them would break every Bedrock/Vertex user — a worse
+// bug than the one being fixed. Data, so adding a name later is one line.
+const SESSION_MARKERS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_PID',
+  'CLAUDE_EFFORT',
+  'CLAUDE_JOB_DIR',
+  'CLAUDE_CODE_TASK_LIST_ID',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_INVOKED_SKILLS',
+  'AI_AGENT',
+  'TRACEPARENT',
+]
+
+// The env a process-backed child (claude/copilot) should get: no server password, no inherited
+// session identity. Used by both spawn families and by the attach path in cli.ts — opencode's
+// attach is excluded there, because `opencode attach` authenticates with that very password.
+export const childEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
+  const rest = envWithoutServerPassword(env)
+  for (const key of SESSION_MARKERS) delete rest[key]
+  return rest
+}
+
 // Local rather than shared with seen-store: a five-line best-effort rename is cheaper than either
 // a cross-import between two unrelated stores or a new module to hold one function.
 function setAside(file: string) {

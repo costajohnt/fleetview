@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Backend } from '../../types.ts'
-import { configDir, envWithoutServerPassword } from '../../registry.ts'
+import { configDir, childEnv } from '../../registry.ts'
 import { foldEvents, initialRun, parseJsonlChunk, type CopilotStatus, type RunState } from './events.ts'
 import { listSessions, lockInfo, runningPid, sessionStateDir } from './sessions.ts'
 import { PID_MATCH_SLACK_MS, psInfo, type PidInfo } from '../ps.ts'
@@ -129,8 +129,8 @@ export function createCopilotBackend({
         detached: true,
         stdio: ['ignore', fd, fd],
         // Without the opencode server password: a dispatched agent runs attacker-influenced prompts,
-        // and that credential would hand it ungated shell on the server (envWithoutServerPassword).
-        env: envWithoutServerPassword(),
+        // and that credential would hand it ungated shell on the server (childEnv).
+        env: childEnv(),
       })
       // An async spawn failure (ENOENT when copilot isn't installed) would otherwise be an unhandled
       // error event. Writing copilot's own terminal event into the log instead means the status
@@ -197,9 +197,7 @@ export function createCopilotBackend({
       // leaves one behind naming a pid that no longer runs — and a roster trusting the file alone
       // would show that session `working` forever. Signal 0 is the existence probe; EPERM still
       // means "exists", and anything else means the lock is stale.
-      const lockAlive = (id: string) => {
-        const pid = runningPid(join(stateDir, id))
-        if (pid === null) return false
+      const aliveImpl = (pid: number) => {
         try {
           killImpl(pid, 0)
           return true
@@ -208,12 +206,24 @@ export function createCopilotBackend({
         }
       }
 
+      const lockAlive = (id: string) => {
+        const pid = runningPid(join(stateDir, id))
+        if (pid === null) return false
+        return aliveImpl(pid)
+      }
+
       const visible = (dir: string) => {
         const disk = listSessions(dir, stateDir).map((s) => (s.running && !lockAlive(s.id) ? { ...s, running: false } : s))
         const onDisk = new Set(disk.map((s) => s.id))
+        // Probed, not assumed: a run copilot rejected on argv exits non-zero without ever writing a
+        // state directory, so it never reaches `onDisk` and never leaves `started` (only abort()
+        // removes entries) — and `child.on('error')` never fires, because that is a *spawn* failure
+        // only. Hardcoding `running: true` here left such a session claiming `working` forever.
+        // Same probe the disk branch above runs through lockAlive; statusOf then reports `failed`,
+        // which is exactly what its comment describes for "no terminal line and no live process".
         const pending = [...started]
           .filter(([id, s]) => s.directory === dir && !onDisk.has(id))
-          .map(([id]) => ({ id, directory: dir, running: true }))
+          .map(([id, s]) => ({ id, directory: dir, running: aliveImpl(s.pid) }))
         return [...disk, ...pending]
       }
 

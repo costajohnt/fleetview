@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, utimesSync } from 'node:fs'
+import { appendFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, renameSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { encodeProjectDir, listTranscripts } from '../src/backends/claude/projects.ts'
@@ -15,6 +15,15 @@ function transcript(h: string, directory: string, id: string, lines: unknown[], 
   writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
   if (mtime !== undefined) utimesSync(file, mtime, mtime)
   return file
+}
+
+// A copy of a fake home at a fresh path, so a listing against it has no cache entry and reads every
+// transcript whole — the "what a full re-read would say" reference an incremental scan is checked
+// against (the cache is keyed by project folder path).
+function mirror(h: string) {
+  const copy = mkdtempSync(join(tmpdir(), 'fleetview-claude-mirror-'))
+  cpSync(join(h, '.claude'), join(copy, '.claude'), { recursive: true })
+  return copy
 }
 
 const record = (directory: string, id: string, extra: object = {}) => ({
@@ -48,26 +57,81 @@ test('a session is listed with its ai-title and id', () => {
   expect(session.title).toBe('Run the failing suite')
 })
 
-// events() calls this every 500ms and a finished session's transcript reaches megabytes, so an
-// unchanged file must not be read again. Proven by rewriting the file behind the cache's back with
-// the same size and mtime: a listing that re-read would show the new title, and one that trusted
-// the cache shows the old.
-test('a transcript whose mtime and size have not moved is not read again', () => {
+// events() calls this every 500ms and a live transcript is appended to between every pair of calls,
+// so the scan reads only the bytes past its cursor. The contract this proves is the one that
+// matters: what an incremental listing reports is what a full re-read of the same bytes would.
+test('an appended transcript is read incrementally and reports what a full re-read would', () => {
   const h = home()
   const file = transcript(h, '/repo/alpha', 'aaaa-1111', [record('/repo/alpha', 'aaaa-1111'), { type: 'ai-title', aiTitle: 'AAAA', sessionId: 'aaaa-1111' }], 1_000_000)
   expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('AAAA')
-  const rewritten = readFileSync(file, 'utf8').replace('AAAA', 'BBBB')
-  writeFileSync(file, rewritten)
-  utimesSync(file, 1_000_000, 1_000_000)
-  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('AAAA')
-  // …and a real change is still picked up: the mtime moves, so the cached scan is discarded.
-  utimesSync(file, 2_000_000, 2_000_000)
-  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('BBBB')
-  // …and so is a change that moves only the size: the key is mtime *and* size, so a rewrite of a
-  // different length with the mtime put back is still re-read.
-  writeFileSync(file, readFileSync(file, 'utf8').replace('BBBB', 'CCCC-and-then-some'))
-  utimesSync(file, 2_000_000, 2_000_000)
-  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('CCCC-and-then-some')
+  // An append: the new record is folded over the cached one, and the cwd found before it is kept.
+  appendFileSync(file, JSON.stringify({ type: 'ai-title', aiTitle: 'BBBB', sessionId: 'aaaa-1111' }) + '\n')
+  const [after] = listTranscripts('/repo/alpha', { home: h })
+  expect(after.title).toBe('BBBB')
+  expect(after.directory).toBe('/repo/alpha')
+  // Same file read cold by a listing with no cache at all — the incremental answer must match it.
+  const cold = listTranscripts('/repo/alpha', { home: mirror(h) })[0]
+  expect({ title: after.title, id: after.id, createdAt: after.createdAt }).toEqual({ title: cold.title, id: cold.id, createdAt: cold.createdAt })
+})
+
+// A record can be appended in two chunks — the poll lands mid-line as often as not — and a line
+// split across two reads must still be parsed once, not dropped and not parsed twice.
+test('a record appended across two polls is folded once the line completes', () => {
+  const h = home()
+  const file = transcript(h, '/repo/alpha', 'aaaa-1111', [record('/repo/alpha', 'aaaa-1111')])
+  const line = JSON.stringify({ type: 'ai-title', aiTitle: 'Split across polls', sessionId: 'aaaa-1111' }) + '\n'
+  appendFileSync(file, line.slice(0, 20))
+  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('') // partial line held, not parsed
+  appendFileSync(file, line.slice(20))
+  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('Split across polls')
+})
+
+// A shrink or a rename-over is a different file: keeping the old offset would mean the scan never
+// sees another byte of that session, or folds mid-line garbage from a stale position.
+test('a truncated or replaced transcript is re-read from zero', () => {
+  const h = home()
+  const file = transcript(h, '/repo/alpha', 'aaaa-1111', [
+    record('/repo/alpha', 'aaaa-1111'),
+    { type: 'ai-title', aiTitle: 'Before the rewrite, a good long title', sessionId: 'aaaa-1111' },
+  ])
+  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('Before the rewrite, a good long title')
+  // Shorter than the cursor: size < offset resets it.
+  writeFileSync(file, [record('/repo/alpha', 'aaaa-1111'), { type: 'ai-title', aiTitle: 'After', sessionId: 'aaaa-1111' }].map((l) => JSON.stringify(l)).join('\n') + '\n')
+  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('After')
+  // Rename-over at an equal-or-larger size: only the inode says anything changed.
+  const swap = `${file}.new`
+  writeFileSync(
+    swap,
+    [record('/repo/alpha', 'aaaa-1111'), { type: 'ai-title', aiTitle: 'After the compaction rename', sessionId: 'aaaa-1111' }].map((l) => JSON.stringify(l)).join('\n') + '\n',
+  )
+  renameSync(swap, file)
+  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('After the compaction rename')
+})
+
+// The age column means time-since-creation on every other row. The transcript's first record
+// carries an ISO timestamp; the mtime is only the fallback for one that doesn't.
+test('createdAt comes from the first record timestamp, and is 0 when no record carries one', () => {
+  const h = home()
+  transcript(h, '/repo/alpha', 'aaaa-1111', [
+    record('/repo/alpha', 'aaaa-1111', { timestamp: '2026-07-28T17:03:36.985Z' }),
+    record('/repo/alpha', 'aaaa-1111', { timestamp: '2026-07-29T11:50:56.000Z' }),
+  ])
+  transcript(h, '/repo/alpha', 'bbbb-2222', [record('/repo/alpha', 'bbbb-2222')])
+  transcript(h, '/repo/alpha', 'cccc-3333', [record('/repo/alpha', 'cccc-3333', { timestamp: 'not a date' })])
+  const byId = Object.fromEntries(listTranscripts('/repo/alpha', { home: h }).map((s) => [s.id, s.createdAt]))
+  expect(byId['aaaa-1111']).toBe(Date.parse('2026-07-28T17:03:36.985Z')) // the first, not the last
+  expect(byId['bbbb-2222']).toBe(0) // no timestamp at all: the caller falls back to the mtime
+  expect(byId['cccc-3333']).toBe(0) // unparseable is the same as absent
+})
+
+// The first record's timestamp is immutable, so it survives every later append rather than being
+// re-derived from whatever the newest chunk happens to contain.
+test('createdAt is kept across appends', () => {
+  const h = home()
+  const file = transcript(h, '/repo/alpha', 'aaaa-1111', [record('/repo/alpha', 'aaaa-1111', { timestamp: '2026-07-28T17:03:36.985Z' })])
+  expect(listTranscripts('/repo/alpha', { home: h })[0].createdAt).toBe(Date.parse('2026-07-28T17:03:36.985Z'))
+  appendFileSync(file, JSON.stringify(record('/repo/alpha', 'aaaa-1111', { timestamp: '2026-08-01T00:00:00.000Z' })) + '\n')
+  expect(listTranscripts('/repo/alpha', { home: h })[0].createdAt).toBe(Date.parse('2026-07-28T17:03:36.985Z'))
 })
 
 // ai-title is rewritten in place as the session is re-titled, so a transcript holds every title it
