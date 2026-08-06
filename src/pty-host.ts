@@ -231,25 +231,29 @@ export function attachPty({
     // last 2s arms instead of detaching, and a second chord within 3s of arming goes through. The
     // notice is painted straight to the terminal's last row (save cursor, move, inverse, restore) —
     // the child's next redraw may overwrite it, which is acceptable for a transient hint.
+    //
+    // Every chord goes through here, not just detach (#56): Alt+N leaves the attachment via the same
+    // cleanup() → child.kill(), so switching rows mid-turn destroys exactly the in-flight work this
+    // guard exists to protect. guardArmedAt is shared, so an armed Ctrl+Z followed by Alt+2 switches.
     const BUSY_WINDOW_MS = 2000
     const ARM_WINDOW_MS = 3000
     let guardArmedAt: number | null = null
-    const detachRequested = () => {
+    const guarded = (chord: any) => {
       if (busyDetachGuard) {
         const t = now()
-        if (guardArmedAt !== null && t - guardArmedAt <= ARM_WINDOW_MS) return finish({ type: 'detach' })
-        // Past the window (or never armed): a busy child re-arms the guard rather than detaching.
+        if (guardArmedAt !== null && t - guardArmedAt <= ARM_WINDOW_MS) return finish(chord)
+        // Past the window (or never armed): a busy child re-arms the guard rather than leaving.
         if (lastOutputAt !== null && t - lastOutputAt < BUSY_WINDOW_MS) {
           guardArmedAt = t
           const rows = stdout.rows || 24
-          stdout.write(`\x1b7\x1b[${rows};1H\x1b[7m still working — press again to detach \x1b[0m\x1b8`)
+          stdout.write(`\x1b7\x1b[${rows};1H\x1b[7m still working — press again \x1b[0m\x1b8`)
           return
         }
       }
-      finish({ type: 'detach' })
+      finish(chord)
     }
     const reader = makeChordReader({
-      onChord: (chord: any) => (chord.type === 'detach' ? detachRequested() : finish(chord)),
+      onChord: (chord: any) => guarded(chord),
       // cleanup() flushes any held Escape, and cleanup also runs on the exit path — where writing
       // to an already-dead pty would throw straight out of the onExit handler.
       onBytes: (text: string) => {
