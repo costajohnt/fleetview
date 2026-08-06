@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { createStore, errorLabel } from '../src/session-store.ts'
+import { createStore, memberTitle, messageBody, errorLabel } from '../src/session-store.ts'
 
 const seed = (store: any) =>
   store.setSessions('repoA', [
@@ -1588,4 +1588,73 @@ test('#7: a long question truncates through the same 80-grapheme cap the assista
   const { snippet } = store.get('repoA', 's1')
   expect(snippet.length).toBe(80)
   expect(snippet.startsWith('question: xxx')).toBe(true)
+})
+
+// --- #32: messageBody / memberTitle ---
+
+test('#32: a message with text parts renders its text, and its tool output stays out of the way', () => {
+  const m = {
+    parts: [
+      { type: 'text', text: 'here is the answer' },
+      { type: 'tool', state: { output: 'ls: a\nb\nc' } },
+    ],
+  }
+  expect(messageBody(m)).toBe('here is the answer')
+})
+
+test('#32: a shell job — no text parts at all — renders its tool output instead of nothing', () => {
+  const m = { info: { role: 'assistant' }, parts: [{ type: 'tool', state: { output: 'shell-job-done\n' } }] }
+  expect(messageBody(m)).toBe('shell-job-done\n')
+})
+
+test('#32: several tool parts join one per line, and a tool part with no output contributes nothing', () => {
+  const m = {
+    parts: [
+      { type: 'tool', state: { output: 'first' } },
+      { type: 'tool', state: {} },
+      { type: 'tool', state: { output: 'second' } },
+    ],
+  }
+  expect(messageBody(m)).toBe('first\nsecond')
+})
+
+test('#32: tool output is stripped of control sequences like every other body (M12)', () => {
+  const esc = String.fromCharCode(27)
+  const m = { parts: [{ type: 'tool', state: { output: `${esc}]0;pwned${String.fromCharCode(7)}done` } }] }
+  expect(messageBody(m)).not.toContain(esc)
+  expect(messageBody(m)).toContain('done')
+})
+
+test('#32: a message with neither text nor tool parts, or no parts at all, is empty rather than a throw', () => {
+  expect(messageBody({ parts: [] })).toBe('')
+  expect(messageBody({})).toBe('')
+  expect(messageBody(null)).toBe('')
+  expect(messageBody({ parts: [{ type: 'reasoning', text: 'thinking out loud' }] })).toBe('')
+})
+
+test('#32: a real server title always wins over the roster member prompt', () => {
+  expect(memberTitle('fix the flaky test', { prompt: 'sleep 5', shell: true })).toBe('fix the flaky test')
+})
+
+test('#32: the placeholder title falls back to a shell member prompt, rendered as the `! cmd` the roster shows', () => {
+  expect(memberTitle('New session - 2026-07-22T19:51:37.625Z', { prompt: 'sleep 5 && echo shell-job-done', shell: true })).toBe(
+    '! sleep 5 && echo shell-job-done',
+  )
+})
+
+test('#32: a non-shell member falls back to its bare prompt, with no `!` invented', () => {
+  expect(memberTitle('New session - 2026-07-22T19:51:37.625Z', { prompt: 'write the docs' })).toBe('write the docs')
+})
+
+test('#32: no member, no prompt, or a blank prompt leaves the placeholder alone rather than blanking the row', () => {
+  const placeholder = 'New session - 2026-07-22T19:51:37.625Z'
+  expect(memberTitle(placeholder, undefined)).toBe(placeholder)
+  expect(memberTitle(placeholder, {})).toBe(placeholder)
+  expect(memberTitle(placeholder, { prompt: '   ' })).toBe(placeholder)
+  expect(memberTitle(placeholder, { prompt: 42 as any })).toBe(placeholder)
+})
+
+test('#32: a 2000-character member prompt is truncated to one row, not printed whole into `ls`', () => {
+  const title = memberTitle('New session - 2026-07-22T19:51:37.625Z', { prompt: 'x'.repeat(2000) })
+  expect(title.length).toBe(80)
 })

@@ -3,18 +3,17 @@ import { basename } from 'node:path'
 import { Box, Text } from 'ink'
 import { graphemes, truncateGraphemes, osc8, stripControl } from '../text-utils.ts'
 import { prStatus, prColor } from '../pull-requests.ts'
-import { permissionLabel, questionLabel, errorLabel } from '../session-store.ts'
+import { permissionLabel, questionLabel, messageBody, errorLabel } from '../session-store.ts'
 import { theme } from './theme.ts'
 
 // Only 'text' parts are ever the actual reply — 'reasoning' parts carry `.text` too but are
 // chain-of-thought and must never render (see .superpowers/sdd/v3-task-1-2-report.md).
-// Defensive on shape, not on content: a message missing `parts` would otherwise throw inside
-// render, and an exception in an Ink render takes down the whole app rather than one panel.
-// stripControl (M12): the body is model/user text straight off the wire. Ink's tokenizer drops
-// most escapes but passes DCS (ESC P … ESC \) and OSC 8 hyperlinks through, so an unstripped reply
-// could drive the terminal or render a spoofed clickable link. Same treatment session-store.ts
-// gives titles/snippets.
-const messageText = (m: any) => stripControl((m?.parts ?? []).filter((p: any) => p.type === 'text').map((p: any) => p.text ?? '').join(' '))
+// #32: a shell job's message has no text part at all, so a message with nothing to say falls back
+// to its tool parts' output — see messageBody, which `fleetview logs` shares so the two surfaces
+// can't disagree about what a session said. It owns the defensive shape handling (a message missing
+// `parts` would otherwise throw inside render, and an exception in an Ink render takes down the
+// whole app rather than one panel) and the stripControl (M12) this line used to do.
+const messageText = (m: any) => messageBody(m)
 
 const ROLE_LABEL: Record<string, string> = { user: 'you:', assistant: 'opencode:' }
 

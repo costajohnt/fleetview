@@ -124,6 +124,21 @@ export function parseArgs(argv: string[] = []): ParseResult {
   return out
 }
 
+// #33: `attach`/`logs`/`stop`/`rm` resolve an id by prefix, because ids are long and nobody retypes
+// one in full — but an empty string prefixes EVERY session, so `fleetview logs "$id"` with an unset
+// variable listed the whole server back as "matches N sessions", and so does any one- or two-letter
+// typo, since every id starts `ses_`. Four characters is the shortest thing that can carry a
+// character of the random part, so it is the shortest thing worth resolving. Pure and exported so
+// the grammar can be tested without a server.
+export const MIN_SESSION_ID_CHARS = 4
+export const sessionIdProblem = (id: string | undefined | null): string | null => {
+  const trimmed = (id ?? '').trim()
+  if (!trimmed) return 'needs a session id — got an empty one (an unset shell variable?)'
+  if (trimmed.length < MIN_SESSION_ID_CHARS)
+    return `session id "${trimmed}" is too short — give at least ${MIN_SESSION_ID_CHARS} characters of it (every id starts "ses_")`
+  return null
+}
+
 // Parse a `--model provider/model` flag into the shape createSession and the header want, or null
 // when it isn't `<provider>/<model>`. Shared by `bg` and the roster launch so the two can't drift.
 export const parseModel = (str: string): { providerID: string; id: string } | null => {
