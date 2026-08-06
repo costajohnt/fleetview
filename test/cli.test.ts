@@ -199,6 +199,110 @@ test('a port answering 401 is left alone rather than spawned onto', async () => 
   expect(warn.mock.calls[0][0]).toMatch(/rejecting fleetview's password/)
 })
 
+// SEC1: a saved password the port's occupant rejected has been shown to that occupant, and belongs
+// to a server that is evidently gone. Carrying it onto the replacement would arm the new server with
+// a credential the rejecting listener already holds.
+test('a saved password rejected by whatever holds the port is not reused for the replacement', async () => {
+  const spawned: any[] = []
+  const saved: any[] = []
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawned.length > 0),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
+    spawnServer: (s: any) => (spawned.push(s), 777),
+    saveServer: (_file: any, s: any) => saved.push(s),
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, password: 'from-server-json' })
+  expect(result.ok).toBe(true)
+  expect(env.OPENCODE_SERVER_PASSWORD).not.toBe('from-server-json')
+  expect(env.OPENCODE_SERVER_PASSWORD).toMatch(/^[0-9a-f-]{36}$/)
+  expect(spawned.every((s) => s.password === env.OPENCODE_SERVER_PASSWORD)).toBe(true)
+  expect(saved.at(-1).password).toBe(env.OPENCODE_SERVER_PASSWORD)
+})
+
+// The counterpart: a password the USER set is theirs, not something fleetview adopted from disk, so a
+// 401 under it is not evidence it was leaked — the existing M4 handling still applies.
+test('a user-set password is not burned by a 401 on the configured port', async () => {
+  const spawned: any[] = []
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const deps = {
+    isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawned.length > 0),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
+    spawnServer: (s: any) => (spawned.push(s), 777),
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  await makeEnsureServer(deps as any)(server)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user')
+})
+
+// SEC2: adopting a server fleetview didn't spawn is supported, but it is also the only moment a
+// squatted port is visible to the user — so it gets one informational line, once.
+test('adopting a server fleetview did not spawn says so, once', async () => {
+  const notice = vi.fn()
+  const deps = {
+    isServerHealthy: () => Promise.resolve(true),
+    isAuthEnforced: () => Promise.resolve(true),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    identifyServer: () => ({ ok: false, reason: 'no such process' }),
+    notice,
+    env: { OPENCODE_SERVER_PASSWORD: 'set-by-user' } as NodeJS.ProcessEnv,
+  }
+  const ensure = makeEnsureServer(deps as any)
+  await ensure(server)
+  await ensure(server) // the roster loop re-runs this every iteration; the notice must not repeat
+  expect(notice).toHaveBeenCalledOnce()
+  expect(notice.mock.calls[0][0]).toMatch(/already running on 127\.0\.0\.1:4900/)
+  expect(notice.mock.calls[0][0]).not.toMatch(/OPENCODE_SERVER_PASSWORD/) // a password IS set; nothing to say about it
+})
+
+// isAuthEnforced returns true when no password is set — nothing is being ignored — which left the
+// configuration where adoption is most likely and least protected completely silent.
+test('the adoption notice names the no-password case rather than staying silent', async () => {
+  const notice = vi.fn()
+  const deps = {
+    isServerHealthy: () => Promise.resolve(true),
+    isAuthEnforced: () => Promise.resolve(true),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    identifyServer: () => ({ ok: false, reason: 'no such process' }),
+    notice,
+    env: {} as NodeJS.ProcessEnv,
+  }
+  await makeEnsureServer(deps as any)(server)
+  expect(notice.mock.calls[0][0]).toMatch(/No OPENCODE_SERVER_PASSWORD is set/)
+})
+
+test('reusing fleetview’s own still-running server is not announced as a foreign adoption', async () => {
+  const notice = vi.fn()
+  const deps = {
+    isServerHealthy: () => Promise.resolve(true),
+    isAuthEnforced: () => Promise.resolve(true),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    identifyServer: (pid: number) => ({ ok: pid === 777, command: 'opencode serve' }),
+    notice,
+    env: {} as NodeJS.ProcessEnv,
+  }
+  await makeEnsureServer(deps as any)({ ...server, pid: 777 })
+  expect(notice).not.toHaveBeenCalled()
+})
+
 test('a password persisted for a still-running spawned server is adopted before the health probe', async () => {
   const env: NodeJS.ProcessEnv = {}
   const deps = {
