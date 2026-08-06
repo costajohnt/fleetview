@@ -11,13 +11,16 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Pinned to commit SHAs like ci.yml: `v4` is a moving pointer its owner can repoint, and this
+      # job holds an OIDC token that can publish the package.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+          cache: npm
           registry-url: 'https://registry.npmjs.org'
-      # Trusted publishing (OIDC) needs npm >= 11.5.1
-      - run: npm install -g npm@latest
+      # No npm upgrade: node 24 bundles npm >= 11.5.1, which is all trusted publishing needs, and
+      # `npm@latest` is both unpinned supply chain and what broke the node-pty gyp build here.
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
