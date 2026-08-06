@@ -113,6 +113,39 @@ const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.
 // 640 is a generous 8x the 80-grapheme output cap, covering any run of whitespace collapsing away.
 const snippet = (text: string) => (text ? truncateGraphemes(stripControl(text.slice(0, 641).replace(/\s+/g, ' ').trim()), 80) : '') // 641: an odd cut mid-surrogate is absorbed by grapheme truncation. stripControl: this string reaches the CLI stdout raw (`ls`), so escape bytes must go before it can drive the terminal
 
+// #32: the title a shell surface should print for a session the server never named. The TUI already
+// covers this with provisionalTitle, but that lives in one process's memory — `fleetview ls` reads
+// server state, where a shell job's title stays the "New session - <timestamp>" placeholder forever
+// (a `! cmd` job never takes a model turn, so opencode's rename never fires). The roster member kept
+// what was dispatched, so use it. A real server title always wins, and `! ` is prefixed for a shell
+// member the same way the roster row prefixes it — the member stores the bare command.
+export function memberTitle(title: string, member?: { prompt?: unknown; shell?: unknown } | null): string {
+  if (!isPlaceholderTitle(title)) return title
+  const prompt = typeof member?.prompt === 'string' ? member.prompt : ''
+  // snippet, not the raw prompt: members carry up to 2000 characters and this is one line of `ls`.
+  return snippet(prompt.trim() ? (member?.shell ? `! ${prompt}` : prompt) : '') || title
+}
+
+// #32: a message's renderable body. 'text' parts are the reply itself and stay the only thing a
+// normal turn shows — but a shell job has no text part at all: its output lives in the assistant
+// message's `tool` part at state.output, which made a job's output unreachable from peek and
+// `fleetview logs` alike, despite SHELL_JOB_TTL_MS promising `logs` could read it. So tool output is
+// a fallback for a message with nothing else to say, never an addition — a model turn must not turn
+// into a dump of every tool it called.
+// stripControl for the same reason the title/snippet strip: this reaches raw stdout via `logs` and
+// goes through Ink (which passes DCS and OSC 8 through) in peek.
+export function messageBody(m: any, joiner = ' '): string {
+  const parts = (m?.parts ?? []) as any[]
+  const text = parts.filter((p) => p?.type === 'text').map((p) => p?.text ?? '').join(joiner)
+  if (text.trim()) return stripControl(text)
+  const output = parts
+    .filter((p) => p?.type === 'tool')
+    .map((p) => (typeof p?.state?.output === 'string' ? p.state.output : ''))
+    .filter(Boolean)
+    .join('\n')
+  return stripControl(output)
+}
+
 // permission.asked's verified shape is {id, sessionID, permission, patterns, metadata, always,
 // tool?} — there is no title/description field, so build the label from `permission` (+ patterns
 // when present) and only fall back to the id when `permission` itself is missing.

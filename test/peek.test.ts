@@ -48,6 +48,40 @@ test('Peek: escape sequences in a message body are stripped before render (M12)'
   expect(frame).toContain('a]8;;http://evil.exampleclick]8;;bPq;danger\\c') // payload rendered as inert text
 })
 
+// --- #32: a shell job's output lives in a tool part, not a text part ---
+
+test("#32: a message with no text parts renders its tool output, so a shell job's output is readable", () => {
+  const frame = render(
+    React.createElement(Peek, {
+      target: { title: '! sleep 5 && echo shell-job-done', projectKey: '/p' },
+      messages: [{ info: { role: 'assistant' }, parts: [{ type: 'tool', state: { output: 'shell-job-done\n' } }] }],
+      columns: 200,
+    }),
+  ).lastFrame()!
+  expect(frame).toContain('opencode:')
+  expect(frame).toContain('shell-job-done')
+})
+
+test('#32: a normal turn still renders only its reply — tool output is a fallback, not an addition', () => {
+  const frame = render(
+    React.createElement(Peek, {
+      target: { title: 't', projectKey: '/p' },
+      messages: [
+        {
+          info: { role: 'assistant' },
+          parts: [
+            { type: 'text', text: 'done, the tests pass' },
+            { type: 'tool', state: { output: 'a very long tool dump nobody asked for' } },
+          ],
+        },
+      ],
+      columns: 200,
+    }),
+  ).lastFrame()!
+  expect(frame).toContain('done, the tests pass')
+  expect(frame).not.toContain('nobody asked for')
+})
+
 // --- Peek: truncation counts rendered rows, not message entries (F3) ---
 
 // --- pending permission banner (Wave B) ---
