@@ -155,6 +155,13 @@ export function makeChordReader({
   }
 }
 
+// The handoff back to the roster is not instantaneous: the reader is gone, Ink's input hooks
+// re-register a tick or two later, and whatever is typed (or replayed by the terminal) in between
+// belongs to neither side. Those bytes are the phantom text in the dispatch input (#19) — a
+// fragmented arrow reaching Ink as a bare Escape is the same window, and a bare Escape on an empty
+// input quits. Discard the window instead of delivering it late.
+export const RESUME_DRAIN_MS = 50
+
 // Resolves with why the attachment ended: 'exit' when opencode quit on its own, 'detach' when the
 // user pressed the chord, or {type:'switch', index} to attach somewhere else.
 //
@@ -174,6 +181,10 @@ export function attachPty({
   // detach mid-stream kills in-flight work. opencode sessions live on a server and lose nothing on
   // detach, which is why this defaults off and the call site never sets it for opencode.
   busyDetachGuard = false,
+  // How long stdin stays discarded on the way back to the roster; see cleanup().
+  resumeDrainMs = RESUME_DRAIN_MS,
+  setTimer = setTimeout,
+  defer = setImmediate,
 }: {
   command: string
   args: string[]
@@ -186,6 +197,9 @@ export function attachPty({
   onSuspend?: () => void
   onResume?: () => void
   busyDetachGuard?: boolean
+  resumeDrainMs?: number
+  setTimer?: (fn: () => void, ms: number) => any
+  defer?: (fn: () => void) => any
 }) {
   return new Promise((resolve) => {
     onSuspend() // stop fleetview drawing before the child writes a single byte
@@ -277,18 +291,20 @@ export function attachPty({
     const disposeExit = child.onExit((e: any) =>
       finish({ type: 'exit', exitCode: e?.exitCode ?? 0, drewNothing: !drew, ms: now() - startedAt }),
     )
-    const wasRaw = stdin.isRaw
     // Ink releases stdin asynchronously once its input hooks go inactive, and that teardown lands
     // after this setup — so raw mode is asserted again on the next tick, or the first keystrokes
     // after attaching arrive line-buffered.
+    const setRaw = (on: boolean) => {
+      if (stdin.isTTY && stdin.setRawMode) stdin.setRawMode(on)
+    }
     const assertRaw = () => {
       if (settled) return
-      if (stdin.isTTY && stdin.setRawMode) stdin.setRawMode(true)
+      setRaw(true)
       stdin.resume?.()
     }
     assertRaw()
     stdin.on('data', onInput)
-    setImmediate(assertRaw)
+    defer(assertRaw)
     stdout.on?.('resize', onResize)
 
     function cleanup() {
@@ -297,7 +313,21 @@ export function attachPty({
       disposeExit?.dispose?.()
       stdin.off?.('data', onInput)
       stdout.off?.('resize', onResize)
-      if (stdin.isTTY && stdin.setRawMode && !wasRaw) stdin.setRawMode(false)
+      // Raw is the only correct state here: fleetview keeps running and its roster always owns the
+      // terminal in raw mode. Restoring cooked belongs to process exit alone (restoreTerminal), and
+      // the mode Ink believes it left behind cannot be trusted — Ink's stdin release is async, so a
+      // fast detach→attach cycle sampled it mid-teardown and dropped the roster into cooked mode
+      // while Ink's refcount still said raw: echoing input, nothing reaching the app, and the
+      // line buffer flushing into the dispatch prompt on recovery (#19). Re-assert on the next tick
+      // as well, for the same reason the attach direction does: Ink re-registers after this returns.
+      setRaw(true)
+      defer(() => setRaw(true))
+      // Keep stdin flowing into a sink for the window instead of letting it pause with no reader:
+      // a paused stdin buffers everything typed during the handoff and replays it into Ink as one
+      // late chunk the moment Ink subscribes. Nothing typed here was aimed at either side.
+      const drain = () => {}
+      stdin.on('data', drain)
+      setTimer(() => stdin.off?.('data', drain), resumeDrainMs)
       untrack()
       // Detaching never stops a session: kill the local viewer, never the session behind it.
       // node-pty's IPty declares only `kill(signal?)` — there is no `killed` property (that

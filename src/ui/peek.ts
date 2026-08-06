@@ -3,18 +3,17 @@ import { basename } from 'node:path'
 import { Box, Text } from 'ink'
 import { graphemes, truncateGraphemes, osc8, stripControl } from '../text-utils.ts'
 import { prStatus, prColor } from '../pull-requests.ts'
-import { permissionLabel, questionLabel } from '../session-store.ts'
+import { permissionLabel, questionLabel, messageBody, errorLabel } from '../session-store.ts'
 import { theme } from './theme.ts'
 
 // Only 'text' parts are ever the actual reply — 'reasoning' parts carry `.text` too but are
 // chain-of-thought and must never render (see .superpowers/sdd/v3-task-1-2-report.md).
-// Defensive on shape, not on content: a message missing `parts` would otherwise throw inside
-// render, and an exception in an Ink render takes down the whole app rather than one panel.
-// stripControl (M12): the body is model/user text straight off the wire. Ink's tokenizer drops
-// most escapes but passes DCS (ESC P … ESC \) and OSC 8 hyperlinks through, so an unstripped reply
-// could drive the terminal or render a spoofed clickable link. Same treatment session-store.ts
-// gives titles/snippets.
-const messageText = (m: any) => stripControl((m?.parts ?? []).filter((p: any) => p.type === 'text').map((p: any) => p.text ?? '').join(' '))
+// #32: a shell job's message has no text part at all, so a message with nothing to say falls back
+// to its tool parts' output — see messageBody, which `fleetview logs` shares so the two surfaces
+// can't disagree about what a session said. It owns the defensive shape handling (a message missing
+// `parts` would otherwise throw inside render, and an exception in an Ink render takes down the
+// whole app rather than one panel) and the stripControl (M12) this line used to do.
+const messageText = (m: any) => messageBody(m)
 
 const ROLE_LABEL: Record<string, string> = { user: 'you:', assistant: 'opencode:' }
 
@@ -116,10 +115,17 @@ export function Peek({
   else {
     lines = messages.slice(-2).flatMap((m: any) => {
       const role = m?.info?.role
-      return [
-        { text: role ? ROLE_LABEL[role] ?? `${role}:` : 'message:', dim: true },
-        { text: messageText(m) },
-      ]
+      const body = messageText(m)
+      // #24: a failed turn carries its reason on `info.error` and, in the case that motivated this
+      // (a model without tool support), no text at all — so peek rendered an empty `opencode:` reply
+      // and said nothing about the failure. Emitted whenever the error exists rather than only when
+      // the body is empty, so a turn that said something before failing keeps both. errorLabel
+      // stripControls it, like every other model-provided string this panel renders (M12).
+      const err = errorLabel(m?.info?.error)
+      const rows: any[] = [{ text: role ? ROLE_LABEL[role] ?? `${role}:` : 'message:', dim: true }]
+      if (body || !err) rows.push({ text: body })
+      if (err) rows.push({ text: `error: ${err}`, color: theme.danger })
+      return rows
     })
   }
 
@@ -154,7 +160,8 @@ export function Peek({
 
   // Truncation must count rendered terminal ROWS, not message entries — a wrapped multi-line
   // message otherwise overflows the viewport even though it "counted" as one line (F3).
-  const rows = lines.flatMap((l: any) => wrapLines(l.text, columns).map((text: string) => ({ text, dim: l.dim })))
+  // `color` rides along with `dim` so a wrapped error line keeps its colour on every row it takes.
+  const rows = lines.flatMap((l: any) => wrapLines(l.text, columns).map((text: string) => ({ text, dim: l.dim, color: l.color })))
   // reserve: title row + (permission banner rows + hint row) + (question banner rows + hint row) + (error row), all optional
   // reserve also covers the numbered options and the always-present reply input line.
   const reserved =
@@ -214,7 +221,7 @@ export function Peek({
     savedReply
       ? React.createElement(Text, { color: theme.warn }, `saved — will send when it is reachable: ${truncateGraphemes(savedReply, Math.max(8, columns - 40))}`)
       : null,
-    ...slice.map((l: any, i: number) => React.createElement(Text, { key: i, dimColor: l.dim }, l.text)),
+    ...slice.map((l: any, i: number) => React.createElement(Text, { key: i, dimColor: l.dim, color: l.color }, l.text)),
     truncated ? React.createElement(Text, { dimColor: true }, '…') : null,
     // The reply input is what makes peek more than a viewer: "Type a reply in the peek panel and
     // press Enter to send it to that session."

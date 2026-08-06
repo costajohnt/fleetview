@@ -57,6 +57,8 @@ function makeDeps() {
     serverReady: true,
     roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 's1', addedAt: 1 }], collapsed: [] as string[] },
     persistRoster: vi.fn(),
+    // Dispatch refuses a target directory that is gone (#22); this fixture's path is not on disk.
+    dirExistsImpl: () => true,
   }
 }
 

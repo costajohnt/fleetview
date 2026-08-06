@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   sandboxParents,
+  rememberSandboxes,
+  isRootProject,
   displayProject,
   isSandbox,
   shouldIsolate,
@@ -33,6 +35,28 @@ test('sandboxParents maps every worktree back to the repository that owns it', (
 test('sandboxParents tolerates a project row with no sandboxes field', () => {
   expect(sandboxParents([{ worktree: '/repo/x' }]).size).toBe(0)
   expect(sandboxParents().size).toBe(0)
+})
+
+// #22: the listing that drops a deleted worktree also drops it from its repository's `sandboxes`,
+// while the stale project record survives the merge. Without stickiness it would be reclassified as
+// a plain repo — a browse group and a dispatch target for a directory that no longer exists.
+test('rememberSandboxes keeps a directory classified as a sandbox after a later listing omits it', () => {
+  const sticky = new Map<string, string>()
+  rememberSandboxes(sticky, projects)
+  const afterDelete = [
+    { id: 'p1', worktree: '/repo/alpha', vcs: 'git', sandboxes: ['/wt/alpha/two'] }, // one was deleted
+    { id: 'p2', worktree: '/wt/alpha/one', vcs: 'git', sandboxes: [] }, // its record lives on
+  ]
+  const parents = rememberSandboxes(sticky, afterDelete)
+  expect(isSandbox(parents, '/wt/alpha/one')).toBe(true)
+  expect(displayProject(parents, '/wt/alpha/one')).toBe('/repo/alpha')
+  expect(sandboxParents(afterDelete).has('/wt/alpha/one')).toBe(false) // fresh-only is what leaked
+})
+
+// #25: opencode's synthetic global project. Not a repository anyone chose.
+test('isRootProject matches the synthetic global project and nothing else', () => {
+  expect(isRootProject({ id: 'global', worktree: '/' })).toBe(true)
+  expect(isRootProject({ id: 'p1', worktree: '/repo/alpha' })).toBe(false)
 })
 
 // A worktree is machinery, not a place the user picked, so rows and headers name the repository.

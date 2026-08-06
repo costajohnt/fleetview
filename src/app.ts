@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { basename } from 'node:path'
-import { Box, Text, useInput, useApp, useStdout } from 'ink'
+import { existsSync } from 'node:fs'
+import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
-import { graphemes } from './text-utils.ts'
+import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
@@ -18,7 +19,7 @@ import { Peek } from './ui/peek.ts'
 import { usePeek } from './use-peek.ts'
 import { pickTarget, repoChoices } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
-import { sandboxParents, displayProject, isSandbox, shouldIsolate, worktreeName, worktreeSafety, allProjectDirectories } from './worktree.ts'
+import { sandboxParents, rememberSandboxes, isRootProject, displayProject, isSandbox, shouldIsolate, worktreeName, worktreeSafety, allProjectDirectories } from './worktree.ts'
 import { fetchPullRequests, branchOf, byBranch, hasOpenPr } from './pull-requests.ts'
 import { theme } from './ui/theme.ts'
 import type { OpencodeEvent } from './types.ts'
@@ -153,7 +154,10 @@ type AppProps = {
   branchOfImpl?: any
   cwd?: string
   worktreeSafetyImpl?: any
+  dirExistsImpl?: (dir: string) => boolean
 }
+// How long after a resume a bare Escape is treated as handoff residue rather than a quit.
+const RESUME_QUIET_MS = 50 // matches the pty host's stdin drain window
 
 export function App({
   server,
@@ -188,9 +192,19 @@ export function App({
   // Injected so the branch that decides whether deleting a session destroys committed work can be
   // tested without building a git repository per case. Defaults to the real thing.
   worktreeSafetyImpl = worktreeSafety,
+  // Injected for the same reason: dispatch refuses a target directory that is gone (#22), and the
+  // test corpus dispatches into paths that never existed on disk.
+  dirExistsImpl = existsSync,
 }: AppProps): any {
   const { exit } = useApp()
   const { stdout } = useStdout()
+  // Terminal size has to come from the hook, not from `stdout.columns`/`stdout.rows` read during
+  // render. Ink's own resize handler re-lays-out the last React output it has — it never re-invokes
+  // the components — so a width read at render time stays at the old value and the frame keeps the
+  // layout it had before the resize until some unrelated state change re-renders App. `useWindowSize`
+  // subscribes to the stdout resize event (gated-stdout forwards the real terminal's) and re-renders
+  // with the new size, which is the repaint that was missing.
+  const { columns: termColumns, rows: termRows } = useWindowSize()
   const store = useMemo(() => createStore(), [])
   const [, force] = useState(0)
   // A caller that passes no registry gets the opencode adapter built off the client it already
@@ -237,6 +251,11 @@ export function App({
   // to `completed` mid-keystroke, and an index would silently retarget the second Ctrl+X at
   // whatever slid into that slot. The index is derived from this on every render.
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  // ...but the key alone is not that identity: row keys are namespaced by the group they render in
+  // (`state:running:<id>`), so the key of a session changes when the session changes state group.
+  // This remembers which session the current selection means, so it can be re-resolved to whatever
+  // key that session has now (#18).
+  const selectedSessionRef = useRef<{ projectKey: string; id: string } | null>(null)
   const [view, setView] = useState('main') // main | browse
   const [rosterState, setRosterState] = useState<RosterState>(roster)
   const [mode, setMode] = useState('roster') // roster | rename | peek | help
@@ -266,6 +285,10 @@ export function App({
   // the attached session.
   const [attached, setAttached] = useState(false)
   const attachedRef = useRef(false) // read by closures of arbitrary age; see `attach`
+  // When the last attachment handed the terminal back. An arrow key still in flight across that
+  // handoff reaches Ink fragmented, and a fragmented arrow is a bare Escape — which on an empty
+  // input is the quit key, so a detach with a key held could exit fleetview outright (#19).
+  const resumedAt = useRef(0)
   // The session the user just backgrounded (detach chord, or the clean opencode-attach exit the
   // app_exit:left keybind produces). While set, the roster shows "Your conversation moved to the
   // background" above the list, and an Esc in that window undoes the switch by re-attaching —
@@ -294,6 +317,7 @@ export function App({
   const rerender = useCallback(() => force((n) => n + 1), [])
   const seededProjectKeys = useRef(new Set<string>()) // worktrees that successfully listSessions'd this process lifetime
   const knownWorktrees = useRef(new Set<string>()) // worktrees already handed to seedAndStream (new-vs-repeat gate for repoll)
+  const knownSandboxes = useRef(new Map<string, string>()) // every worktree ever listed in a project's `sandboxes` -> its repo (#22)
   const conns = useRef(new Map<string, any>()) // worktree -> stream handle, for unmount cleanup
   // onEvent below is captured once by the mount-only discovery effect, so it can't read fresh
   // rosterState from a render closure — this ref is the escape hatch (F1).
@@ -698,7 +722,10 @@ export function App({
   // publishes as a project of its own AND lists in its repository's `sandboxes`. Rows are grouped by
   // the repository throughout — a worktree is machinery for running the session safely, not a place
   // the user chose, and agent view likewise groups by directory while isolating underneath.
-  const parents = sandboxParents(projects)
+  // Sticky, not rebuilt from scratch: a worktree deleted server-side drops out of its repository's
+  // `sandboxes` while its stale project record lives on (mergeProjects never drops — that is what
+  // keeps an OFFLINE project's rows), and a fresh-only map would promote that record to a repo (#22).
+  const parents = rememberSandboxes(knownSandboxes.current, projects)
   const repoOf = (projectKey: any) => displayProject(parents, projectKey)
 
   // Groups come from the projects list (not the store) so a freshly-discovered,
@@ -782,7 +809,9 @@ export function App({
     new Set([...byProjectSessions.values()].flat().map((s: any) => s.backend ?? DEFAULT_BACKEND)).size > 1
   // Worktrees are never rows of their own in a project listing — their sessions are already shown
   // under the repository, and a second group named after a hashed cache path helps nobody.
-  const repoProjects = projects.filter((p) => !isSandbox(parents, p.worktree))
+  // opencode's synthetic `global` project (worktree `/`) is filtered out with them: it is nobody's
+  // repository, renders as a bare `/` group, and as a dispatch target would run a session in `/` (#25).
+  const repoProjects = projects.filter((p) => !isSandbox(parents, p.worktree) && !isRootProject(p))
 
   const browseGroupsWith = (cap: number) =>
     repoProjects.map((p) => {
@@ -906,7 +935,7 @@ export function App({
   // the roster out of the region Ink can repaint.
   //
   // Each of those components now truncates to one row per line, so counting lines is sound.
-  const columns = stdout?.columns ?? 80
+  const columns = termColumns
   // One name for "the moved-to-the-background line is on screen": chromeRows, the mouse y→row
   // mapping and the render condition must never disagree about this row, or clicks land one line
   // off (that bug shipped once).
@@ -924,7 +953,7 @@ export function App({
     (mode === 'peek' ? 0 : INPUT_BOX_ROWS) +
     1 + // hints
     (serverDown ? 1 : 0)
-  const maxRows = Math.max(1, (stdout?.rows ?? 24) - chromeRows)
+  const maxRows = Math.max(1, termRows - chromeRows)
   const groups =
     view === 'browse'
       ? browseGroups()
@@ -948,11 +977,36 @@ export function App({
   // same helper the roster draws with, so navigation can never point at a row that isn't there.
   const navRows = navigableRows(groups, collapsed)
   const keyOf = (row: any) => `${row.projectKey}:${row.id}`
-  const navIndex = navRows.findIndex((r) => r.key === selectedKey)
+  const keyedIndex = navRows.findIndex((r) => r.key === selectedKey)
+  // The key went stale — either the selected session moved groups (its key is namespaced by the
+  // group, so stopping a running session renames its row out from under the selection) or the row
+  // is really gone. Re-resolve by identity first: without this the selection silently jumps to the
+  // first session in the list, and a second Ctrl+X lands on an unrelated running session (#18).
+  const navIndex =
+    keyedIndex >= 0
+      ? keyedIndex
+      : navRows.findIndex(
+          (r: any) =>
+            r.type === 'session' &&
+            r.session.id === selectedSessionRef.current?.id &&
+            r.session.projectKey === selectedSessionRef.current?.projectKey,
+        )
   // Falls back to the first session rather than the first header: landing on a header at startup
   // would make Enter collapse a group when the user expected it to attach.
   const navSel = navIndex >= 0 ? navIndex : Math.max(0, navRows.findIndex((r) => r.type === 'session'))
   const navRow = navRows[navSel]
+  // Remember what the selection currently *means*, including the implicit startup selection nobody
+  // pressed a key for — that is the identity the lookup above re-resolves against on the render
+  // where the key stops matching. A header selection records nothing: it is a group, not a session,
+  // and must not be dragged onto a session row later.
+  if (navRow) selectedSessionRef.current = navRow.type === 'session' ? { projectKey: navRow.session.projectKey, id: navRow.session.id } : null
+  // Write the re-resolved key back to state so everything keyed off `selectedKey` (peek's
+  // selection-follow, the roster's highlight) stays in step with the identity resolution above.
+  // Only fires when a session was actually re-found, so the plain fallback can't loop.
+  const rekeyed = keyedIndex < 0 && navIndex >= 0 ? navRows[navIndex].key : null
+  useEffect(() => {
+    if (rekeyed) setSelectedKey(rekeyed)
+  }, [rekeyed])
 
   // Resolve a by-identity selection request against whatever rows actually exist this render. The
   // requester (the detach handler) cannot build the key itself: keys are namespaced by the live
@@ -1079,6 +1133,7 @@ export function App({
       attachedRef.current = true
       setAttached(true)
       const back = (result?: any) => {
+        resumedAt.current = Date.now()
         attachedRef.current = false
         setAttached(false)
         // A detach (not an exit) leaves a conversation running in the background: remember it,
@@ -1171,6 +1226,7 @@ export function App({
     const text = expandPastes(rawText)
     const target = dispatchTarget(repo)
     if (!target) return flash('no projects discovered yet')
+    if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
     const typed = input
     setInput('')
     try {
@@ -1216,6 +1272,11 @@ export function App({
     const effectiveAgent = agent ?? initialAgent ?? undefined
     const target = dispatchTarget(repo)
     if (!target) return flash('no opencode projects discovered yet')
+    // A target can outlive the directory (#22): a project record survives the listing that dropped
+    // it, so a deleted session's worktree is still nameable, and dispatching into one is accepted
+    // silently — the server creates a session against a path that is gone. Refuse before anything is
+    // created, and before `setInput('')`, so the prompt is still in the input to retarget.
+    if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
     const typed = input // put it back if the dispatch fails; retyping a lost prompt is miserable
     let dispatched = false
     setInput('')
@@ -1635,11 +1696,13 @@ export function App({
             setAttached(true)
             done.then(
               (edited: any) => {
+                resumedAt.current = Date.now()
                 attachedRef.current = false
                 setAttached(false)
                 if (typeof edited === 'string') setInput(edited)
               },
               () => {
+                resumedAt.current = Date.now()
                 attachedRef.current = false
                 setAttached(false)
                 flash('could not open an editor')
@@ -1719,6 +1782,10 @@ export function App({
           const live = allMembers.find((s: any) => s.id === backgrounded.id && s.projectKey === backgrounded.projectKey)
           if (live) return attach(live)
         }
+        // Quitting is the one irreversible thing Esc does, so it is the one press that has to be
+        // sure the Escape was typed rather than left over from the handoff. Everything above still
+        // runs in the window: clearing the input or undoing a switch costs nothing if it was junk.
+        if (Date.now() - resumedAt.current < RESUME_QUIET_MS) return
         onAction({ type: 'quit' })
         return exit()
       }
@@ -1738,7 +1805,9 @@ export function App({
       // are kept now that `^j` makes the prompt multi-line; everything else non-printing is
       // dropped rather than embedded in a prompt that gets sent to a model.
       if (ch && !key.meta) {
-        const text = ch.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, '')
+        // The residue strip runs after the control strip, not before: what makes a focus report or
+        // a paste marker read as typed text is exactly that its ESC has just been removed here.
+        const text = stripEscapeResidue(ch.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, ''))
         if (!text) return
         // "Pasted text over 800 characters or more than two lines collapses to a placeholder."
         if (text.length > 800 || text.split('\n').length > 2) {
@@ -1759,7 +1828,7 @@ export function App({
       // Paging keys stay in help; anything else closes it, per "any key to close".
       // Clamp on the way up as well as down: letting the counter climb past the last page made ↑
       // look broken until it had been pressed as many times as ↓ had been over-pressed.
-      const lastPage = helpPage(helpLines(), stdout?.rows ?? 24, 0).pages - 1
+      const lastPage = helpPage(helpLines(), termRows, 0).pages - 1
       if (key.downArrow || key.pageDown || ch === ' ') return setHelpPageIndex((p) => Math.min(lastPage, p + 1))
       if (key.upArrow || key.pageUp) return setHelpPageIndex((p) => Math.max(0, p - 1))
       setHelpPageIndex(0)
@@ -1796,7 +1865,7 @@ export function App({
   // Help is an overlay, so it gets the whole terminal — but bounded, because it is 30-odd rows
   // and a standard terminal is 24. `↓` pages it.
   if (mode === 'help') {
-    return React.createElement(Help, { maxRows: stdout?.rows ?? 24, columns, page: helpPageIndex })
+    return React.createElement(Help, { maxRows: termRows, columns, page: helpPageIndex })
   }
 
   if (mode === 'rename' && target) {
@@ -1830,7 +1899,7 @@ export function App({
   // the other direction — content taller than the terminal breaks Ink's repaint region.
   return React.createElement(
     Box,
-    { flexDirection: 'column', height: stdout?.rows ?? 24 },
+    { flexDirection: 'column', height: termRows },
     // allMembers, not the rendered rows: the header describes the fleet, so a filter that hides a
     // blocked session must not make the summary contradict the roster directly under it.
     React.createElement(Header, { sessions: allMembers, model: dispatchModel, cwd, columns }),

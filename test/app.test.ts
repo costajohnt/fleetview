@@ -71,6 +71,9 @@ function makeDeps(): any {
     // membership model keep working without every test wiring up dispatch/browse first.
     roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 's1', addedAt: 1 }] },
     persistRoster: vi.fn(),
+    // Dispatch refuses a target directory that is gone (#22); these fixtures' paths never existed
+    // on disk, so the on-disk check is stubbed to "present" unless a test says otherwise.
+    dirExistsImpl: () => true,
   }
 }
 
@@ -554,9 +557,11 @@ test('a mid-arm reorder cannot make the second ^x delete a different session tha
   await tick()
   stdin.write('\x18')
   await tick()
-  // The arm is keyed on the session, not the row index: a second press on a row that isn't the
-  // armed one re-arms rather than deleting, so no session is ever deleted by surprise.
-  expect(deps.client.deleteSession).not.toHaveBeenCalled()
+  // The arm is keyed on the session, not the row index — and since #18 the selection is too, so it
+  // rides the reorder down with s1 and this second press confirms the delete on the session the
+  // user actually armed. Either way s2, which merely slid into s1's old slot, is never touched.
+  expect(deps.client.deleteSession.mock.calls.every((c: any[]) => c[0] === 's1')).toBe(true)
+  expect(deps.client.abortSession.mock.calls.every((c: any[]) => c[0] === 's1')).toBe(true)
 })
 
 test('rename dialog survives the target session being deleted mid-dialog via SSE; Esc returns to a responsive roster', async () => {
@@ -721,20 +726,63 @@ test('dispatch targets the selected row\'s project, so a repoll reorder cannot r
   }
 })
 
-test('worktree "/" renders its own name as the group header, not empty (F5)', async () => {
+// Supersedes F5 ("worktree / renders its own name as the group header"): opencode's synthetic
+// `global` project is no longer a group at all, so there is no header to name.
+test('the synthetic global project (worktree "/") is neither a browse group nor an @repo target (#25)', async () => {
   const deps = makeDeps()
-  const rootProject = { id: 'r-1', worktree: '/', vcs: 'git', time: { created: 1, updated: 1 } }
-  deps.client.listProjects = vi.fn(() => Promise.resolve([rootProject]))
+  const rootProject = { id: 'global', worktree: '/', vcs: 'git', time: { created: 1, updated: 1 } }
+  deps.client.listProjects = vi.fn(() => Promise.resolve([rootProject, project]))
   deps.client.listSessions = vi.fn(() => Promise.resolve([]))
-  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), cwd: '/x/alpha' }))
   await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
   stdin.write('\x02')
+  await waitFor(() => lastFrame().includes('alpha')) // browse rendered, with the real repo in it
   // Header rows carry padding and, when selected, a right-edge tail — normalise before matching.
-  await waitFor(() =>
+  expect(
     lastFrame()
       .split('\n')
       .some((l) => ['/', '/ ▾ expanded'].includes(l.replace(/\s+/g, ' ').trim())),
+  ).toBe(false)
+})
+
+// #22: the worktree of a session deleted with ^x^x vanishes from its repository's `sandboxes` while
+// its own project record survives the merge (vanished projects are kept on purpose, so an OFFLINE
+// project keeps its rows). Sticky sandbox classification is what stops it being promoted to a repo.
+test('a deleted session worktree never becomes a browse group or an @repo completion (#22)', async () => {
+  const deps = makeDeps()
+  let deleted = false
+  const alpha = (sandboxes: string[]) => ({ ...project, sandboxes })
+  deps.client.listProjects = vi.fn(() =>
+    Promise.resolve(deleted ? [alpha([])] : [alpha(['/x/wt/sleepy'])]),
   )
+  deps.client.listSessions = vi.fn(() => Promise.resolve([]))
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), cwd: '/x/alpha', projectPollMs: 15 }),
+  )
+  await waitFor(() => deps.client.listSessions.mock.calls.some((c: any) => c[0] === '/x/wt/sleepy'))
+  deleted = true
+  const polls = deps.client.listProjects.mock.calls.length
+  await waitFor(() => deps.client.listProjects.mock.calls.length > polls + 1)
+  stdin.write('\x02')
+  await waitFor(() => lastFrame().includes('alpha'))
+  expect(lastFrame()).not.toContain('sleepy') // no group of its own, empty or otherwise
+  stdin.write('\x02') // back out of browse
+  stdin.write('@sleep')
+  await waitFor(() => lastFrame().includes('@sleep'))
+  expect(lastFrame()).not.toContain('sleepy') // and not offered as a dispatch target
+})
+
+test('dispatch into a directory that no longer exists is refused and keeps the prompt (#22)', async () => {
+  const deps = makeDeps()
+  deps.dirExistsImpl = () => false
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  stdin.write('say hi')
+  await waitFor(() => lastFrame().includes('say hi'))
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('no longer exists'))
+  expect(deps.client.createSession).not.toHaveBeenCalled()
+  expect(lastFrame()).toContain('say hi') // the prompt is still there to retarget
 })
 
 test('esc quits from the unreachable screen (F6)', async () => {
@@ -1706,6 +1754,53 @@ test('stopping a session moves it under completed without losing the selection (
   await waitFor(() => deps.client.deleteSession.mock.calls.length > 0)
   expect(deps.client.deleteSession).toHaveBeenCalledWith('s1', '/x/alpha')
 })
+
+test('the selection follows a session that changes state group, so a late second ^x targets it and not another running session', async () => {
+  const deps = makeDeps()
+  deps.client.listSessions = vi.fn(() =>
+    Promise.resolve([
+      { id: 's1', title: 'sleep 300 quietly', time: { updated: 2000 } },
+      { id: 's2', title: 'sleep 301 command', time: { updated: 1000 } },
+    ]),
+  )
+  deps.roster = {
+    groupBy: 'state',
+    sessions: [
+      { worktree: '/x/alpha', id: 's1', addedAt: 1 },
+      { worktree: '/x/alpha', id: 's2', addedAt: 1 },
+    ],
+  }
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  // Which section a row is under — the frame's header summary line also contains every category
+  // word, so sectionBody() can't be used here (same reason as the arm-hold test above).
+  const sectionOf = (title: string) => {
+    const lines = lastFrame().split('\n')
+    const row = lines.findIndex((l) => l.includes(title))
+    const headers = lines.map((l, i) => [l.trim(), i] as const).filter(([l]) => STATE_HEADERS.includes(l))
+    return headers.filter(([, i]) => i < row).at(-1)?.[0]
+  }
+  // Both running, s1 above s2 (more recent) — so s1 is the default selection and s2 is what the
+  // old first-session fallback would jump to once s1 left `working`.
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's2', status: { type: 'busy' } } })
+  await waitFor(() => sectionOf('sleep 301 command') === 'working' && sectionOf('sleep 300 quietly') === 'working')
+  // ^x until it lands: Node can drop the first stdin chunk (see pressUntil). Re-pressing is safe
+  // while nothing is armed — an unarmed press only ever arms and stops.
+  await pressUntil(stdin, '\x18', () => deps.client.abortSession.mock.calls.length > 0)
+  expect(deps.client.abortSession).toHaveBeenCalledWith('s1', '/x/alpha')
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  // Let the 2s arm window lapse: s1 is released into `completed`, which renames its row key.
+  await waitFor(() => sectionOf('sleep 300 quietly') === 'completed', 5000)
+  const beforeSecond = deps.client.abortSession.mock.calls.length
+  stdin.write('\x18') // second ^x, too late to confirm the delete — it must re-target s1, not s2
+  await waitFor(() => deps.client.abortSession.mock.calls.length > beforeSecond || deps.client.deleteSession.mock.calls.length > 0)
+  // Whatever the late press did (re-arm or delete), it did it to the session that was selected.
+  expect(deps.client.abortSession.mock.calls.every((c: any[]) => c[0] === 's1')).toBe(true)
+  expect(deps.client.deleteSession.mock.calls.every((c: any[]) => c[0] === 's1')).toBe(true)
+  expect(sectionOf('sleep 301 command')).toBe('working') // the other session is untouched
+}, 15000) // the 2s arm window is real time
 
 // --- Phase 5: dispatch grammar ---
 
@@ -2805,9 +2900,10 @@ test('shift+down moves the selected row within its group and the order persists 
       ]),
     }),
   )
-  // Index-fallback selection now points at the row that rose to the top; moving it back down
-  // restores the original order — and proves a second reorder over ranked rows works.
-  stdin.write('\x1B[1;2B')
+  // The selection rides along with the row it moved (#18: selection is a session, not a slot), so
+  // undoing the move is shift+↑ on the same row — and that proves a second reorder over rows that
+  // already carry ranks works.
+  stdin.write('\x1B[1;2A')
   await waitFor(() => order() < 0)
 })
 

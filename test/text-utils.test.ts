@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest'
-import { stripControl, truncateGraphemes, graphemes } from '../src/text-utils.ts'
+import { stripControl, truncateGraphemes, graphemes, stripEscapeResidue } from '../src/text-utils.ts'
 
 const ESC = String.fromCharCode(0x1b)
 const BEL = String.fromCharCode(0x07)
@@ -42,5 +42,31 @@ describe('truncateGraphemes', () => {
     const out = truncateGraphemes('\u{1F600}\u{1F601}', 1)
     expect(out).toBe('\u{1F600}')
     expect(out).not.toContain('�')
+  })
+})
+
+describe('stripEscapeResidue', () => {
+  test('drops the printable tails of the sequences a terminal sends on its own', () => {
+    expect(stripEscapeResidue('[I')).toBe('') // focus in
+    expect(stripEscapeResidue('[O')).toBe('') // focus out
+    expect(stripEscapeResidue('[200~pasted')).toBe('pasted')
+    expect(stripEscapeResidue('[201~')).toBe('')
+    expect(stripEscapeResidue('[45;1R')).toBe('') // cursor position report
+    expect(stripEscapeResidue('[?65;4c')).toBe('') // device attributes
+    expect(stripEscapeResidue(']11;rgb:1c1c/1c1c/1c1c')).toBe('') // OSC colour answer
+  })
+
+  test('strips a run of them, so a focus report followed by a paste marker leaves nothing', () => {
+    expect(stripEscapeResidue('[200~[201~')).toBe('')
+  })
+
+  // The filter guards a prompt the user is typing, so a false positive costs more than a miss.
+  test('leaves text that merely starts with a bracket alone', () => {
+    expect(stripEscapeResidue('[ok]')).toBe('[ok]')
+    expect(stripEscapeResidue('[1] thing')).toBe('[1] thing')
+    expect(stripEscapeResidue('[Inbox] triage')).toBe('[Inbox] triage')
+    expect(stripEscapeResidue('fix the [200~ parser')).toBe('fix the [200~ parser')
+    expect(stripEscapeResidue('deploy the api')).toBe('deploy the api')
+    expect(stripEscapeResidue('')).toBe('')
   })
 })

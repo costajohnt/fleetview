@@ -29,9 +29,9 @@ import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from './bac
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
 import { loadRoster, saveRoster, makePersistRoster, defaultRosterFile } from './roster-store.ts'
 import { attachPty } from './pty-host.ts'
-import { createStore } from './session-store.ts'
+import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
 import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories } from './worktree.ts'
-import { parseArgs, sessionJson, filterForList, underCwd, formatRow, parseModel, USAGE } from './cli-args.ts'
+import { parseArgs, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, USAGE } from './cli-args.ts'
 import { stripControl } from './text-utils.ts'
 import type { ParsedArgs } from './cli-args.ts'
 import type { Backend, ServerRef } from './types.ts'
@@ -370,6 +370,10 @@ export async function runServer(
 // deleted) an arbitrary one of the matches. Exported for tests.
 // TODO(types): `client` and session rows are dynamic opencode wire data; loose by design.
 export async function matchSessions(client: any, projects: { worktree: string }[], id: string) {
+  // #33: a degenerate id matches nothing rather than everything. Enforced here, not only at the
+  // caller, because prefix matching is what makes '' and 's' match every session on the server —
+  // any future caller gets the guard for free. withSession says why before it gets this far.
+  if (sessionIdProblem(id)) return []
   const lists = await Promise.all(projects.map((p) => client.listSessions(p.worktree).catch(() => [])))
   const matches: { session: any; worktree: string }[] = []
   lists.forEach((sessions, i) => {
@@ -387,6 +391,14 @@ export async function matchSessions(client: any, projects: { worktree: string }[
 // message rather than a stack when the id doesn't match anything — or matches more than one thing —
 // because these are things people type by hand from a listing.
 async function withSession(id: string, ensureServer: any, serverFile: string) {
+  // #33: said before anything is spawned or asked — a degenerate id is a usage mistake, and
+  // starting a server to tell the user their shell variable was unset helps nobody.
+  const problem = sessionIdProblem(id)
+  if (problem) {
+    console.error(`fleetview: ${problem}`)
+    process.exitCode = 1
+    return null
+  }
   const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
   if (!r.ok) {
     console.error(r.reason ?? 'opencode server unreachable')
@@ -430,6 +442,15 @@ async function listSessions({ all, json, cwd }: ParsedArgs, ensureServer: any, s
   // Read once, not once per project: the file is the same on every iteration, so re-reading and
   // re-parsing it per project bought nothing and cost a stat + parse per project.
   const seen = loadSeen(defaultSeenFile())
+  // #32: read-only, and once, for the same reason — the roster is what remembers the dispatch
+  // prompt behind a session the server never named (a `! cmd` job never takes a model turn, so
+  // opencode's rename never fires and the row reads "New session - <timestamp>"). Keyed the same
+  // `worktree:id` way the roster store keys members. A corrupt roster is not a reason to fail a
+  // listing — `ls` only wants nicer titles out of it.
+  let members = new Map<string, any>()
+  try {
+    members = new Map(loadRoster(defaultRosterFile()).sessions.map((m) => [`${m.worktree}:${m.id}`, m]))
+  } catch {}
   // Concurrent, because these are independent HTTP calls against one server and `ls` is something
   // people wait on — serially it took the sum of every project's round trip.
   const lists = await Promise.all(projects.map((p) => client.listSessions(p.worktree).catch(() => null)))
@@ -442,7 +463,13 @@ async function listSessions({ all, json, cwd }: ParsedArgs, ensureServer: any, s
   for (const group of store.byProject()) {
     const repo = displayProject(parents, group.projectKey)
     if (!underCwd(repo, cwd) && !underCwd(group.projectKey, cwd)) continue
-    for (const session of group.sessions) rows.push(sessionJson(session, { repo, worktree: group.projectKey }))
+    for (const session of group.sessions)
+      rows.push(
+        sessionJson(
+          { ...session, title: memberTitle(session.title, members.get(`${group.projectKey}:${session.id}`)) },
+          { repo, worktree: group.projectKey },
+        ),
+      )
   }
   rows.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
   const visible = filterForList(rows, { all })
@@ -498,10 +525,18 @@ export async function main() {
     const recent = args.all ? (messages ?? []) : (messages ?? []).slice(-RECENT_MESSAGES)
     for (const m of recent) {
       const role = m?.info?.role
-      const text = (m?.parts ?? []).filter((part: any) => part.type === 'text').map((part: any) => part.text ?? '').join('')
-      // stripControl: message text is model output printed straight to stdout with no Ink backstop,
-      // so an escape in a reply (OSC 52 clipboard write, OSC 0/2 title spoof) would drive the terminal.
-      if (text.trim()) console.log(`${role === 'user' ? 'you' : 'opencode'}: ${stripControl(text)}`)
+      // #32: shared with peek — 'text' parts, or a message's tool output when it has no text parts
+      // at all, which is exactly the shape of a `! cmd` shell job and the reason its output used to
+      // be unreachable from here. messageBody also does the stripControl this printed with: message
+      // text goes straight to stdout with no Ink backstop, so an escape in a reply (OSC 52 clipboard
+      // write, OSC 0/2 title spoof) would drive the terminal.
+      const text = messageBody(m, '')
+      if (text.trim()) console.log(`${role === 'user' ? 'you' : 'opencode'}: ${text}`)
+      // #24: a failed turn's only content is `info.error` — without this, `logs` on a session that
+      // failed every dispatch printed the user's own prompt and nothing else. errorLabel strips it
+      // for the same reason the body above is stripped.
+      const failure = errorLabel(m?.info?.error)
+      if (failure) console.log(`error: ${failure}`)
     }
     return
   }
@@ -716,10 +751,20 @@ async function rosterLoop(
 // worth making for a screen clear.
 const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
 
+// A child killed with child.kill() never gets to put back the input modes it turned on, and every
+// one of them keeps sending fleetview bytes it never asked for: focus reporting answers a window
+// focus change with ESC[I / ESC[O, bracketed paste wraps pastes in ESC[200~ … ESC[201~, application
+// cursor keys re-spell the arrows, and modifyOtherKeys / kitty keyboard re-spell everything else.
+// Those sequences arrive fragmented often enough that their printable tails land in the dispatch
+// input as phantom characters (#20). Reclaiming the terminal means reclaiming its modes, so reset
+// the ones an attached TUI plausibly set — a terminal ignores a reset for a mode it never had on.
+const RESET_INPUT_MODES = '\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[>4;0m\x1b[<u'
+
 // TODO(types): `out` (gated stdout) and `instance` (Ink render handle) come from untyped modules.
 export function reclaimTerminal(out: any, instance: any) {
   out.open()
   instance?.clear()
+  out.write(RESET_INPUT_MODES)
   out.write(CLEAR_SCREEN)
 }
 

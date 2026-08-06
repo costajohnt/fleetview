@@ -39,6 +39,38 @@ export const stripControl = (text: string): string => {
   return out
 }
 
+// Escape sequences the terminal sends fleetview on its own initiative — focus in/out, bracketed
+// paste markers, and the answers to queries a since-killed child asked for — reach the dispatch
+// input with their ESC already stripped as a control byte, leaving a printable tail like `[I` or
+// `[200~` that reads as typed text and makes Enter dispatch junk (#20). Resetting those modes on
+// resume is the real fix; this is the backstop for the ones already in flight.
+//
+// Deliberately a closed list of unambiguous shapes rather than "anything starting with `[`": a
+// prompt legitimately starts with `[ok]` or `[1] retry`, and eating those would be the worse bug.
+// Only a leading remnant is stripped — mid-text these shapes are far likelier to be prose.
+const RESIDUE = [
+  /^\[20[01]~/, // bracketed paste start/end
+  /^\[[IO]$/, // focus in/out — whole-remnant only, so `[Inbox]` survives
+  /^\[[0-9]+;[0-9]+R/, // cursor position report
+  /^\[\?[0-9;]*[a-zA-Z]/, // device attributes and mode reports, e.g. `[?65;4c`
+  /^\][0-9]+;[\s\S]*$/, // OSC answer tail, e.g. `]11;rgb:1c1c/1c1c/1c1c`
+]
+
+export const stripEscapeResidue = (text: string): string => {
+  let out = text
+  for (let matched = true; matched && out; ) {
+    matched = false
+    for (const pattern of RESIDUE) {
+      const hit = pattern.exec(out)
+      if (!hit) continue
+      out = out.slice(hit[0].length)
+      matched = true
+      break
+    }
+  }
+  return out
+}
+
 // OSC 8 hyperlink: terminals that support links make `text` clickable; the rest render it unchanged.
 // Zero visible width, so callers wrap AFTER truncation — the escape inside a truncated string would
 // cut the terminator and swallow the rest of the frame into the link. OSC 8 is the one escape Ink

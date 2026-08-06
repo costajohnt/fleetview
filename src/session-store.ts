@@ -105,6 +105,13 @@ const isQuestion = (text: string) => {
 // refresh after the error adopts whatever the server reports; only a later bump retires it.
 const ERROR_ANCHOR_UNKNOWN = -1
 
+// #21: opencode reports an aborted run through the same session.error channel as a real failure,
+// carrying `{ name: 'MessageAbortedError', data: { message } }` (verified against the 1.18.5
+// binary, which builds that exact name for any aborted/interrupted message). The name is the only
+// thing that distinguishes a stop the user asked for from a failure they didn't.
+const isAbortError = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'MessageAbortedError'
+
 const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.test(title)
 
 // M5: grapheme-safe — a raw slice(0, 80) can chop a surrogate pair in half at the boundary.
@@ -112,6 +119,39 @@ const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.
 // streamed reply must never have its full text regex-replaced or segmented just to keep 80 chars.
 // 640 is a generous 8x the 80-grapheme output cap, covering any run of whitespace collapsing away.
 const snippet = (text: string) => (text ? truncateGraphemes(stripControl(text.slice(0, 641).replace(/\s+/g, ' ').trim()), 80) : '') // 641: an odd cut mid-surrogate is absorbed by grapheme truncation. stripControl: this string reaches the CLI stdout raw (`ls`), so escape bytes must go before it can drive the terminal
+
+// #32: the title a shell surface should print for a session the server never named. The TUI already
+// covers this with provisionalTitle, but that lives in one process's memory — `fleetview ls` reads
+// server state, where a shell job's title stays the "New session - <timestamp>" placeholder forever
+// (a `! cmd` job never takes a model turn, so opencode's rename never fires). The roster member kept
+// what was dispatched, so use it. A real server title always wins, and `! ` is prefixed for a shell
+// member the same way the roster row prefixes it — the member stores the bare command.
+export function memberTitle(title: string, member?: { prompt?: unknown; shell?: unknown } | null): string {
+  if (!isPlaceholderTitle(title)) return title
+  const prompt = typeof member?.prompt === 'string' ? member.prompt : ''
+  // snippet, not the raw prompt: members carry up to 2000 characters and this is one line of `ls`.
+  return snippet(prompt.trim() ? (member?.shell ? `! ${prompt}` : prompt) : '') || title
+}
+
+// #32: a message's renderable body. 'text' parts are the reply itself and stay the only thing a
+// normal turn shows — but a shell job has no text part at all: its output lives in the assistant
+// message's `tool` part at state.output, which made a job's output unreachable from peek and
+// `fleetview logs` alike, despite SHELL_JOB_TTL_MS promising `logs` could read it. So tool output is
+// a fallback for a message with nothing else to say, never an addition — a model turn must not turn
+// into a dump of every tool it called.
+// stripControl for the same reason the title/snippet strip: this reaches raw stdout via `logs` and
+// goes through Ink (which passes DCS and OSC 8 through) in peek.
+export function messageBody(m: any, joiner = ' '): string {
+  const parts = (m?.parts ?? []) as any[]
+  const text = parts.filter((p) => p?.type === 'text').map((p) => p?.text ?? '').join(joiner)
+  if (text.trim()) return stripControl(text)
+  const output = parts
+    .filter((p) => p?.type === 'tool')
+    .map((p) => (typeof p?.state?.output === 'string' ? p.state.output : ''))
+    .filter(Boolean)
+    .join('\n')
+  return stripControl(output)
+}
 
 // permission.asked's verified shape is {id, sessionID, permission, patterns, metadata, always,
 // tool?} — there is no title/description field, so build the label from `permission` (+ patterns
@@ -133,6 +173,24 @@ export const permissionLabel = (p: any) => stripControl(p.permission ? `${p.perm
 export const questionLabel = (q: any) => {
   const first = q.questions?.[0]
   return stripControl(first?.question ?? first?.header ?? q.tool ?? q.id)
+}
+
+// #24: the human sentence behind a failure. Two payloads carry the same union — `session.error`'s
+// `error` and an assistant message's `info.error` — and the sentence lives in `data.message`
+// (verified live: `{name: 'APIError', data: {message: 'No endpoints found that support tool use…'}}`),
+// while thinner frames carry only a `name`, a bare string, or the `true` sentinel session.error
+// falls back to. Returns null whenever there is no text worth showing, so every caller can fall
+// back rather than print `error: undefined`.
+// Lives here for the same reason permissionLabel does: the store, peek and `fleetview logs` all
+// describe the same failure, and one label means they can never describe it differently.
+export const errorLabel = (err: unknown): string | null => {
+  if (typeof err === 'string') return stripControl(err) || null
+  if (!err || typeof err !== 'object') return null
+  const e = err as any
+  const message = typeof e.data?.message === 'string' ? e.data.message : typeof e.message === 'string' ? e.message : null
+  const name = typeof e.name === 'string' ? e.name : null
+  const text = name && message ? `${name}: ${message}` : message ?? name
+  return text ? stripControl(text) : null
 }
 
 // The entry with the lowest __seq — the one the user has actually been waiting on longest, and the
@@ -169,6 +227,19 @@ const pendingSnippet = (r: SessionRecord): string | null => {
   const q = oldestPending(r.pendingQuestions)
   if (q) return snippet(`question: ${questionLabel(q)}`)
   return null
+}
+
+// #24: what a failed row previews. The bug this fixes is the mirror of #7's: at the moment a turn
+// fails, `snippetCache` holds whatever the model printed before failing — usually nothing at all —
+// so the row went red and said nothing about why, and the error text the server did send was
+// dropped on the floor. No `error: ` prefix, unlike the pending labels: the row's own badge already
+// reads `failed`, so the word would be the redundant half of the pair the glyph note above draws.
+// Run through `snippet` like everything else the row shows: same collapse, same 80-grapheme cap,
+// same stripControl. Null — not '' — when the error carries no text (the `true` sentinel), so a
+// failed row keeps the snippet it did have rather than losing it.
+const errorSnippet = (r: SessionRecord): string | null => {
+  const label = errorLabel(r.lastError)
+  return label ? snippet(label) : null
 }
 
 export function createStore() {
@@ -333,7 +404,12 @@ export function createStore() {
       // re-collapsing and re-segmenting a 200KB streamed reply on every render; a pending label is
       // one short wire string, bounded by the same 80 graphemes this call already spends on
       // `stripControl(title)` and the loop in `oldestAskedAt`.
-      snippet: pendingSnippet(r) ?? r.snippetCache, // I1: the fallback is computed once at write time, not recomputed on every render
+      // A live pending request still wins, then the error (#24), then the cached assistant text.
+      // The error is derived here rather than cached in a field for the same reason `pendingSnippet`
+      // is: `lastError` is written at two sites and cleared at four, and a parallel snippet field is
+      // only as good as the one site nobody remembered — where it would show a stale reason for a
+      // session that has since recovered. It is one short wire object, not a 200KB streamed reply.
+      snippet: pendingSnippet(r) ?? (status === 'error' ? errorSnippet(r) : null) ?? r.snippetCache, // I1: the last fallback is computed once at write time, not recomputed on every render
     }
   }
 
@@ -536,6 +612,21 @@ export function createStore() {
         if (!p.sessionID) return
         const r = upsert(projectKey, p.sessionID)
         if (!r) return // a subagent's failure surfaces through its parent
+        // #21: an aborted run emits an error frame of its own, and recording it as `lastError`
+        // made every Ctrl+X render as `failed` (and inflate the header's failure count) because
+        // `derive` ranks error above stopped. An abort is the user's own instruction, not a
+        // failure, so it never becomes an error: it marks the session stopped instead — the same
+        // conclusion `ls` reaches from the persisted flag, so live and seeded rows now agree.
+        // opencode's own TUI drops this frame the same way (`error.name === 'MessageAbortedError'`
+        // → no error toast), and the name is unambiguous, so the stop is recorded even when the
+        // abort came from another fleetview instance or opencode's TUI rather than from app.ts.
+        if (isAbortError(p.error)) {
+          r.stopped = true
+          if (isRunOpen(r)) r.runEndedAt = Date.now()
+          r.updatedAt = Date.now()
+          notify()
+          return
+        }
         r.lastError = p.error ?? true
         // UNKNOWN, not "the last value we happened to hear". Recording an error bumps the
         // session's server-side time.updated, and fleetview learns that value from a separate

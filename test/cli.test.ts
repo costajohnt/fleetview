@@ -710,6 +710,31 @@ test('an exact id wins over the longer id it prefixes', async () => {
   ])
 })
 
+// #33: prefix matching is what makes a degenerate id match everything — '' is a prefix of every
+// session, and every id starts 'ses_', so a one-character typo listed the whole server back.
+test('#33: an empty or whitespace id matches nothing rather than every session', async () => {
+  const client = { listSessions: vi.fn(() => Promise.resolve([{ id: 'ses_abc1' }, { id: 'ses_zzz2' }])) }
+  expect(await matchSessions(client, projectsFor('/x/alpha'), '')).toEqual([])
+  expect(await matchSessions(client, projectsFor('/x/alpha'), '   ')).toEqual([])
+  expect(client.listSessions).not.toHaveBeenCalled() // rejected before the server is asked anything
+})
+
+test('#33: an id too short to resolve matches nothing', async () => {
+  const client = { listSessions: vi.fn(() => Promise.resolve([{ id: 'ses_abc1' }, { id: 'ses_zzz2' }])) }
+  expect(await matchSessions(client, projectsFor('/x/alpha'), 's')).toEqual([])
+  expect(await matchSessions(client, projectsFor('/x/alpha'), 'ses')).toEqual([])
+})
+
+test('#33: a usable prefix still matches, and a whole id still resolves exactly', async () => {
+  const client = { listSessions: vi.fn(() => Promise.resolve([{ id: 'ses_abc1' }, { id: 'ses_zzz2' }])) }
+  expect(await matchSessions(client, projectsFor('/x/alpha'), 'ses_abc')).toEqual([
+    { session: { id: 'ses_abc1' }, worktree: '/x/alpha' },
+  ])
+  expect(await matchSessions(client, projectsFor('/x/alpha'), 'ses_abc1')).toEqual([
+    { session: { id: 'ses_abc1' }, worktree: '/x/alpha' },
+  ])
+})
+
 test('persistSeen merges onto the loop-iteration seen read, never overwrites wholesale', () => {
   // projectB's session is absent from this snapshot (e.g. its listSessions failed this run,
   // so the store never learned about it) — the persisted file must still keep it.
@@ -870,7 +895,9 @@ test('editPrompt returns what the editor wrote, and hands the terminal back', as
   expect(cleared).toHaveBeenCalled() // drops the frame Ink thinks is still on screen
   // …and the screen is wiped through the gate, or Ink's next frame paints relative to wherever the
   // editor left the cursor and the editor's leftovers stay up around it (#5).
-  expect(gate.writes).toEqual(['\x1b[2J\x1b[3J\x1b[H'])
+  // The input-mode resets ride along for the same reason: a child that owned the terminal may have
+  // left focus reporting or bracketed paste on (#20).
+  expect(gate.writes).toEqual(['\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[>4;0m\x1b[<u', '\x1b[2J\x1b[3J\x1b[H'])
 })
 
 test('editPrompt passes the current prompt in, and strips the trailing newline editors add', async () => {
