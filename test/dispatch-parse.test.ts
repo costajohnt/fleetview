@@ -182,6 +182,41 @@ test('/fork is a view command, with the optional prompt as its args', () => {
   })
 })
 
+// #51: `/exit` and `/quit` are the only view commands that take no arguments, and the only two
+// whose action is irreversible — quitting on `/exit codes should be documented in the README` lost
+// the prompt with nothing left running to recover it from. With args they are prompts, which
+// app.ts already dispatches for `kind: 'command'`.
+test('/exit and /quit with arguments are prompts, not the view command', () => {
+  expect(parseInput('/exit codes should be documented in the README', vocab)).toEqual({
+    kind: 'command',
+    command: 'exit',
+    args: 'codes should be documented in the README',
+  })
+  expect(parseInput('/quit trying to make this work', vocab)).toEqual({
+    kind: 'command',
+    command: 'quit',
+    args: 'trying to make this work',
+  })
+  // Bare, they still close the view.
+  expect(parseInput('/exit', vocab)).toEqual({ kind: 'view-command', command: 'exit', args: '' })
+  expect(parseInput('/quit', vocab)).toEqual({ kind: 'view-command', command: 'quit', args: '' })
+})
+
+// The other two view commands legitimately take arguments (README.md:111), so the args check is
+// scoped to `exit`/`quit` and leaves them exactly as they were.
+test('/fork and /model keep their arguments and stay view commands', () => {
+  expect(parseInput('/fork this helper into two functions', vocab)).toEqual({
+    kind: 'view-command',
+    command: 'fork',
+    args: 'this helper into two functions',
+  })
+  expect(parseInput('/model anthropic/claude-sonnet-4', vocab)).toEqual({
+    kind: 'view-command',
+    command: 'model',
+    args: 'anthropic/claude-sonnet-4',
+  })
+})
+
 // The `@backend` token: same shape as `@repo`, ranked below both existing vocabularies.
 const withBackends = { ...vocab, backends: ['opencode', 'claude', 'copilot'] }
 

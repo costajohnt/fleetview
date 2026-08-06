@@ -25,6 +25,13 @@ type Session = { status?: string; prs?: PullRequest[]; [key: string]: unknown }
 // ... /model sets the dispatch model". /login and /logout have no fleetview equivalent.
 const VIEW_COMMANDS = new Set(['exit', 'quit', 'model', 'fork'])
 
+// #51: the two view commands that take no arguments, and the only two whose action is
+// irreversible. `/model <provider>/<model>` and `/fork [prompt]` legitimately take args
+// (README.md:111), so they stay view commands whatever follows them; `/exit codes should be
+// documented in the README` is a prompt that happens to start with the word, and quitting on it
+// destroyed the text with no way to recover it.
+const NO_ARG_VIEW_COMMANDS = new Set(['exit', 'quit'])
+
 const FILTER = /^(a|s):(\S*)$/
 
 // "`#<number>` or a PR URL — shows the session working on that pull request." Anchored on both ends
@@ -72,8 +79,9 @@ export function parseInput(
     // A bare `/` names no command; dispatching it would start a session whose entire prompt is a
     // slash.
     if (!word) return { kind: 'empty' }
+    const isView = VIEW_COMMANDS.has(word) && !(rest.length && NO_ARG_VIEW_COMMANDS.has(word))
     return {
-      kind: VIEW_COMMANDS.has(word) ? 'view-command' : 'command',
+      kind: isView ? 'view-command' : 'command',
       command: word,
       args: rest.join(' '),
     }

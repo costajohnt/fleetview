@@ -428,20 +428,39 @@ async function withSession(id: string, ensureServer: any, serverFile: string) {
 }
 
 // `fleetview --json` / `fleetview ls`: what is running, without opening anything.
-async function listSessions({ all, json, cwd }: ParsedArgs, ensureServer: any, serverFile: string) {
+// Takes its collaborators the same way `runBg` does, so the listing can be driven end to end in a
+// test without a server — the seeding rounds below are where `ls` decides a session's state, and
+// asserting on the printed rows is the only way to know they all ran.
+export async function listSessions(
+  { all, json, cwd }: ParsedArgs,
+  ensureServer: any,
+  serverFile: string,
+  {
+    createClient = (url: string) => new OpencodeClient(url),
+    loadSeenImpl = loadSeen,
+    seenFile = defaultSeenFile,
+    loadRosterImpl = loadRoster,
+    rosterFile = defaultRosterFile,
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: any = {},
+) {
   const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
   if (!r.ok) {
-    console.error(r.reason ?? 'opencode server unreachable')
-    process.exitCode = 1
+    error(r.reason ?? 'opencode server unreachable')
+    setExitCode(1)
     return
   }
-  const client = new OpencodeClient(`http://${r.server.host}:${r.server.port}`)
+  const client = createClient(`http://${r.server.host}:${r.server.port}`)
   const projects = allProjectDirectories(await client.listProjects())
   const parents = sandboxParents(projects as any)
   const store = createStore()
   // Read once, not once per project: the file is the same on every iteration, so re-reading and
   // re-parsing it per project bought nothing and cost a stat + parse per project.
-  const seen = loadSeen(defaultSeenFile())
+  const seen = loadSeenImpl(seenFile())
   // #32: read-only, and once, for the same reason — the roster is what remembers the dispatch
   // prompt behind a session the server never named (a `! cmd` job never takes a model turn, so
   // opencode's rename never fires and the row reads "New session - <timestamp>"). Keyed the same
@@ -449,16 +468,35 @@ async function listSessions({ all, json, cwd }: ParsedArgs, ensureServer: any, s
   // listing — `ls` only wants nicer titles out of it.
   let members = new Map<string, any>()
   try {
-    members = new Map(loadRoster(defaultRosterFile()).sessions.map((m) => [`${m.worktree}:${m.id}`, m]))
+    members = new Map(loadRosterImpl(rosterFile()).sessions.map((m: any) => [`${m.worktree}:${m.id}`, m]))
   } catch {}
   // Concurrent, because these are independent HTTP calls against one server and `ls` is something
   // people wait on — serially it took the sum of every project's round trip.
   const lists = await Promise.all(projects.map((p) => client.listSessions(p.worktree).catch(() => null)))
   lists.forEach((sessions, i) => sessions && store.setSessions(projects[i].worktree, sessions, seen))
-  // Statuses come from the same endpoint the UI seeds from, so a listing and the roster agree.
+  // Statuses come from the same endpoints the UI seeds from, so a listing and the roster agree.
   // Still a second round: seedStatuses only has anything to attach to once the sessions are in.
   const statuses = await Promise.all(projects.map((p) => client.sessionStatus(p.worktree).catch(() => null)))
   statuses.forEach((s, i) => s && store.seedStatuses(projects[i].worktree, s))
+  // #54: and a third, for the pending state a status map does not carry. Without it both of
+  // derive's `waiting` paths are unreachable here by construction, so `ls`/`--json` reported a
+  // permission-blocked session as `working` with no `waitingFor` — contradicting the parity with
+  // `claude agents --json` the README documents. Concurrent like the rounds above, so the wall
+  // clock grows by about one round trip rather than 2N; each catch degrades that project to the
+  // previous behaviour rather than failing the listing.
+  const mark = store.seedMark()
+  await Promise.all(
+    projects.flatMap((p) => [
+      client
+        .listPermissions(p.worktree)
+        .then((x: any) => store.seedPermissions(p.worktree, x, mark))
+        .catch(() => {}),
+      client
+        .listQuestions(p.worktree)
+        .then((x: any) => store.seedQuestions(p.worktree, x, mark))
+        .catch(() => {}),
+    ]),
+  )
   const rows = []
   for (const group of store.byProject()) {
     const repo = displayProject(parents, group.projectKey)
@@ -473,9 +511,9 @@ async function listSessions({ all, json, cwd }: ParsedArgs, ensureServer: any, s
   }
   rows.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
   const visible = filterForList(rows, { all })
-  if (json) return console.log(JSON.stringify(visible, null, 2))
-  if (visible.length === 0) return console.log(all ? 'no sessions' : 'nothing running — fleetview ls --all to include finished sessions')
-  for (const row of visible) console.log(formatRow(row))
+  if (json) return log(JSON.stringify(visible, null, 2))
+  if (visible.length === 0) return log(all ? 'no sessions' : 'nothing running — fleetview ls --all to include finished sessions')
+  for (const row of visible) log(formatRow(row))
 }
 
 export async function main() {

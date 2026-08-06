@@ -4,7 +4,7 @@ import { mkdtempSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSy
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
-import { makeEnsureServer, makePersistSeen, editPrompt, looksLikeOpencodeServer, matchSessions, runBg, runServer } from '../src/cli.ts'
+import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runServer } from '../src/cli.ts'
 
 const server = { host: '127.0.0.1', port: 4900, pid: null }
 
@@ -938,4 +938,70 @@ test('editPrompt uses a private mkdtemp dir, not a predictable /tmp path, and re
   expect(seen).not.toBe(join(tmpdir(), `fleetview-prompt-${process.pid}.txt`))
   expect(seen).toMatch(/fleetview-[^/\\]+[/\\]prompt\.txt$/)
   expect(existsSync(seen)).toBe(false) // temp dir removed after editing
+})
+
+// --- #54: `ls`/`--json` and a blocked session ---
+
+// The listing built the store from sessions + statuses only, so both of derive's `waiting` paths
+// were unreachable by construction: a session blocked on a permission printed `working` with no
+// `waitingFor`, contradicting the parity with `claude agents --json` the README documents.
+function lsDeps(clientOverrides: any = {}) {
+  const client = {
+    listProjects: vi.fn(() => Promise.resolve([{ id: 'a-1', worktree: '/x/alpha', vcs: 'git', time: { created: 1, updated: 1 } }])),
+    listSessions: vi.fn(() => Promise.resolve([{ id: 's1', title: 'fix tests', directory: '/x/alpha', time: { created: 1, updated: 2000 } }])),
+    sessionStatus: vi.fn(() => Promise.resolve({ s1: { type: 'busy' } })),
+    listPermissions: vi.fn(() => Promise.resolve([{ id: 'p1', sessionID: 's1', permission: 'bash' }])),
+    listQuestions: vi.fn(() => Promise.resolve([])),
+    ...clientOverrides,
+  }
+  const printed: string[] = []
+  const opts = {
+    createClient: () => client,
+    loadSeenImpl: () => ({}),
+    seenFile: () => '/tmp/does-not-exist-seen.json',
+    loadRosterImpl: () => ({ sessions: [] }),
+    rosterFile: () => '/tmp/does-not-exist-roster.json',
+    log: (line: string) => printed.push(line),
+    error: (line: string) => printed.push(line),
+    setExitCode: vi.fn(),
+  }
+  const ensureServer = vi.fn(() => Promise.resolve({ ok: true, server }))
+  return { client, printed, opts, ensureServer }
+}
+
+test('ls seeds pending permissions, so a blocked session reports blocked with waitingFor', async () => {
+  const { client, printed, opts, ensureServer } = lsDeps()
+  await listSessions({ command: 'ls', json: true } as any, ensureServer, '/tmp/s.json', opts)
+  expect(client.listPermissions).toHaveBeenCalledWith('/x/alpha')
+  expect(client.listQuestions).toHaveBeenCalledWith('/x/alpha')
+  const rows = JSON.parse(printed.join('\n'))
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toMatchObject({ id: 's1', state: 'blocked', waitingFor: 'permission prompt' })
+  expect(rows[0].waitingSince).toBeGreaterThan(0)
+})
+
+// A pending question is the other `waiting` path, and it reports a different reason.
+test('ls seeds pending questions too, and reports input needed', async () => {
+  const { printed, opts, ensureServer } = lsDeps({
+    listPermissions: vi.fn(() => Promise.resolve([])),
+    listQuestions: vi.fn(() =>
+      Promise.resolve([{ id: 'q1', sessionID: 's1', questions: [{ question: 'merge?', header: 'merge', options: [] }] }]),
+    ),
+  })
+  await listSessions({ command: 'ls', json: true } as any, ensureServer, '/tmp/s.json', opts)
+  expect(JSON.parse(printed.join('\n'))[0]).toMatchObject({ id: 's1', state: 'blocked', waitingFor: 'input needed' })
+})
+
+// Each seed GET fails independently: a project whose pending reads fail degrades to the previous
+// behaviour rather than sinking the listing.
+test('a failing pending read leaves the rest of the listing intact', async () => {
+  const { printed, opts, ensureServer } = lsDeps({
+    listPermissions: vi.fn(() => Promise.reject(new Error('down'))),
+    listQuestions: vi.fn(() => Promise.reject(new Error('down'))),
+  })
+  await listSessions({ command: 'ls', json: true } as any, ensureServer, '/tmp/s.json', opts)
+  const rows = JSON.parse(printed.join('\n'))
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toMatchObject({ id: 's1', state: 'working' })
+  expect(rows[0].waitingFor).toBe(undefined)
 })

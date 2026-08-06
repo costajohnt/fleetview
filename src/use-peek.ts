@@ -219,6 +219,12 @@ export function usePeek({
         const suggestion = suggestedReply(peekPendingQuestions[0])
         if (suggestion) setPeekReply(suggestion)
       } else if (key.upArrow || key.downArrow) {
+        // #61: a typed reply is state worth protecting, the same way escape and Ctrl+C already
+        // treat it. Retargeting `peekTarget` while a draft is live meant the next ⏎ sent the text
+        // written for one session to a different one — a real `--resume`/`promptAsync` against the
+        // wrong agent in the wrong repo, with no undo. So the first arrow with a draft consumes the
+        // key to clear it, and only the next one navigates.
+        if (!replyEmpty) return setPeekReply('')
         // Walk the session rows in screen order by their group-form nav key — the same key the
         // roster arrows and mouse set. Using `flat`/`keyOf` here compared two key vocabularies
         // (group-form selectedKey vs worktree-form keyOf), so the lookup never matched in state
@@ -233,6 +239,10 @@ export function usePeek({
           setPeekTarget(nr.session)
           setPeekError(null)
         }
+      } else if (!replyEmpty && key.rightArrow) {
+        // #61: ⏎ with a draft is consumed above as "send", but → fell through to attach and threw
+        // the draft away silently. Same treatment as the arrows: clear it first, attach second.
+        return setPeekReply('')
       } else if ((key.return || key.rightArrow) && peekTarget) {
         attach(peekTarget)
       } else if (
