@@ -240,6 +240,11 @@ export function App({
   // to `completed` mid-keystroke, and an index would silently retarget the second Ctrl+X at
   // whatever slid into that slot. The index is derived from this on every render.
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  // ...but the key alone is not that identity: row keys are namespaced by the group they render in
+  // (`state:running:<id>`), so the key of a session changes when the session changes state group.
+  // This remembers which session the current selection means, so it can be re-resolved to whatever
+  // key that session has now (#18).
+  const selectedSessionRef = useRef<{ projectKey: string; id: string } | null>(null)
   const [view, setView] = useState('main') // main | browse
   const [rosterState, setRosterState] = useState<RosterState>(roster)
   const [mode, setMode] = useState('roster') // roster | rename | peek | help
@@ -919,11 +924,36 @@ export function App({
   // same helper the roster draws with, so navigation can never point at a row that isn't there.
   const navRows = navigableRows(groups, collapsed)
   const keyOf = (row: any) => `${row.projectKey}:${row.id}`
-  const navIndex = navRows.findIndex((r) => r.key === selectedKey)
+  const keyedIndex = navRows.findIndex((r) => r.key === selectedKey)
+  // The key went stale — either the selected session moved groups (its key is namespaced by the
+  // group, so stopping a running session renames its row out from under the selection) or the row
+  // is really gone. Re-resolve by identity first: without this the selection silently jumps to the
+  // first session in the list, and a second Ctrl+X lands on an unrelated running session (#18).
+  const navIndex =
+    keyedIndex >= 0
+      ? keyedIndex
+      : navRows.findIndex(
+          (r: any) =>
+            r.type === 'session' &&
+            r.session.id === selectedSessionRef.current?.id &&
+            r.session.projectKey === selectedSessionRef.current?.projectKey,
+        )
   // Falls back to the first session rather than the first header: landing on a header at startup
   // would make Enter collapse a group when the user expected it to attach.
   const navSel = navIndex >= 0 ? navIndex : Math.max(0, navRows.findIndex((r) => r.type === 'session'))
   const navRow = navRows[navSel]
+  // Remember what the selection currently *means*, including the implicit startup selection nobody
+  // pressed a key for — that is the identity the lookup above re-resolves against on the render
+  // where the key stops matching. A header selection records nothing: it is a group, not a session,
+  // and must not be dragged onto a session row later.
+  if (navRow) selectedSessionRef.current = navRow.type === 'session' ? { projectKey: navRow.session.projectKey, id: navRow.session.id } : null
+  // Write the re-resolved key back to state so everything keyed off `selectedKey` (peek's
+  // selection-follow, the roster's highlight) stays in step with the identity resolution above.
+  // Only fires when a session was actually re-found, so the plain fallback can't loop.
+  const rekeyed = keyedIndex < 0 && navIndex >= 0 ? navRows[navIndex].key : null
+  useEffect(() => {
+    if (rekeyed) setSelectedKey(rekeyed)
+  }, [rekeyed])
 
   // Resolve a by-identity selection request against whatever rows actually exist this render. The
   // requester (the detach handler) cannot build the key itself: keys are namespaced by the live
