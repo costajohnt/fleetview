@@ -55,5 +55,6 @@ test('resuming from an attachment reopens the gate, drops Ink’s frame memory, 
   expect(o.write).toHaveBeenCalledWith('\x1b[2J\x1b[3J\x1b[H')
   // The order is the fix: a clear written before the gate reopens is swallowed, and one written
   // before Ink's own clear() would be undone by the erase sequences that clear() emits.
-  expect(order).toEqual(['open', 'clear', 'write'])
+  // Two writes: the input-mode resets the dead child left behind (#20), then the wipe.
+  expect(order).toEqual(['open', 'clear', 'write', 'write'])
 })

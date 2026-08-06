@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { basename } from 'node:path'
 import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
-import { graphemes } from './text-utils.ts'
+import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
@@ -150,6 +150,8 @@ type AppProps = {
   cwd?: string
   worktreeSafetyImpl?: any
 }
+// How long after a resume a bare Escape is treated as handoff residue rather than a quit.
+const RESUME_QUIET_MS = 50 // matches the pty host's stdin drain window
 
 export function App({
   server,
@@ -274,6 +276,10 @@ export function App({
   // the attached session.
   const [attached, setAttached] = useState(false)
   const attachedRef = useRef(false) // read by closures of arbitrary age; see `attach`
+  // When the last attachment handed the terminal back. An arrow key still in flight across that
+  // handoff reaches Ink fragmented, and a fragmented arrow is a bare Escape — which on an empty
+  // input is the quit key, so a detach with a key held could exit fleetview outright (#19).
+  const resumedAt = useRef(0)
   // The session the user just backgrounded (detach chord, or the clean opencode-attach exit the
   // app_exit:left keybind produces). While set, the roster shows "Your conversation moved to the
   // background" above the list, and an Esc in that window undoes the switch by re-attaching —
@@ -1073,6 +1079,7 @@ export function App({
       attachedRef.current = true
       setAttached(true)
       const back = (result?: any) => {
+        resumedAt.current = Date.now()
         attachedRef.current = false
         setAttached(false)
         // A detach (not an exit) leaves a conversation running in the background: remember it,
@@ -1615,11 +1622,13 @@ export function App({
             setAttached(true)
             done.then(
               (edited: any) => {
+                resumedAt.current = Date.now()
                 attachedRef.current = false
                 setAttached(false)
                 if (typeof edited === 'string') setInput(edited)
               },
               () => {
+                resumedAt.current = Date.now()
                 attachedRef.current = false
                 setAttached(false)
                 flash('could not open an editor')
@@ -1699,6 +1708,10 @@ export function App({
           const live = allMembers.find((s: any) => s.id === backgrounded.id && s.projectKey === backgrounded.projectKey)
           if (live) return attach(live)
         }
+        // Quitting is the one irreversible thing Esc does, so it is the one press that has to be
+        // sure the Escape was typed rather than left over from the handoff. Everything above still
+        // runs in the window: clearing the input or undoing a switch costs nothing if it was junk.
+        if (Date.now() - resumedAt.current < RESUME_QUIET_MS) return
         onAction({ type: 'quit' })
         return exit()
       }
@@ -1709,7 +1722,9 @@ export function App({
       // are kept now that `^j` makes the prompt multi-line; everything else non-printing is
       // dropped rather than embedded in a prompt that gets sent to a model.
       if (ch && !key.meta) {
-        const text = ch.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, '')
+        // The residue strip runs after the control strip, not before: what makes a focus report or
+        // a paste marker read as typed text is exactly that its ESC has just been removed here.
+        const text = stripEscapeResidue(ch.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, ''))
         if (!text) return
         // "Pasted text over 800 characters or more than two lines collapses to a placeholder."
         if (text.length > 800 || text.split('\n').length > 2) {

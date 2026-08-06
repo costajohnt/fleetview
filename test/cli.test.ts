@@ -895,7 +895,9 @@ test('editPrompt returns what the editor wrote, and hands the terminal back', as
   expect(cleared).toHaveBeenCalled() // drops the frame Ink thinks is still on screen
   // …and the screen is wiped through the gate, or Ink's next frame paints relative to wherever the
   // editor left the cursor and the editor's leftovers stay up around it (#5).
-  expect(gate.writes).toEqual(['\x1b[2J\x1b[3J\x1b[H'])
+  // The input-mode resets ride along for the same reason: a child that owned the terminal may have
+  // left focus reporting or bracketed paste on (#20).
+  expect(gate.writes).toEqual(['\x1b[?2004l\x1b[?1004l\x1b[?1l\x1b[>4;0m\x1b[<u', '\x1b[2J\x1b[3J\x1b[H'])
 })
 
 test('editPrompt passes the current prompt in, and strips the trailing newline editors add', async () => {
