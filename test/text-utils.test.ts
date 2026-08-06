@@ -60,13 +60,41 @@ describe('stripEscapeResidue', () => {
     expect(stripEscapeResidue('[200~[201~')).toBe('')
   })
 
+  // #58: the shapes that still leaked after the first pass. The paste terminator is the frequent
+  // one — it is never leading, so a loop that only slices from position 0 could never remove it.
+  test.each([
+    ['SS3 up arrow', 'OA', ''],
+    ['SS3 F1', 'OP', ''],
+    ['kitty CSI-u ctrl+a', '[97;5u', ''],
+    ['modifyOtherKeys ctrl+c', '[27;5;99~', ''],
+    ['DSR device status', '[0n', ''],
+    ['DSR with no parameter', '[n', ''],
+    ['bracketed paste, whole', '[200~hello[201~', 'hello'],
+    ['paste terminator alone in a later chunk', 'world[201~', 'world'],
+    ['two paste terminators in one chunk', 'a[201~b[201~', 'ab'],
+    ['a run of remnants', '[200~[201~', ''],
+    ['OSC colour answer', ']11;rgb:1c1c/1c1c/1c1c', ''],
+  ])('strips %s', (_label, input, expected) => {
+    expect(stripEscapeResidue(input)).toBe(expected)
+  })
+
   // The filter guards a prompt the user is typing, so a false positive costs more than a miss.
-  test('leaves text that merely starts with a bracket alone', () => {
-    expect(stripEscapeResidue('[ok]')).toBe('[ok]')
-    expect(stripEscapeResidue('[1] thing')).toBe('[1] thing')
-    expect(stripEscapeResidue('[Inbox] triage')).toBe('[Inbox] triage')
-    expect(stripEscapeResidue('fix the [200~ parser')).toBe('fix the [200~ parser')
-    expect(stripEscapeResidue('deploy the api')).toBe('deploy the api')
-    expect(stripEscapeResidue('')).toBe('')
+  // `]0;`/`]8;` prose used to be eaten whole: the OSC pattern ran to end-of-chunk unanchored (#58).
+  test.each([
+    ['[ok]'],
+    ['[ok] ship it'],
+    ['[1] thing'],
+    ['[1] retry the build'],
+    ['[Inbox] triage'],
+    ['[2fix that'], // the shape a generic `^\[[0-9;]+[a-z]` would have eaten
+    ['fix the [200~ parser'],
+    ['OK done'], // the SS3 shape is whole-remnant only
+    ['note: ]8; is an OSC hyperlink'],
+    [']8; and then some prose'],
+    [']0;title of the window'],
+    ['deploy the api'],
+    [''],
+  ])('leaves %j alone', (input) => {
+    expect(stripEscapeResidue(input)).toBe(input)
   })
 })
