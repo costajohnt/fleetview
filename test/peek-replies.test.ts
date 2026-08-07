@@ -211,3 +211,94 @@ test('a reply typed while a queued send is in flight is not clobbered by that se
   expect(firstSends).toBe(2) // 'first' was never re-queued, so it is never sent again
   expect(lastFrame()).toContain('saved — will send when it is reachable: second')
 })
+
+// --- #61: a typed reply must not follow the arrows to another session ---
+
+const DOWN = '[B'
+const RIGHT = '[C'
+
+// Two sessions in one project, so an arrow in peek has somewhere to go.
+function makeTwoSessionDeps() {
+  const deps = makeDeps()
+  deps.client.listSessions = vi.fn(() =>
+    Promise.resolve([
+      { id: 's1', title: 'fix tests', time: { updated: 2000 } },
+      { id: 's2', title: 'ship it later', time: { updated: 1000 } },
+    ]),
+  ) as any
+  deps.roster = {
+    groupBy: 'state',
+    sessions: [
+      { worktree: '/x/alpha', id: 's1', addedAt: 1 },
+      { worktree: '/x/alpha', id: 's2', addedAt: 2 },
+    ],
+    collapsed: [],
+  }
+  return deps
+}
+
+// The bug: the arrow retargeted `peekTarget` without touching `peekReply`, so the next return sent
+// the text written for s1 to s2 — a real prompt against the wrong agent, with no undo.
+test('an arrow with a draft in peek clears the draft instead of retargeting, so return cannot send it elsewhere', async () => {
+  const deps = makeTwoSessionDeps()
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction: vi.fn(), projectPollMs: 40 }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write(SPACE)
+  await waitFor(() => lastFrame().includes('reply · ! runs a shell command'))
+
+  stdin.write('ship it')
+  await waitFor(() => lastFrame().includes('> ship it'))
+  stdin.write(DOWN)
+  // The arrow is consumed by the draft: it clears, and the panel still shows the session the reply
+  // was written for rather than the next one.
+  await waitFor(() => !lastFrame().includes('> ship it'))
+  expect(lastFrame()).toContain('fix tests')
+  expect(lastFrame()).not.toContain('ship it later')
+  stdin.write('\r')
+  await tick()
+  await tick()
+
+  // Nothing was sent at all — and in particular nothing was sent to s2.
+  expect(deps.client.promptAsync.mock.calls).toEqual([])
+})
+
+// The other half of the fix: with the draft gone the arrow navigates exactly as before, and a
+// reply typed after it goes to the session now on screen.
+test('an arrow with an empty reply still retargets peek, and the reply that follows goes to that session', async () => {
+  const deps = makeTwoSessionDeps()
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction: vi.fn(), projectPollMs: 40 }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write(SPACE)
+  await waitFor(() => lastFrame().includes('reply · ! runs a shell command'))
+
+  stdin.write(DOWN)
+  await waitFor(() => lastFrame().includes('ship it later'))
+  stdin.write('still here')
+  await waitFor(() => lastFrame().includes('> still here'))
+  stdin.write('\r')
+  await waitFor(() => deps.client.promptAsync.mock.calls.length === 1)
+  expect(deps.client.promptAsync.mock.calls[0]).toEqual(['s2', 'still here', '/x/alpha'])
+})
+
+// The right arrow is documented as attach, but with a draft it used to attach and silently drop
+// the text — the same class of loss as sending it to the wrong session.
+test('the right arrow with a draft in peek clears the draft rather than attaching and discarding it', async () => {
+  const deps = makeTwoSessionDeps()
+  const onAction = vi.fn()
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction, projectPollMs: 40 }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write(SPACE)
+  await waitFor(() => lastFrame().includes('reply · ! runs a shell command'))
+
+  stdin.write('do not lose me')
+  await waitFor(() => lastFrame().includes('> do not lose me'))
+  stdin.write(RIGHT)
+  await waitFor(() => !lastFrame().includes('> do not lose me'))
+  await tick()
+  expect(onAction.mock.calls.filter(([a]: any) => a?.type === 'enter')).toEqual([])
+
+  // With the draft cleared, the right arrow attaches as documented.
+  stdin.write(RIGHT)
+  await waitFor(() => onAction.mock.calls.some(([a]: any) => a?.type === 'enter'))
+  expect(onAction.mock.calls.find(([a]: any) => a?.type === 'enter')![0].sessionId).toBe('s1')
+})
