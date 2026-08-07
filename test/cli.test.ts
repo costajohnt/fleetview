@@ -1117,6 +1117,24 @@ test('ls seeds pending questions too, and reports input needed', async () => {
 
 // Each seed GET fails independently: a project whose pending reads fail degrades to the previous
 // behaviour rather than sinking the listing.
+// #45: `ls` builds a fresh store per invocation, so a failed session — whose error only ever lived
+// in the process that saw the live frame — printed as `done` while the running TUI showed it red
+// with the APIError snippet. The persisted error is now read off the same seen.json watermark file
+// `hasRun` and the stop flag come from, so the two agree.
+test('#45: ls reports a previously-errored session as failed, not done', async () => {
+  const { printed, opts, ensureServer } = lsDeps({
+    sessionStatus: vi.fn(() => Promise.resolve({})),
+    listPermissions: vi.fn(() => Promise.resolve([])),
+  })
+  opts.loadSeenImpl = () => ({
+    '/x/alpha:s1': { updated: 2000, hasRun: true, stopped: false, error: 'APIError: No endpoints found that support tool use' },
+  })
+  await listSessions({ command: 'ls', json: true, all: true } as any, ensureServer, '/tmp/s.json', opts)
+  const rows = JSON.parse(printed.join('\n'))
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toMatchObject({ id: 's1', state: 'failed' })
+})
+
 test('a failing pending read leaves the rest of the listing intact', async () => {
   const { printed, opts, ensureServer } = lsDeps({
     listPermissions: vi.fn(() => Promise.reject(new Error('down'))),
