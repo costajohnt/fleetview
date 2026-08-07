@@ -176,7 +176,9 @@ test('abort signals the whole process group of a run fleetview started', async (
 // Started by another fleetview run or by the user: the lock names the native process, which is not a
 // group leader, so it is signalled directly.
 test('abort falls back to the pid in the lock file for a session it did not start', async () => {
-  const { backend, killImpl, stateDir } = harness()
+  // The lock's holder is a resume, and a resume's argv always carries `--resume=<id>` — which is
+  // now the only identity abort accepts for a pid it did not spawn itself.
+  const { backend, killImpl, stateDir } = harness({ psImpl: () => ({ startedAt: Date.now(), command: 'copilot --resume=foreign' }) })
   writeSession(stateDir, 'foreign', '/repo/alpha', { pid: 555 })
   expect(await backend.abort('foreign', '/repo/alpha')).toEqual({ aborted: true })
   expect(killImpl).toHaveBeenCalledWith(555, 'SIGTERM')
@@ -189,6 +191,15 @@ test('abort refuses a lock whose pid was recycled by another process', async () 
   const { backend, killImpl, stateDir } = harness({ psImpl: () => ({ startedAt: Date.now() + 3 * 60 * 60 * 1000, command: 'copilot' }) })
   writeSession(stateDir, 'crashed', '/repo/alpha', { pid: 555 })
   expect(await backend.abort('crashed', '/repo/alpha')).toEqual({ aborted: false })
+  expect(killImpl).not.toHaveBeenCalled()
+})
+
+// A right-class process born inside the old one-minute slack window used to be accepted with no id
+// in its argv — the recycled-pid window the guard now closes by refusing anything unverifiable.
+test('abort refuses a copilot born at the lock time when its argv does not name the session', async () => {
+  const { backend, killImpl, stateDir } = harness({ psImpl: () => ({ startedAt: Date.now(), command: 'copilot' }) })
+  writeSession(stateDir, 'foreign', '/repo/alpha', { pid: 555 })
+  expect(await backend.abort('foreign', '/repo/alpha')).toEqual({ aborted: false })
   expect(killImpl).not.toHaveBeenCalled()
 })
 
@@ -544,4 +555,26 @@ test('a multi-byte character split across two ticks decodes intact', async () =>
   await vi.waitFor(() => expect(onEvent.mock.calls.at(-1)?.[1]).toMatchObject({ lastOutput: 'done — verified' }))
   sub.stop()
   await sub.done
+})
+
+// The id becomes argv on attach, so a malformed one is refused with a throw rather than handed to
+// a spawn — parseWorkspace filters separators at discovery, but attach is the last line before the child.
+test('attach refuses a session id with flag syntax or control bytes', () => {
+  const { backend } = harness()
+  expect(() => backend.attach({ id: '--banner', directory: '/repo/alpha' })).toThrow(/malformed session id/)
+  expect(() => backend.attach({ id: `ok${String.fromCharCode(27)}[2Jbad`, directory: '/repo/alpha' })).toThrow(/malformed session id/)
+})
+
+// mode on open only applies when it creates, so a pre-existing capture kept its perms while
+// receiving prompts and repo paths — every open re-tightens the file and its dir now.
+test('a pre-existing capture is re-tightened to 0600 on the next run', async () => {
+  const { backend, logDir } = harness()
+  await backend.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
+  const log = join(logDir, 'session-1.jsonl')
+  const { chmodSync, statSync } = await import('node:fs')
+  chmodSync(log, 0o644)
+  chmodSync(logDir, 0o755)
+  await backend.prompt('session-1', 'again', '/repo/alpha')
+  expect(statSync(log).mode & 0o777).toBe(0o600)
+  expect(statSync(logDir).mode & 0o777).toBe(0o700)
 })

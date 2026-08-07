@@ -9,10 +9,11 @@ import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync,
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
-import { configDir, childEnv } from '../../registry.ts'
+import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
-import { PID_MATCH_SLACK_MS, psInfo, type PidInfo } from '../ps.ts'
+import { psInfo, type PidInfo } from '../ps.ts'
+import { assertSessionId } from '../session-id.ts'
 
 // Every flag is a "fleetview can't", stated rather than inherited. `fork` is the one worth naming:
 // `claude --resume --fork-session` does exactly what the flag means, but the Backend contract has no
@@ -81,9 +82,8 @@ export function createClaudeBackend({
   }
 
   // 0o700/0o600 like every other file fleetview writes: the log holds the prompt, the paths and
-  // whatever the session printed, so it must not be world-readable. mode on mkdir/open only applies
-  // when they create — same documented limitation as registry.ts.
-  const ensureRunDir = () => mkdirSync(runDir, { recursive: true, mode: 0o700 })
+  // whatever the session printed, so it must not be world-readable (openPrivateAppend re-tightens
+  // a pre-existing dir and file, and refuses a symlinked log).
 
   // Drop runs whose last activity is older than the retention window. Hung off dispatch rather than
   // given its own timer: there is no long-lived process here to schedule against, and the run dir
@@ -116,8 +116,7 @@ export function createClaudeBackend({
   // and no handle kept. `claude` is not a daemon — it runs, writes and exits — so nothing waits on
   // it, and the log is the only record that it happened.
   function run(argv: string[], id: string, directory: string) {
-    ensureRunDir()
-    const fd = openSync(logPath(id), 'a', 0o600)
+    const fd = openPrivateAppend(runDir, logPath(id))
     // env without the opencode server password, and without this process's Claude Code session
     // markers: a dispatched agent runs attacker-influenced prompts, and that credential would hand
     // it ungated shell on the server; the markers make the child think it is a nested run of
@@ -329,8 +328,10 @@ export function createClaudeBackend({
     },
 
     // cwd is the caller's job (cli.ts already passes `cwd: target.worktree` to the pty host), and it
-    // has to be the session's directory or --resume won't find the session at all.
-    attach: ({ id }: SessionRef) => ['claude', '--resume', id],
+    // has to be the session's directory or --resume won't find the session at all. The id is
+    // re-asserted here because it becomes argv: discovery already refuses malformed ids, but this is
+    // the last line before a spawn and a thrown name beats a spawned flag (session-id.ts).
+    attach: ({ id }: SessionRef) => ['claude', '--resume', assertSessionId(id)],
 
     // Negative signal, so the whole process group goes: `detached: true` made the child a group
     // leader, and killing the pid alone would leave its tool subprocesses (a running test suite, a
@@ -351,14 +352,13 @@ export function createClaudeBackend({
       const info = psImpl(meta.pid)
       if (info === null) return { aborted: false } // the run already finished
       if (info !== 'unavailable') {
-        // The time check is one-sided on purpose: a recycled pid can only have started *after* the
-        // meta was written, and a clock stepped backwards must not strand a live run unabortable.
-        const sameRun =
-          info.command.includes(id) ||
-          ((info.command.includes('claude') || info.command.startsWith('node')) &&
-            Number.isFinite(meta.startedAt) &&
-            info.startedAt - meta.startedAt <= PID_MATCH_SLACK_MS)
-        if (!sameRun) return { aborted: false }
+        // The argv carrying this session's id is the only accepted identity: every run is spawned
+        // with --session-id or --resume <id>, so a live run always shows it. The old fallback — any
+        // claude-or-node born within a minute of the meta — accepted a whole class of processes and
+        // reopened the recycled-pid group-kill through that window, so "no id in argv" is now
+        // refused rather than guessed at. A ps that answered but cannot show argv still lands here
+        // and refuses; one that cannot answer at all is 'unavailable' above and falls through.
+        if (!info.command.includes(id)) return { aborted: false }
       }
       try {
         killImpl(-meta.pid, 'SIGTERM')

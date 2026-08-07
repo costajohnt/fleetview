@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
-import { openSync, mkdirSync, closeSync } from 'node:fs'
+import { closeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ServerRef } from '../../types.ts'
+import { openPrivateAppend } from '../../registry.ts'
 import { authHeader } from './client.ts'
 
 const logDir = () => (process.env.FLEETVIEW_LOG_DIR ?? process.env.ROOST_LOG_DIR) ?? join(homedir(), '.local', 'state', 'fleetview', 'logs')
@@ -15,10 +16,9 @@ export function spawnServer(
   let ownFd = false
   if (logFd === undefined) {
     // 0o700/0o600 like the other state files: the log holds server output (prompts, paths, and any
-    // token the server prints), so it must not be world-readable. mode on mkdir only applies when it
-    // creates the dir, and on openSync only when it creates the file — both fine for a fresh log.
-    mkdirSync(logDir(), { recursive: true, mode: 0o700 })
-    logFd = openSync(join(logDir(), 'server.log'), 'a', 0o600)
+    // token the server prints), so it must not be world-readable. openPrivateAppend re-tightens a
+    // pre-existing dir and log on every open, and refuses a symlinked server.log.
+    logFd = openPrivateAppend(logDir(), join(logDir(), 'server.log'))
     ownFd = true
   }
   const child = spawnImpl('opencode', ['serve', '--port', String(server.port), '--hostname', server.host], {

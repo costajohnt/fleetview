@@ -12,9 +12,10 @@
 // Command-line `-c` is what outranks repository-local config, so that is what this uses.
 
 // Only the keys that actually fire on the read-only commands fleetview runs, each one confirmed
-// rather than assumed. `core.sshCommand` and `credential.helper` are deliberately absent: neither
-// fires on these commands, and overriding them would clobber the legitimate global settings a user
-// needs to reach their own remotes — the same reason `GIT_CONFIG_GLOBAL=/dev/null` is not used here.
+// rather than assumed. `core.sshCommand` and `credential.helper` are deliberately absent HERE:
+// neither fires on these commands, and overriding them would clobber the legitimate global settings
+// a user needs to reach their own remotes — the same reason `GIT_CONFIG_GLOBAL=/dev/null` is not
+// used. They ARE cleared on the gh path (GH_ONLY_OVERRIDES below), where that proof does not reach.
 // Aliases are absent too, because a repository-local alias cannot shadow a builtin, and `status`,
 // `rev-parse` and `rev-list` are all builtins.
 const OVERRIDES = [
@@ -30,12 +31,23 @@ const OVERRIDES = [
 // re-exports these to any git subprocess of its own, so a submodule is covered too.
 export const GIT_SAFE_ARGS = OVERRIDES.flatMap(([key, value]) => ['-c', `${key}=${value}`])
 
+// gh-path-only additions to the list above. The denylist's safety argument ("neither key fires on
+// status/rev-parse/rev-list") was proven for fleetview's own commands, but gh's internal git
+// subprocess set is unenumerable — so on that path both keys are cleared outright. gh authenticates
+// with its own token over its own HTTP client, so clearing them costs gh nothing; they stay out of
+// GIT_SAFE_ARGS because fleetview's own git commands must not clobber the global helpers a user
+// needs to reach their own remotes.
+const GH_ONLY_OVERRIDES = [
+  ['credential.helper', ''],
+  ['core.sshCommand', ''],
+]
+
 // For `gh`, which spawns git subprocesses whose argv fleetview never sees and cannot add `-c` to.
 // GIT_CONFIG_PARAMETERS is the environment form of `-c` — space-separated, each pair single-quoted —
 // and git applies it to every invocation that inherits the environment, however deep in the process
 // tree. Verified two processes down, and verified `gh pr list` still returns its normal JSON with it
 // set, so this hardens gh without changing what it answers.
-const GIT_CONFIG_PARAMETERS = OVERRIDES.map(([key, value]) => `'${key}=${value}'`).join(' ')
+const GIT_CONFIG_PARAMETERS = [...OVERRIDES, ...GH_ONLY_OVERRIDES].map(([key, value]) => `'${key}=${value}'`).join(' ')
 
 // Appended rather than assigned: a user who sets GIT_CONFIG_PARAMETERS themselves keeps whatever
 // else is in it, and git resolves duplicate keys last-one-wins, so ours still outrank theirs.
