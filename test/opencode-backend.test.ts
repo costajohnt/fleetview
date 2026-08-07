@@ -61,7 +61,7 @@ test('attach argv is the opencode attach command, pointed at the session and its
 // opencode is the parity baseline, so all five are true — the flags exist to describe the backends
 // that can't do these things, and this pins the baseline they're compared against.
 test('opencode declares the full capability set', () => {
-  expect(backend().capabilities).toEqual({ fork: true, rename: true, delete: true, questions: true })
+  expect(backend().capabilities).toEqual({ fork: true, rename: true, delete: true, questions: true, messages: true })
   expect(backend().name).toBe('opencode')
 })
 

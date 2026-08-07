@@ -148,6 +148,7 @@ export type BackendCapabilities = {
   rename: boolean
   delete: boolean // the CLI can remove a stored session; false means ^x^x can only stop, not delete
   questions: boolean // server-side questions/permissions fleetview can answer from the roster
+  messages: boolean // a transcript readable over the wire; false means peek says "attach to read it"
 }
 
 // Where a session lives. `directory` is the project/worktree every opencode call is scoped by

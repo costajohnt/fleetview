@@ -47,7 +47,7 @@ export function usePeek({
   serverReady: boolean
   attached: boolean
   backendFor?: (row: any) => any
-  capabilitiesOf?: (row: any) => { questions: boolean }
+  capabilitiesOf?: (row: any) => { questions: boolean; messages: boolean }
 }) {
   // "Undeliverable replies are saved and sent when the session's process starts again." Keyed by
   // `${projectKey}:${id}` so a saved reply follows its session and nothing else. Replies prefixed
@@ -79,11 +79,12 @@ export function usePeek({
     if (mode !== 'peek' || !peekTarget) return
     let cancelled = false
     setPeekMessages(null)
-    // `listMessages` is opencode's GET /session/:id/message. A process-backed session's transcript
-    // is a file on disk in the CLI's own format and there is no read API in the Backend contract, so
-    // asking the opencode server about an id it has never heard of would render a fetch failure for
-    // a session that is perfectly healthy. Say what is actually true instead.
-    if (backendFor(peekTarget)) {
+    // `listMessages` is opencode's GET /session/:id/message. A backend without `messages` keeps its
+    // transcript in a file on disk in the CLI's own format, so asking the opencode server about an
+    // id it has never heard of would render a fetch failure for a session that is perfectly
+    // healthy. Say what is actually true instead. A capability, not `backendFor(...) !== null`
+    // (M13): the contract exists so nothing identity-tests adapters.
+    if (!capabilitiesOf(peekTarget).messages) {
       setPeekMessages('unsupported')
       return
     }

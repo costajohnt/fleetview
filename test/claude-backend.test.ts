@@ -43,7 +43,7 @@ function transcript(home: string, directory: string, id: string, records: unknow
 test('claude declares what it cannot do rather than inheriting opencode’s answers', () => {
   // fork is the interesting false: `claude --resume --fork-session` works, but the Backend contract
   // has no fork() to reach it, so the flag describes fleetview, not the CLI.
-  expect(backend().b.capabilities).toEqual({ fork: false, rename: false, delete: false, questions: false })
+  expect(backend().b.capabilities).toEqual({ fork: false, rename: false, delete: false, questions: false, messages: false })
   expect(backend().b.name).toBe('claude')
 })
 

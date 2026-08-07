@@ -22,6 +22,7 @@ const CAPABILITIES = {
   rename: false, // no CLI surface for renaming a stored session (-n only names one at start)
   delete: false, // would mean unlinking a transcript out of ~/.claude/projects, which is Claude Code state
   questions: false, // a headless run can't be answered mid-flight; denials are reported after the fact
+  messages: false, // the transcript is a file in ~/.claude/projects, not a wire API peek can fetch
 } as const
 
 // How long between reads of a run log. There is no stream to block on, so this is the whole of the
