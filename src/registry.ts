@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, fchmodSync, openSync, renameSync, existsSync, constants } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type { ServerRef } from './types.ts'
@@ -62,6 +62,26 @@ export const childEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEn
   const rest = envWithoutServerPassword(env)
   for (const key of SESSION_MARKERS) delete rest[key]
   return rest
+}
+
+// Opens an append-mode log the way the state writers already write their files: private, and private
+// again on every open. `mode` on mkdir/open only applies when they create, so a pre-existing dir or
+// log kept whatever perms it had — these logs receive prompts and repository paths, so both are
+// re-tightened each time. O_NOFOLLOW makes a symlink planted at the log path an ELOOP instead of an
+// append-through into an arbitrary file (the same reason fix-pty-permissions opens before it chmods).
+// Shared by the claude/copilot run logs and the opencode server log; the chmods are best-effort for
+// the same reason saveServer's is — a dir we cannot chmod is no reason to lose the log write itself.
+export function openPrivateAppend(dir: string, file: string): number {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try {
+    chmodSync(dir, 0o700)
+  } catch {}
+  // O_NOFOLLOW is 0 on Windows (the constant does not exist there); those hosts keep plain append.
+  const fd = openSync(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600)
+  try {
+    fchmodSync(fd, 0o600)
+  } catch {}
+  return fd
 }
 
 // Local rather than shared with seen-store: a five-line best-effort rename is cheaper than either

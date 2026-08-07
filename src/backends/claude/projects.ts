@@ -3,6 +3,7 @@
 import { closeSync, openSync, readSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { SESSION_ID_RE } from '../session-id.ts'
 
 // Only the fields the roster reads. The transcript records carry a great deal more (usage, parent
 // uuids, attachments) and none of it survives this function.
@@ -169,6 +170,12 @@ export function listTranscripts(directory: string, { home = homedir() }: { home?
   scanCache.set(dir, fresh)
   for (const name of names) {
     if (!name.endsWith('.jsonl')) continue
+    // The filename minus .jsonl becomes the session id, and the id later reaches child argv
+    // (`claude --resume <id>`) and raw stdout in `ls`. Anything a dispatched session could have
+    // planted here — a `--flag.jsonl`, a name carrying an ESC byte — is not a session and is not
+    // read at all (see session-id.ts). Claude Code's own ids are UUIDs, so this skips nothing real.
+    const id = name.slice(0, -'.jsonl'.length)
+    if (!SESSION_ID_RE.test(id)) continue
     const file = join(dir, name)
     let updatedAt: number
     let size: number
@@ -189,7 +196,7 @@ export function listTranscripts(directory: string, { home = homedir() }: { home?
     // would put another repo's session in this repo's group.
     if (cwd !== directory) continue
     out.push({
-      id: name.slice(0, -'.jsonl'.length),
+      id,
       directory,
       // #46: '' when even the opening prompt is unreadable, and it must stay '' rather than becoming
       // the id — an empty title is what marks the session as unnamed all the way to the store, where

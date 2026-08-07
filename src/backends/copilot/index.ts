@@ -4,13 +4,14 @@
 // 1.0.75 — docs/specs/2026-07-25-copilot-backend-wire.md records what was run and what came back.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, openSync, readSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Backend } from '../../types.ts'
-import { configDir, childEnv } from '../../registry.ts'
+import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { foldEvents, initialRun, parseJsonlChunk, type CopilotStatus, type RunState } from './events.ts'
 import { listSessions, lockInfo, runningPid, sessionStateDir } from './sessions.ts'
-import { PID_MATCH_SLACK_MS, psInfo, type PidInfo } from '../ps.ts'
+import { psInfo, type PidInfo } from '../ps.ts'
+import { assertSessionId } from '../session-id.ts'
 
 // Measured, not aspirational — each `false` is a thing the CLI cannot do, not a thing left unbuilt.
 // `questions` is the load-bearing one: a headless run that lacks a permission fails the tool with
@@ -80,11 +81,9 @@ export function createCopilotBackend({
   const logPath = (id: string) => join(logDir, `${id}.jsonl`)
 
   // 0o700/0o600 like every other fleetview state file: the log holds the prompt, the repository
-  // paths, and whatever the session printed, so it must not be world-readable.
-  function openLog(id: string) {
-    mkdirSync(logDir, { recursive: true, mode: 0o700 })
-    return openSync(logPath(id), 'a', 0o600)
-  }
+  // paths, and whatever the session printed, so it must not be world-readable (openPrivateAppend
+  // re-tightens a pre-existing dir and file, and refuses a symlinked log).
+  const openLog = (id: string) => openPrivateAppend(logDir, logPath(id))
 
   // Drop captures whose last activity is older than the retention window. Hung off dispatch rather
   // than given a timer: the directory only grows when something is dispatched, so that is when it is
@@ -321,7 +320,9 @@ export function createCopilotBackend({
     // fails with ENOENT from chdir and never reaches the model). Needed because the pty host's cwd
     // is fleetview's, not the session's, and a resume in the wrong repository is a resume in the
     // wrong repository whether or not it errors.
-    attach: ({ id, directory }) => ['copilot', '-C', directory, `--resume=${id}`],
+    // The id is re-asserted because it becomes argv: parseWorkspace already refuses separators at
+    // discovery, but this is the last line before a spawn (session-id.ts).
+    attach: ({ id, directory }) => ['copilot', '-C', directory, `--resume=${assertSessionId(id)}`],
 
     async abort(id) {
       const own = started.get(id)
@@ -349,15 +350,13 @@ export function createCopilotBackend({
       const info = psImpl(lock.pid)
       if (info === null) return { aborted: false } // the lock outlived its process
       if (info !== 'unavailable') {
-        // An argv naming this session is the strongest identity and needs no clock — on Linux a
-        // forward wall-clock step shifts every procps lstart while the lock mtime stays put, and
-        // the time check alone would refuse a live run. Failing that: one-sided on purpose — a
-        // recycled pid can only have started *after* the lock was written (verified live: lock
-        // mtime lands ~3s after the holder's lstart), while a lock copilot re-touches later would
-        // push mtime past lstart, which must not strand a live run.
-        const looksLikeCopilot = info.command.includes('copilot') || info.command.startsWith('node')
-        const sameRun = info.command.includes(id) || (looksLikeCopilot && info.startedAt - lock.mtimeMs <= PID_MATCH_SLACK_MS)
-        if (!sameRun) return { aborted: false }
+        // The argv naming this session is the only accepted identity — it needs no clock, where the
+        // old fallback (any copilot-or-node whose lstart sat within a minute of the lock's mtime)
+        // accepted a whole class of processes and reopened the recycled-pid kill through that
+        // window. A resume always carries `--resume=<id>`, and the lock's own holder is that
+        // resume, so a live run always shows the id; "no id in argv" is refused rather than guessed
+        // at. Same rule, same reasons, as the claude backend's abort.
+        if (!info.command.includes(id)) return { aborted: false }
       }
       try {
         killImpl(lock.pid, 'SIGTERM')

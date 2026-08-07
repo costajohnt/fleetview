@@ -24,9 +24,11 @@ const backend = (over: any = {}) => {
   const runDir = over.runDir ?? join(tmp('runs'), 'claude-runs')
   const spawnImpl = over.spawnImpl ?? fakeSpawn()
   const home = over.home ?? tmp('home')
-  // A pid that always looks like the run it was recorded for, so abort tests exercise the signal
-  // path rather than the recycled-pid refusal (which has its own tests below).
-  const psImpl = over.psImpl ?? (() => ({ startedAt: Date.now(), command: 'claude' }))
+  // A pid that always looks like the run it was recorded for — argv included, since abort now
+  // requires the session id in the command line — so abort tests exercise the signal path rather
+  // than the refusal (which has its own tests below). The last spawn's argv is what a real ps
+  // would show for the pid the last run recorded.
+  const psImpl = over.psImpl ?? (() => ({ startedAt: Date.now(), command: `claude ${(spawnImpl.calls.at(-1)?.argv ?? []).join(' ')}` }))
   return { runDir, spawnImpl, home, b: createClaudeBackend({ runDir, spawnImpl, home, psImpl, ...over }) }
 }
 
@@ -210,6 +212,17 @@ test('aborting a run that already finished is a no-op, not a failure', async () 
   const { b } = backend({ killImpl })
   const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
   expect(await b.abort(ref.id, '/repo/alpha')).toEqual({ aborted: false })
+})
+
+// The old fallback accepted any claude-or-node born within a minute of the meta, which reopened the
+// recycled-pid group-kill through that window — a right-class process with no session id in its
+// argv is now unverifiable and refused, whatever the clock says.
+test('abort refuses a claude born at the recorded moment when its argv does not name the session', async () => {
+  const killImpl = vi.fn()
+  const { b } = backend({ killImpl, now: () => 1_700_000_000_000, psImpl: () => ({ startedAt: 1_700_000_000_000, command: 'claude' }) })
+  const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
+  expect(await b.abort(ref.id, '/repo/alpha')).toEqual({ aborted: false })
+  expect(killImpl).not.toHaveBeenCalled()
 })
 
 // The meta outlives the run by up to thirty days, so its pid can have been handed to an unrelated
@@ -482,4 +495,26 @@ test('events survives an absent run directory and picks up a run that appears la
     sub.stop()
     await sub.done
   }
+})
+
+// The id becomes argv on attach, so a malformed one is refused with a throw rather than handed to
+// a spawn — discovery filters these quietly, but attach is the last line before the child.
+test('attach refuses a session id with flag syntax or control bytes', () => {
+  const { b } = backend()
+  expect(() => b.attach({ id: '--fork-session', directory: '/repo/alpha' })).toThrow(/malformed session id/)
+  expect(() => b.attach({ id: `ok${String.fromCharCode(27)}[2Jbad`, directory: '/repo/alpha' })).toThrow(/malformed session id/)
+})
+
+// mode on open only applies when it creates, so a pre-existing (or pre-loosened) run log kept its
+// perms while receiving prompts and repo paths — every open re-tightens the file and its dir now.
+test('a pre-existing run log is re-tightened to 0600 on the next run', async () => {
+  const { b, runDir } = backend()
+  const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
+  const log = join(runDir, `${ref.id}.jsonl`)
+  const { chmodSync, statSync } = await import('node:fs')
+  chmodSync(log, 0o644)
+  chmodSync(runDir, 0o755)
+  await b.prompt(ref.id, 'again', '/repo/alpha')
+  expect(statSync(log).mode & 0o777).toBe(0o600)
+  expect(statSync(runDir).mode & 0o777).toBe(0o700)
 })
