@@ -12,12 +12,18 @@ const baseDir = () => {
 export const defaultSeenFile = () =>
   join((process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? baseDir(), 'seen.json')
 
-// { "<repoId>:<sessionId>": { updated: <ms>, hasRun: <bool>, stopped?: <bool> } }
+// { "<repoId>:<sessionId>": { updated: <ms>, hasRun: <bool>, stopped?: <bool>, error?: <string|true> } }
 // #53: `stopped` is written by the store's snapshot() and read back by setSessions — the server
 // reports an aborted session as plain idle, so the flag is fleetview's own memory of the abort. It
 // was on disk but missing from this declaration, which made reading it off the typed loadSeen
 // return a type error for a field that really is there.
-export type SeenEntry = { updated: number; hasRun: boolean; stopped?: boolean }
+// #45: `error` is the same kind of fleetview-side memory as `stopped`, for the same reason — the
+// server's session list and /session/status carry no last error, so `lastError` only ever existed
+// in the process that saw the live `session.error` frame. Persisting it is what makes `ls` (which
+// builds a fresh store per invocation) and a restarted TUI agree with the live view. Stored in the
+// compact `errorLabel` form the #24 row snippet renders, or `true` for an error frame that carried
+// no text — the same string-or-sentinel shape `lastError` itself holds, so it restores as-is.
+export type SeenEntry = { updated: number; hasRun: boolean; stopped?: boolean; error?: string | true }
 export type SeenMap = Record<string, SeenEntry>
 
 export function loadSeen(file: string): SeenMap {

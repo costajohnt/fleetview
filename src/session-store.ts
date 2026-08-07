@@ -468,6 +468,15 @@ export function createStore() {
           (prev?.errorAtServerUpdated as number) > 0 &&
           incoming !== undefined &&
           incoming > prev!.errorAtServerUpdated
+        // #45: and the same retirement is what makes restoring a persisted error safe. `lastError`
+        // was written only by the live `session.error` frame, so every seeded path — a restart, and
+        // `ls`, which builds a fresh store per invocation — rendered a failed session as plain
+        // `done`. The persisted label is adopted only for a record this store has never seen
+        // (`prev` is the authority once it exists, exactly as `stopped` below), and only while the
+        // server's clock agrees nothing has happened since: `updatedAt > persisted.updated` is the
+        // one signal `hasRun` and #53's `stopped` already retire on, and a session that ran again
+        // and succeeded trips it, so the restored error can never outlive the failure it describes.
+        const restoredError = prev || !persisted?.error || updatedAt > persisted.updated ? undefined : persisted.error
         sessions.set(k, {
           projectKey,
           id: s.id,
@@ -483,7 +492,7 @@ export function createStore() {
           lastQuestionText: prev?.lastQuestionText ?? '',
           lastRole: prev?.lastRole,
           currentAssistantMessageID: prev?.currentAssistantMessageID,
-          lastError: staleError ? null : prev?.lastError ?? null,
+          lastError: staleError ? null : prev ? prev.lastError : restoredError ?? null,
           updatedAt,
           // Carried, not dropped: seedStatuses' two guards compare `statusSeq >= mark`, and an
           // undefined stamp fails both open. Losing it here let a stale seed mark a genuinely
@@ -496,7 +505,11 @@ export function createStore() {
           pendingClearedSeq: prev?.pendingClearedSeq ?? 0,
           runStartedAt: prev?.runStartedAt ?? 0,
           runEndedAt: prev?.runEndedAt ?? 0,
-          errorAtServerUpdated: anchorUnknown && incoming !== undefined ? incoming : prev?.errorAtServerUpdated ?? 0,
+          // A restored error is anchored at the listing that restored it, so the live retirement
+          // above arms immediately: the next listing carrying a newer `time.updated` clears it
+          // without waiting for a fresh error frame to set the anchor.
+          errorAtServerUpdated:
+            anchorUnknown && incoming !== undefined ? incoming : prev?.errorAtServerUpdated ?? (restoredError ? updatedAt : 0),
           serverUpdatedAt: s.time?.updated ?? prev?.serverUpdatedAt ?? 0,
           createdAt: s.time?.created ?? prev?.createdAt ?? 0,
           // Only a retiring listing confers this. A refresh listing (dispatch, /fork) must not, or it
@@ -778,7 +791,15 @@ export function createStore() {
       // "completed" — a result the user never got.
       for (const [k, r] of sessions) {
         if (childIds.has(r.id)) continue // never persist a subagent into seen.json
-        out[k] = { updated: r.updatedAt, hasRun: r.hasRun, stopped: r.stopped }
+        // #45: `error` rides along for the same reason, and in the compact label form — the full
+        // frame is an unbounded union of server payloads, while the label is all any renderer reads
+        // off it. `true` keeps a textless frame's *status* when there is no label to keep.
+        out[k] = {
+          updated: r.updatedAt,
+          hasRun: r.hasRun,
+          stopped: r.stopped,
+          error: r.lastError ? errorLabel(r.lastError) ?? true : undefined,
+        }
       }
       return out
     },
