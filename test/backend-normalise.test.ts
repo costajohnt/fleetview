@@ -113,8 +113,35 @@ test('claude transcripts normalise into rows the store can list', () => {
   // No parseable timestamp anywhere in the transcript: `created` is 0 and ageLabel's
   // `createdAt || updatedAt` falls back to the mtime, which is what this row rendered before.
   expect(normaliseSessions('claude', [{ id: 'c3', title: 'no timestamp', createdAt: 0, updatedAt: 1234 }])[0].time).toEqual({ created: 0, updated: 1234 })
-  // A transcript too young to have a title is identified by its id rather than rendering blank.
-  expect(normaliseSessions('claude', [{ id: 'c2', title: '', updatedAt: 0 }])[0].title).toBe('c2')
+  // #46: an untitled transcript reports an empty title, NOT its id. The id used to be the fallback
+  // here, and a UUID is not a placeholder to the store, so it overwrote the dispatch prompt below.
+  expect(normaliseSessions('claude', [{ id: 'c2', title: '', updatedAt: 0 }])[0].title).toBe('')
+})
+
+// #46: the row read as `f1e5ddfa-e8e3-45ff-…` while peek on the same row showed the prompt — peek
+// re-reads the record, where the provisional was still sitting behind the id the relist had written.
+test('#46 a dispatched claude session keeps its prompt as the title until claude names the session', () => {
+  const store = createStore()
+  const row = { id: 'f1e5ddfa-e8e3-45ff', title: '', createdAt: 1000, updatedAt: 1234 }
+  store.setSessions('/x/alpha', normaliseSessions('claude', [row]) as any, undefined)
+  store.setProvisionalTitle('/x/alpha', row.id, 'fix the flaky roster test')
+  // The relist is the moment the bug appeared: every 500ms poll re-reports the same untitled session.
+  store.setSessions('/x/alpha', normaliseSessions('claude', [row]) as any, undefined)
+  expect(store.get('/x/alpha', row.id)?.title).toBe('fix the flaky roster test')
+  // And a real title, once claude writes one, still outranks what was dispatched.
+  store.setSessions('/x/alpha', normaliseSessions('claude', [{ ...row, title: 'Fix the flaky roster test' }]) as any, undefined)
+  expect(store.get('/x/alpha', row.id)?.title).toBe('Fix the flaky roster test')
+})
+
+// The other half of #46: nothing dispatched this session, so there is no provisional to fall back on
+// and the row must still say something. projects.ts supplies the transcript's opening prompt as the
+// title (claude-projects.test.ts covers the read); an id-titled row is only what is left when the
+// listing itself has no idea, which is what `?? s.id` in setSessions is for.
+test('#46 a discovered claude session the roster never dispatched still renders a title', () => {
+  const store = createStore()
+  const discovered = { id: 'bbbb-2222', title: 'research the mesh setup', createdAt: 1000, updatedAt: 1234 }
+  store.setSessions('/x/alpha', normaliseSessions('claude', [discovered]) as any, undefined)
+  expect(store.get('/x/alpha', discovered.id)?.title).toBe('research the mesh setup')
 })
 
 test('copilot session events fold into running, done and failed', () => {
