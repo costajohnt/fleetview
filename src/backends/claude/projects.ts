@@ -30,7 +30,33 @@ export const encodeProjectDir = (directory: string) => directory.replace(/[^a-zA
 // reach several MB, so each line is substring-tested before it is parsed — the interesting records
 // are a handful out of thousands, and JSON.parse on every line of every session was the difference
 // between a listing that is free and one that is felt.
-type Scanned = { cwd?: string; aiTitle?: string; lastPrompt?: string; createdAt?: number }
+type Scanned = { cwd?: string; aiTitle?: string; lastPrompt?: string; firstPrompt?: string; createdAt?: number }
+
+// #46: the last-resort name for a session claude has not titled. A transcript only grows an
+// `ai-title` once claude names it and a `last-prompt` once one is recorded — 78 of the 857
+// transcripts on this machine (9%) have neither, and every one of them rendered as its bare UUID.
+// The text that started the session is right there in the first user record, and it is what peek
+// already shows for the row, so the roster and peek stop disagreeing.
+// The FIRST user text, not the last: this is the session's subject the way opencode names a session
+// from its opening prompt, where `last-prompt` is whatever was typed most recently.
+// Capped because a prompt is not a title — a pasted stack trace is a legitimate first prompt, and
+// this string reaches `ls` on raw stdout where nothing else truncates it.
+const FIRST_PROMPT_CAP = 200
+function promptText(rec: any): string {
+  // isMeta records are claude's own boilerplate (the `<local-command-caveat>` preamble), not
+  // something a person typed — 4 of those 78 open with one.
+  if (rec?.isMeta) return ''
+  const content = rec?.message?.content
+  const text =
+    typeof content === 'string'
+      ? content
+      : // A user record can also carry tool results, which have no text block and leave this empty
+        // so the scan keeps looking at the next user record rather than titling a row with a tool id.
+        Array.isArray(content)
+        ? content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join(' ')
+        : ''
+  return text.replace(/\s+/g, ' ').trim().slice(0, FIRST_PROMPT_CAP)
+}
 
 // What the last scan of a transcript found, plus where the read got to. Keyed by project folder and
 // then file name.
@@ -65,7 +91,11 @@ function fold(entry: CacheEntry, text: string) {
     const wantsCreated = entry.createdAt === undefined && line.includes('"timestamp"')
     const wantsTitle = line.includes('"ai-title"')
     const wantsPrompt = line.includes('"last-prompt"')
-    if (!wantsCwd && !wantsCreated && !wantsTitle && !wantsPrompt) continue
+    // Only until one is found: the substring test matches every user record in the file, so the
+    // parse this opens is paid once per transcript (claude's first record is a user record), not
+    // once per line — the whole point of the tests above.
+    const wantsFirstPrompt = entry.firstPrompt === undefined && line.includes('"user"')
+    if (!wantsCwd && !wantsCreated && !wantsTitle && !wantsPrompt && !wantsFirstPrompt) continue
     let rec: any
     try {
       rec = JSON.parse(line)
@@ -82,6 +112,10 @@ function fold(entry: CacheEntry, text: string) {
     }
     if (rec?.type === 'ai-title' && typeof rec.aiTitle === 'string') entry.aiTitle = rec.aiTitle
     if (rec?.type === 'last-prompt' && typeof rec.lastPrompt === 'string') entry.lastPrompt = rec.lastPrompt
+    if (entry.firstPrompt === undefined && rec?.type === 'user') {
+      const first = promptText(rec)
+      if (first) entry.firstPrompt = first // empty (a tool-result record) leaves it unset, so the next user record still counts
+    }
   }
 }
 
@@ -149,7 +183,7 @@ export function listTranscripts(directory: string, { home = homedir() }: { home?
     }
     const entry = scan(file, prev?.get(name), size, ino)
     fresh.set(name, entry)
-    const { cwd, aiTitle, lastPrompt, createdAt } = entry
+    const { cwd, aiTitle, lastPrompt, firstPrompt, createdAt } = entry
     // The folder name is a lossy hash of the path, so a transcript whose own cwd disagrees belongs
     // to a different directory that happens to encode the same way, and showing it under this one
     // would put another repo's session in this repo's group.
@@ -157,7 +191,10 @@ export function listTranscripts(directory: string, { home = homedir() }: { home?
     out.push({
       id: name.slice(0, -'.jsonl'.length),
       directory,
-      title: aiTitle ?? lastPrompt ?? '',
+      // #46: '' when even the opening prompt is unreadable, and it must stay '' rather than becoming
+      // the id — an empty title is what marks the session as unnamed all the way to the store, where
+      // a dispatch's provisional prompt is kept only while the reported title is a placeholder.
+      title: aiTitle ?? lastPrompt ?? firstPrompt ?? '',
       updatedAt,
       createdAt: createdAt ?? 0,
     })

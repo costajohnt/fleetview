@@ -81,7 +81,8 @@ test('a record appended across two polls is folded once the line completes', () 
   const file = transcript(h, '/repo/alpha', 'aaaa-1111', [record('/repo/alpha', 'aaaa-1111')])
   const line = JSON.stringify({ type: 'ai-title', aiTitle: 'Split across polls', sessionId: 'aaaa-1111' }) + '\n'
   appendFileSync(file, line.slice(0, 20))
-  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('') // partial line held, not parsed
+  // Still the opening prompt (#46's fallback), not 'Split across polls': the partial line is held, not parsed.
+  expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('run the tests')
   appendFileSync(file, line.slice(20))
   expect(listTranscripts('/repo/alpha', { home: h })[0].title).toBe('Split across polls')
 })
@@ -146,6 +147,39 @@ test('the last ai-title wins, and last-prompt is the fallback before there is on
   transcript(h, '/repo/alpha', 'bbbb-2222', [record('/repo/alpha', 'bbbb-2222'), { type: 'last-prompt', lastPrompt: 'fix the flake', sessionId: 'bbbb-2222' }])
   const byId = Object.fromEntries(listTranscripts('/repo/alpha', { home: h }).map((s) => [s.id, s.title]))
   expect(byId).toEqual({ 'aaaa-1111': 'Better title', 'bbbb-2222': 'fix the flake' })
+})
+
+// #46: claude names a session late (or never — 78 of the 857 transcripts on this machine have
+// neither record), and the row used to render the bare session UUID for the whole of that window.
+test('#46 a session with neither ai-title nor last-prompt is titled with its opening prompt', () => {
+  const h = home()
+  transcript(h, '/repo/alpha', 'aaaa-1111', [record('/repo/alpha', 'aaaa-1111')])
+  // A caveat preamble is claude's own words, not the user's, so the prompt after it is the title.
+  transcript(h, '/repo/alpha', 'bbbb-2222', [
+    { ...record('/repo/alpha', 'bbbb-2222'), isMeta: true, message: { role: 'user', content: '<local-command-caveat>Caveat: …</local-command-caveat>' } },
+    { ...record('/repo/alpha', 'bbbb-2222'), message: { role: 'user', content: 'research the mesh setup' } },
+  ])
+  // Content blocks rather than a plain string, and a tool-result record carrying no text at all.
+  transcript(h, '/repo/alpha', 'cccc-3333', [
+    { ...record('/repo/alpha', 'cccc-3333'), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1' }] } },
+    { ...record('/repo/alpha', 'cccc-3333'), message: { role: 'user', content: [{ type: 'text', text: '  ship\n  the release  ' }] } },
+  ])
+  const byId = Object.fromEntries(listTranscripts('/repo/alpha', { home: h }).map((s) => [s.id, s.title]))
+  expect(byId).toEqual({ 'aaaa-1111': 'run the tests', 'bbbb-2222': 'research the mesh setup', 'cccc-3333': 'ship the release' })
+})
+
+// A prompt is not a title: pasted context is a normal way to open a session, and this string reaches
+// `ls` on raw stdout where nothing truncates it.
+test('#46 the opening-prompt fallback is capped, and a real title still wins over it', () => {
+  const h = home()
+  transcript(h, '/repo/alpha', 'aaaa-1111', [{ ...record('/repo/alpha', 'aaaa-1111'), message: { role: 'user', content: 'x'.repeat(5000) } }])
+  transcript(h, '/repo/alpha', 'bbbb-2222', [
+    { ...record('/repo/alpha', 'bbbb-2222'), message: { role: 'user', content: 'the opening prompt' } },
+    { type: 'ai-title', aiTitle: 'What claude called it', sessionId: 'bbbb-2222' },
+  ])
+  const byId = Object.fromEntries(listTranscripts('/repo/alpha', { home: h }).map((s) => [s.id, s.title]))
+  expect(byId['aaaa-1111']).toBe('x'.repeat(200))
+  expect(byId['bbbb-2222']).toBe('What claude called it')
 })
 
 // The folder name is a lossy hash of the path: /repo/a.b and /repo/a-b encode identically, so the
