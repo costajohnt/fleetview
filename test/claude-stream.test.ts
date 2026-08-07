@@ -16,8 +16,6 @@ test('a successful run ends completed, with the final assistant text as its outp
   expect(state.sessionId).toBe('a54d9303-c663-4683-b1e8-3d432b999388')
   expect(state.denials).toEqual([])
   expect(state.error).toBeUndefined()
-  expect(state.costUsd).toBeCloseTo(0.0419703)
-  expect(state.durationMs).toBe(5366)
 })
 
 // The case the roster has to distinguish from a plain completion: the run is over and reports

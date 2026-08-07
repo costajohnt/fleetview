@@ -280,8 +280,9 @@ export function createCopilotBackend({
 
           const status = statusOf(tail.run, session.running)
           // Emitting only on change keeps a quiet roster quiet: without this every session in the
-          // directory would produce an event every tick forever.
-          const signature = `${status} ${tail.run.lastOutput} ${tail.run.deniedTools}`
+          // directory would produce an event every tick forever. NUL separator written as
+          // \u0000 escapes, not raw bytes: raw NULs make grep classify this whole file as binary.
+          const signature = `${status}\u0000${tail.run.lastOutput}\u0000${tail.run.deniedTools}`
           if (signature === tail.emitted) continue
           tail.emitted = signature
           // Copilot-shaped, not opencode-shaped. The contract types events as `unknown` precisely so
