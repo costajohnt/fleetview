@@ -1813,3 +1813,84 @@ test('#55: seedQuestions stamps the same interval, preserving the server\'s olde
   )
   expect(store.pendingQuestionsFor('repoA', 's1').map((q: any) => q.id)).toEqual(['q1', 'qA', 'qB', 'q2'])
 })
+
+// --- #45: a failed session stays failed across a restart, and across `ls` ---
+
+// `lastError` was written only by the live `session.error` frame, so it existed for exactly as long
+// as the process that saw it. The server's session list carries no last error, so a fresh store —
+// a restarted fleetview, or `ls`, which builds one per invocation — rendered a failed session as
+// plain `done`: the red bullet, the failed count and the #24 snippet all silently disappeared.
+test('#45: an error survives a restart, snippet and all', () => {
+  const first: any = createStore()
+  first.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2000 } }])
+  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  first.apply('repoA', {
+    type: 'session.error',
+    properties: { sessionID: 's1', error: { name: 'APIError', data: { message: 'No endpoints found that support tool use' } } },
+  })
+  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(first.get('repoA', 's1').status).toBe('error')
+
+  const persisted = first.snapshot()
+  expect(persisted['repoA:s1'].error).toBe('APIError: No endpoints found that support tool use')
+
+  const restarted: any = createStore()
+  restarted.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2000 } }], persisted)
+  const row = restarted.get('repoA', 's1')
+  expect(row.status).toBe('error')
+  expect(row.snippet).toBe('APIError: No endpoints found that support tool use')
+})
+
+// The retirement, and the reason persisting it is safe at all: the restore is gated on the same
+// server-clock signal `hasRun` and #53's `stopped` retire on. A session that ran again after the
+// failure comes back completed, not red forever.
+test('#45: a persisted error is retired by activity recorded after it', () => {
+  const first: any = createStore()
+  first.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2000 } }])
+  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  first.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'APIError' } } })
+  const persisted = first.snapshot()
+
+  const restarted: any = createStore()
+  restarted.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: persisted['repoA:s1'].updated + 1 } }], persisted)
+  expect(restarted.get('repoA', 's1').status).toBe('done')
+})
+
+// And the restore arms the live retirement immediately: the anchor is the listing that restored the
+// error, so the next listing carrying a newer `time.updated` clears it without waiting for a fresh
+// error frame to set one.
+test('#45: a restored error is retired by a later listing in the same process', () => {
+  const store: any = createStore()
+  const persisted = { 'repoA:s1': { updated: 2000, hasRun: true, stopped: false, error: 'APIError' as const } }
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2000 } }], persisted)
+  expect(store.get('repoA', 's1').status).toBe('error')
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 3000 } }], persisted)
+  expect(store.get('repoA', 's1').status).toBe('done')
+})
+
+// A textless frame (the `true` sentinel) has no label to keep, but it still failed — the status is
+// the part that must survive.
+test('#45: a textless error persists as the sentinel and still renders error', () => {
+  const first: any = createStore()
+  first.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2000 } }])
+  first.apply('repoA', { type: 'session.error', properties: { sessionID: 's1' } })
+  const persisted = first.snapshot()
+  expect(persisted['repoA:s1'].error).toBe(true)
+
+  const restarted: any = createStore()
+  restarted.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2000 } }], persisted)
+  expect(restarted.get('repoA', 's1').status).toBe('error')
+})
+
+// An abort is not a failure (#21), so it must not be persisted as one — it already has `stopped`.
+test('#45: an aborted session persists no error', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', {
+    type: 'session.error',
+    properties: { sessionID: 's1', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } },
+  })
+  expect(store.snapshot()['repoA:s1'].error).toBe(undefined)
+  expect(store.snapshot()['repoA:s1'].stopped).toBe(true)
+})
