@@ -60,6 +60,9 @@ function makeDeps() {
     serverReady: true,
     roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 's1', addedAt: 1 }], collapsed: [] },
     persistRoster: vi.fn(),
+    // Fast enough that the negative tests can wait for one MORE poll round (the re-fire window)
+    // without the default 30s interval making that wait a timeout.
+    projectPollMs: 50,
   }
 }
 
@@ -80,6 +83,10 @@ test('filtering the blocked session out of view and back does not re-fire agent_
   await waitFor(() => !lastFrame()!.includes('fix tests'))
   stdin.write('\x1B') // esc clears the filter and the row comes back
   await waitFor(() => lastFrame()!.includes('fix tests'))
+  // The re-fire mechanism runs on the poll cycle, so the observation window has to contain one:
+  // wait until listPermissions has answered at least once more, then a spurious event had its chance.
+  const polls = deps.client.listPermissions.mock.calls.length
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > polls)
   await tick()
 
   expect(events().length).toBe(before)
@@ -111,6 +118,10 @@ test('browsing sessions that are not roster members does not fire the hook for t
   await waitFor(() => lastFrame()!.includes('someone elses session'))
   stdin.write('\x02') // and back
   await waitFor(() => lastFrame()!.includes('needs input'))
+  // Same widened window as above: a spurious fire off the next poll's snapshot must get its chance
+  // before the count is declared frozen.
+  const polls = deps.client.listPermissions.mock.calls.length
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > polls)
   await tick()
 
   expect(events().length).toBe(before)

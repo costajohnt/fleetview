@@ -35,7 +35,16 @@ class FakeStdin extends EventEmitter {
 // CSI codes and OSC strings both go — the tab title is an OSC carrying readable text, and leaving
 // it in would make it look like a drawn frame.
 const stripAnsi = (s: string) => s.replace(/\x1b\][^\x07]*\x07/g, '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
-const tick = () => new Promise((r) => setTimeout(r, 60))
+// Bounded polling, not a fixed sleep: on a loaded CI runner Ink's frame can take longer than any
+// sleep this test would want to hardcode, and a too-short one reads as "resize handling broke".
+const waitFor = async (fn: () => boolean, timeoutMs = 3000) => {
+  const start = Date.now()
+  for (;;) {
+    if (fn()) return
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
 
 test('gatedStdout forwards the wrapped stream resize event to its own listeners', () => {
   const target = new FakeTerminal()
@@ -107,15 +116,14 @@ test('App re-lays-out for the new width when the terminal resizes', async () => 
     return 0
   }
   try {
-    await tick()
-    expect(widest()).toBeGreaterThan(60)
+    await waitFor(() => widest() > 60)
 
     target.columns = 50
     target.rows = 12
     target.emit('resize')
-    await tick()
-    // Without the resize subscription this frame is still drawn for 100 columns.
-    expect(widest()).toBeLessThanOrEqual(50)
+    // Without the resize subscription every later frame is still drawn for 100 columns and this
+    // times out; with it, the newest text frame shrinks to the new width.
+    await waitFor(() => widest() <= 50)
   } finally {
     instance.unmount()
   }

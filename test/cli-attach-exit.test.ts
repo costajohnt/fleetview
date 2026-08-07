@@ -64,6 +64,11 @@ test('resuming from an attachment reopens the gate, drops Ink’s frame memory, 
 // password, and none of this process's Claude Code session markers, which silently turn transcript
 // saving off in the child (the very transcript fleetview's claude backend reads).
 test('a process-backed attach gets the scoped child env, and opencode keeps the password', async () => {
+  // Save-and-restore, not delete: on a machine where any of these is genuinely set, deleting them
+  // in cleanup would leak into every later test in this worker.
+  const saved = ['OPENCODE_SERVER_PASSWORD', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CONFIG_DIR'].map(
+    (key) => [key, process.env[key]] as const,
+  )
   process.env.OPENCODE_SERVER_PASSWORD = 'secret'
   process.env.CLAUDE_CODE_CHILD_SESSION = '1'
   process.env.CLAUDE_CONFIG_DIR = '/home/u/.config/claude'
@@ -82,8 +87,9 @@ test('a process-backed attach gets the scoped child env, and opencode keeps the 
     await attachLoop({ backend: 'opencode', sessionId: 's1', worktree: '/repo/alpha' }, out(), null, backends)
     expect(attachPty.mock.calls.at(-1)![0].env.OPENCODE_SERVER_PASSWORD).toBe('secret')
   } finally {
-    delete process.env.OPENCODE_SERVER_PASSWORD
-    delete process.env.CLAUDE_CODE_CHILD_SESSION
-    delete process.env.CLAUDE_CONFIG_DIR
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 })
