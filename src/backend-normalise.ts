@@ -19,10 +19,6 @@ import type { OpencodeEvent } from './types.ts'
 // inventing a fourth vocabulary the store silently drops.
 export type StoreEvent = OpencodeEvent
 
-// A session row in the shape session-store.setSessions reads: id, title, and opencode's `time`
-// envelope. Nothing else in a listing survives normalisation, because nothing else is read.
-export type StoreSessionRow = { id: string; title?: string; time?: { created?: number; updated?: number } }
-
 // Rows for `setSessions`. opencode's own listings pass through untouched — this must never become a
 // place opencode's payloads get rewritten, because that is the one path where behaviour is fixed.
 export function normaliseSessions(backend: string, rows: any[] | null | undefined): any[] {

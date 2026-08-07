@@ -3,6 +3,7 @@ import { useInput } from 'ink'
 import { graphemes } from './text-utils.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
 import { questionOptions, suggestedReply } from './ui/peek.ts'
+import { OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 
 // Peek's controller: the state, the message fetch, the reply/answer paths and the panel's own key
 // handling, lifted out of App so the roster closure stops carrying them. Everything App owns and
@@ -31,7 +32,7 @@ export function usePeek({
   // reads as "do exactly what you did before"; `capabilitiesOf` is the only thing allowed to decide
   // whether an answer key does anything.
   backendFor = () => null,
-  capabilitiesOf = () => ({ questions: true }),
+  capabilitiesOf = () => OPENCODE_CAPABILITIES,
 }: {
   client: any
   store: any
