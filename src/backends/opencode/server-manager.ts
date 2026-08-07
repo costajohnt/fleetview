@@ -56,13 +56,21 @@ export async function isServerHealthy(server: ServerRef, fetchImpl = globalThis.
 // "nothing there" even though both read as unhealthy — spawning onto it can never bind, and the
 // occupant may be fleetview's own server under a password only server.json remembers.
 export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetch): Promise<'healthy' | 'unauthorized' | 'unreachable'> {
+  const url = `http://${server.host}:${server.port}/project`
   try {
-    const auth = authHeader()
-    const res = await fetchImpl(`http://${server.host}:${server.port}/project`, {
-      headers: auth ? { authorization: auth } : undefined,
-      signal: AbortSignal.timeout(2000),
-    })
-    if (res.status === 401) return 'unauthorized'
+    // The first request carries NO credential, on purpose. fleetview adopts the password from
+    // server.json before it has any evidence about who holds the port, so an authenticated first
+    // probe hands that credential to whatever is listening — including a process that is not
+    // fleetview's server and not opencode at all. Only a 401 is evidence the listener wants a
+    // credential, and only then is one presented, on a single retry. Costs one extra round trip on
+    // the password path; changes no adoption semantics.
+    let res = await fetchImpl(url, { signal: AbortSignal.timeout(2000) })
+    if (res.status === 401) {
+      const auth = authHeader()
+      if (!auth) return 'unauthorized'
+      res = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
+      if (res.status === 401) return 'unauthorized'
+    }
     if (!res.ok) return 'unreachable'
     let body
     try {
@@ -70,10 +78,29 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
     } catch {
       return 'unreachable'
     }
-    return Array.isArray(body) ? 'healthy' : 'unreachable'
+    return isProjectList(body) ? 'healthy' : 'unreachable'
   } catch {
     return 'unreachable'
   }
+}
+
+// "Is this opencode" used to be "did it answer with a JSON array", which `[]` from any listener
+// satisfies — and fleetview then feeds the adopted server prompts, `!` shell commands, and takes
+// back from it the directory arguments it hands to git and spawnSync. Requiring the shape
+// `types.ts` declares for a Project turns "answer []" into "reimplement enough of opencode's API".
+// It does not stop a listener that mimics the shape; it raises the bar.
+//
+// The list must be non-empty: a real `opencode serve` always reports at least its own global
+// project (verified against opencode 1.18.5 with a fresh, empty config dir — GET /project returned
+// [{"id":"global","worktree":"/","time":{...},"sandboxes":[]}]), so requiring one well-formed entry
+// costs nothing on the real thing while rejecting a bare `[]`.
+function isProjectList(body: unknown): boolean {
+  if (!Array.isArray(body) || body.length === 0) return false
+  return body.every((entry) => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const project = entry as Record<string, unknown>
+    return typeof project.id === 'string' && project.id !== '' && typeof project.worktree === 'string' && project.worktree !== ''
+  })
 }
 
 // Whether a set password is actually enforced by the server on `server`. True when no password is
@@ -81,6 +108,11 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
 // set but the server answers anyway — the case where a passwordless opencode is already running on
 // the port and fleetview adopts it rather than replacing it, so OPENCODE_SERVER_PASSWORD (which only
 // applies to a server fleetview spawns) is silently off and the shell route stays open.
+//
+// "True" here means "nothing is being ignored", not "this server is protected": with no password
+// set there is nothing to enforce, and that no-password case is exactly where adopting a foreign
+// listener is most likely and least visible. Saying so is the adoption notice's job in
+// makeEnsureServer, which reports the no-password case rather than leaving this `true` silent.
 export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.fetch) {
   if (!authHeader()) return true
   try {

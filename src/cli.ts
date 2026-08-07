@@ -86,6 +86,10 @@ export function makeEnsureServer({
   processKill = process.kill,
   spawnSyncImpl = spawnSync,
   warn = console.warn,
+  // Informational sink, separate from `warn` on purpose: adopting a server fleetview didn't spawn
+  // is supported, documented behaviour, so it gets one plain line rather than a warning voice.
+  notice = console.error,
+  identifyServer = looksLikeOpencodeServer,
   env = process.env,
 }: {
   isServerHealthy: (server: ServerRef) => Promise<boolean>
@@ -98,6 +102,8 @@ export function makeEnsureServer({
   processKill?: typeof process.kill
   spawnSyncImpl?: typeof spawnSync
   warn?: typeof console.warn
+  notice?: typeof console.error
+  identifyServer?: (pid: number) => { ok: boolean; reason?: string; command?: string }
   env?: NodeJS.ProcessEnv
 }) {
   // opencode cold boot (plugins) can exceed 5s; observed live on 1.18.4
@@ -137,12 +143,29 @@ export function makeEnsureServer({
     saveServer(serverFile, { ...bare, pid })
     return { ...bare, pid }
   }
+  // ensureServer runs again on every roster-loop iteration, so the adoption notice below is once per
+  // process: the fact is worth stating, restating it every few seconds is not.
+  let adoptionNoticed = false
+  const noticeIfForeign = (server: ServerRef) => {
+    if (adoptionNoticed) return
+    // Fleetview's own server is the one whose pid server.json recorded and which is still a live
+    // `opencode serve`. Anything else on that port is a server fleetview is adopting: usually the
+    // user's own, occasionally not the one they think.
+    if (server.pid && identifyServer(server.pid).ok) return
+    adoptionNoticed = true
+    const unprotected = env.OPENCODE_SERVER_PASSWORD
+      ? ''
+      : ' No OPENCODE_SERVER_PASSWORD is set, so its shell route is reachable by anything on loopback.'
+    notice(`fleetview: using the opencode server already running on ${server.host}:${server.port} — fleetview did not start it.${unprotected}`)
+  }
   return async function ensureServer(server: ServerRef) {
     // M11: a password fleetview generated for a server it spawned lives in server.json, because that
     // server is detached and outlives fleetview. Adopt it before the first probe — otherwise the next
     // run probes its own still-running server unauthenticated, reads the 401 as "dead", and spawns a
-    // duplicate on every fallback port.
-    if (server.password && !env.OPENCODE_SERVER_PASSWORD) env.OPENCODE_SERVER_PASSWORD = server.password
+    // duplicate on every fallback port. probeServer only presents it to a listener that answered 401,
+    // so putting it in the environment here is not the same as showing it to whoever holds the port.
+    const adoptedSaved = Boolean(server.password) && !env.OPENCODE_SERVER_PASSWORD
+    if (adoptedSaved) env.OPENCODE_SERVER_PASSWORD = server.password
     const state = await probeServer(server)
     if (state === 'healthy') {
       // Adopting a server fleetview didn't spawn (v2 reuses any healthy opencode). If a password is
@@ -153,6 +176,7 @@ export function makeEnsureServer({
           `fleetview: OPENCODE_SERVER_PASSWORD is set, but the opencode server already running on ${server.host}:${server.port} does not require it — its arbitrary-shell route is reachable without a password. Stop that server to have fleetview spawn a password-protected one.`,
         )
       }
+      noticeIfForeign(server)
       return { ok: true, server }
     }
     // M4: the user set OPENCODE_SERVER_PASSWORD over a server fleetview started with a generated one,
@@ -161,7 +185,15 @@ export function makeEnsureServer({
     // ports, and leave the running server orphaned with its shell route alive under a password nobody
     // is holding any more.
     let stalePassword = false
-    if (server.password && env.OPENCODE_SERVER_PASSWORD !== server.password) {
+    if (state === 'unauthorized' && adoptedSaved) {
+      // The saved password was adopted from server.json and then rejected by whatever holds the
+      // port. Two things follow: that listener is not the server the password was saved for, and it
+      // has now seen the password. Reusing it for the replacement fleetview is about to spawn on a
+      // fallback port would arm that server with a credential the rejecting listener already holds,
+      // so the saved one is burned here and `generated` below mints a fresh UUID instead.
+      delete env.OPENCODE_SERVER_PASSWORD
+      stalePassword = true
+    } else if (server.password && env.OPENCODE_SERVER_PASSWORD !== server.password) {
       const userPassword = env.OPENCODE_SERVER_PASSWORD
       env.OPENCODE_SERVER_PASSWORD = server.password
       if (await isServerHealthy(server)) {
@@ -322,6 +354,10 @@ export async function runServer(
   // through authHeader(), which reads the env var and nothing else. A password fleetview generated
   // lives in server.json and never in a fresh process's env, so without this line `server status`
   // reports fleetview's own server dead and `server stop` no-ops before reaching the kill.
+  // Putting it in the environment is not the same as showing it to the port: probeServer (which
+  // isServerHealthy runs on) asks unauthenticated first and only presents the credential to a
+  // listener that answered 401. `status`/`stop` spawn nothing, so there is no replacement server
+  // here for a rejected password to ride onto — that half is handled in makeEnsureServer.
   if (server.password && !env.OPENCODE_SERVER_PASSWORD) env.OPENCODE_SERVER_PASSWORD = server.password
   const healthy = await isServerHealthyImpl(server)
   if (args.serverAction === 'status') {
