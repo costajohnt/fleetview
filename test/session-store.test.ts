@@ -1366,6 +1366,21 @@ test('a backend re-listing does not erase the origin tag the sweep reads', () =>
   expect(store.get('repoA', 'c1').status).toBe('running')
 })
 
+// M10: the store's origin tag is the single source of session→backend identity — App's
+// backendNameOf reads it back through get(), so it has to surface on the row, notify when it
+// lands, and stay absent (no key at all) on an opencode row.
+test('get() exposes origin, noteOrigin notifies once per change, and opencode rows carry no key', () => {
+  const store: any = createStore()
+  seed(store)
+  let notified = 0
+  store.subscribe(() => notified++)
+  store.noteOrigin('repoA', 'c1', 'claude')
+  store.noteOrigin('repoA', 'c1', 'claude') // a repeat of a known fact must not re-render the app
+  expect(notified).toBe(1)
+  expect(store.get('repoA', 'c1').origin).toBe('claude')
+  expect('origin' in store.get('repoA', 's1')).toBe(false)
+})
+
 test('the synthetic "needs input" permission survives an authoritative pending seed', () => {
   const store: any = createStore()
   seed(store)

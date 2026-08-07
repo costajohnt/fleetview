@@ -22,6 +22,7 @@ const CAPABILITIES = {
   rename: false, // -n/--name titles a session at creation; nothing renames one after
   delete: false, // the CLI has no surface for removing a stored session
   questions: false, // headless denial is silent and unanswerable
+  messages: false, // the transcript is a file in copilot's state dir, not a wire API peek can fetch
 } as const
 
 // How often events() re-reads the sessions in a directory. Every tick is a directory listing and a

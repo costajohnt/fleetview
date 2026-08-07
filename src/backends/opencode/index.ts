@@ -16,6 +16,7 @@ export const OPENCODE_CAPABILITIES = {
   rename: true, // PATCH /session/:id
   delete: true, // DELETE /session/:id
   questions: true, // GET /question + /permission, answerable from the roster
+  messages: true, // GET /session/:id/message, what peek renders
 } as const
 
 // The client is passed in rather than built here: fleetview already holds one per server for the
