@@ -5,6 +5,7 @@
 import type { Backend, ServerRef } from '../../types.ts'
 import { OpencodeClient } from './client.ts'
 import { connectEvents } from './event-mux.ts'
+import { assertSessionId } from '../session-id.ts'
 
 // opencode is the server-backed family, so every flag is true — which is exactly why the flags could
 // not be inferred from it. It is the parity baseline the process-backed backends are measured
@@ -50,7 +51,9 @@ export function createOpencodeBackend({
       'attach',
       `http://${server.host}:${server.port}`,
       '-s',
-      id,
+      // Server-supplied, and the server may be an adopted foreign one — asserted because it becomes
+      // argv, same as the process backends (session-id.ts).
+      assertSessionId(id),
       // --dir is the worktree, not the repository: attach exits 1 immediately and silently if it
       // points at a directory that no longer exists (see describeExit in cli.ts).
       '--dir',

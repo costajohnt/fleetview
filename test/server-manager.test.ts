@@ -218,6 +218,30 @@ test('spawnServer does not crash when the child emits an async error event (e.g.
   expect(() => child.emit('error', new Error('ENOENT'))).not.toThrow()
 })
 
+// mode on mkdir/open only applies when they create, so a pre-existing (or pre-loosened) server.log
+// kept its perms while receiving prompts, paths and anything the server prints — every open
+// re-tightens the file and its dir now (openPrivateAppend).
+test('spawnServer re-tightens a pre-existing world-readable log to 0600', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, chmodSync, statSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = join(mkdtempSync(join(tmpdir(), 'fleetview-logs-')), 'logs')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'server.log'), 'old contents\n', { mode: 0o644 })
+  chmodSync(dir, 0o755)
+  const previous = process.env.FLEETVIEW_LOG_DIR
+  process.env.FLEETVIEW_LOG_DIR = dir
+  try {
+    const child = { pid: 42, on: () => {}, unref: () => {} }
+    spawnServer({ host: '127.0.0.1', port: 4900 }, { spawnImpl: (() => child) as any })
+    expect(statSync(join(dir, 'server.log')).mode & 0o777).toBe(0o600)
+    expect(statSync(dir).mode & 0o777).toBe(0o700)
+  } finally {
+    if (previous === undefined) delete process.env.FLEETVIEW_LOG_DIR
+    else process.env.FLEETVIEW_LOG_DIR = previous
+  }
+})
+
 // A server that never comes healthy is spawned up to 11 times per ensureServer run, and
 // ensureServer re-runs on every failed poll — so an unclosed parent fd accumulates without bound.
 test('spawnServer closes the log descriptor it opened, and leaves a caller-supplied one alone', () => {
