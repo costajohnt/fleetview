@@ -848,6 +848,21 @@ test('s toggles main groupBy between state and project, persists, and switches r
   expect(deps.persistRoster).toHaveBeenLastCalledWith(expect.objectContaining({ groupBy: 'state' }))
 })
 
+// A roster save that throws (full disk, unwritable config dir) used to propagate through
+// updateRoster into the Ink input handler and crash the TUI over a disk hiccup.
+test('a failing roster save flashes instead of crashing the input handler', async () => {
+  const deps = makeDeps()
+  deps.persistRoster = vi.fn(() => {
+    throw new Error('disk full')
+  })
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('\x13') // ^s → updateRoster → persist throws
+  await waitFor(() => lastFrame().includes("couldn't save roster"))
+  // the in-memory toggle still happened and the app is still alive
+  expect(lastFrame().split('\n').some((l) => l.trim().replace(/^❯ /, '').startsWith('alpha'))).toBe(true)
+})
+
 test('empty roster in state grouping shows the three-category skeleton with placeholders', async () => {
   const deps = makeDeps()
   deps.roster = { groupBy: 'state', sessions: [] }
@@ -1860,6 +1875,19 @@ test('! dispatches a shell job instead of prompting a model', async () => {
   expect(deps.client.promptAsync).not.toHaveBeenCalled()
 })
 
+// The `!` branch used to pass `agent ?? 'build'` while the prompt branch fell back to the launch
+// --agent default, so a `fleetview --agent reviewer` run silently sent shell jobs as build.
+test('! dispatch falls back to the launch --agent default like the prompt branch', async () => {
+  const deps = withVocab(makeDeps())
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), initialAgent: 'reviewer' }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('!npm test')
+  await waitFor(() => lastFrame().includes('!npm test█'))
+  stdin.write('\r')
+  await waitFor(() => deps.client.runShell.mock.calls.length > 0)
+  expect(deps.client.runShell).toHaveBeenCalledWith('s9', 'npm test', '/x/alpha', 'reviewer')
+})
+
 test('typing a filter narrows the list instead of dispatching', async () => {
   const deps = makeDeps()
   deps.roster = {
@@ -2529,6 +2557,23 @@ test('a repository that already has worktrees still isolates, and avoids the tak
   expect(deps.client.createWorktree).toHaveBeenCalledWith('fix-the-thing-2', '/x/alpha')
   expect(deps.client.createSession).toHaveBeenCalledWith(expect.anything(), wt)
   expect(lastFrame()).not.toContain('not isolated')
+})
+
+// M14: the dispatch path (streamProjectRef after createWorktree) and the discovery poll can both
+// hand the same worktree to seedAndStream. Without the in-function guard the second run's
+// conns.set orphaned the first connection's stop(), which then reconnected and double-delivered
+// events until process exit. Here discovery streams the worktree first; the dispatch must reuse it.
+test('a worktree already streamed is not seeded a second time by the dispatch path', async () => {
+  const { deps, wt } = isolatingDeps()
+  const wtConns = () => deps.connectEventsImpl.mock.calls.filter((c: any[]) => c[0].directory === wt).length
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  await waitFor(() => wtConns() === 1) // discovery already opened the worktree's event stream
+  stdin.write('fix the thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => deps.client.promptAsync.mock.calls.length > 0)
+  expect(wtConns()).toBe(1) // one live stream, not a second one with an unreachable stop()
 })
 
 test('isolate=false dispatches into the checkout, no worktree, and says so (#88)', async () => {
