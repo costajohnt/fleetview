@@ -5,7 +5,7 @@ import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
-import { createOpencodeBackend } from './backends/opencode/index.ts'
+import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
 import { createNormaliser, normaliseSessions } from './backend-normalise.ts'
 import { hasSession, type Roster as RosterType } from './roster-store.ts'
@@ -104,11 +104,6 @@ export function foldCompleted(groups: any[], maxRows: number, sel?: any) {
     g === completed ? { ...g, sessions: kept, hidden: g.sessions.length - kept.length } : g,
   )
 }
-
-// The parity baseline, used only when a row's backend cannot be resolved at all (see
-// capabilitiesOf). Deliberately not imported from the opencode adapter: this is a fallback for the
-// case where that adapter is absent.
-const OPENCODE_CAPABILITIES = { fork: true, rename: true, delete: true, questions: true }
 
 // Pure roster-mutation helpers mirroring roster-store.ts's addSession/removeSession semantics —
 // duplicated rather than imported because those do file IO directly; App only persists via the
