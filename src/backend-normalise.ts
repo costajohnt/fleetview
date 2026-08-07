@@ -34,7 +34,14 @@ export function normaliseSessions(backend: string, rows: any[] | null | undefine
     // row, and using the mtime made a nine-day-old claude session that had just replied render
     // `now`. 0 when no record carried a parseable timestamp — ageLabel's `createdAt || updatedAt`
     // then falls back to the mtime, which is the behaviour this row had before.
-    return list.map((s: any) => ({ id: s.id, title: s.title || s.id, time: { created: s.createdAt ?? 0, updated: s.updatedAt ?? 0 } }))
+    // #46: the title passes through empty rather than falling back to the id. Claude Code does not
+    // name a session on creation, so `|| s.id` put a UUID in the title of every session it had not
+    // titled yet — and a UUID is not `isPlaceholderTitle`, so the first relist after a dispatch
+    // overwrote the provisional prompt the store was showing and the row read as its own id while
+    // peek showed the prompt. An empty title is the honest report of "this backend has not named it",
+    // which is exactly what the store's placeholder test is looking for. What a never-dispatched
+    // session shows instead is projects.ts's job: it falls back to the transcript's opening prompt.
+    return list.map((s: any) => ({ id: s.id, title: s.title ?? '', time: { created: s.createdAt ?? 0, updated: s.updatedAt ?? 0 } }))
   }
   if (backend === 'copilot') {
     // Already carries id/title/time in milliseconds (sessions.ts converts them deliberately), so
