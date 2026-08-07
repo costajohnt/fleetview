@@ -166,6 +166,22 @@ test('a resumed copilot session goes back to running from a finished state', () 
   expect(rowsFrom('copilot', '/x/alpha', [ev('working'), ev('completed'), ev('working')])[0].status).toBe('running')
 })
 
+// M12 parity with claude: a copilot run refused a tool exits 0 and reports `completed`, but tools
+// it needed were silently withheld — the honest end state is the same synthetic needs-input.
+test('a tool-denied copilot run ends as needs-input, not green, and a resume clears it', () => {
+  const ev = (status: string, deniedTools: number) => ({ type: 'copilot.session', sessionId: 'k1', status, lastOutput: 'partway', deniedTools, running: false })
+  const denied = rowsFrom('copilot', '/x/alpha', [ev('working', 0), ev('completed', 2)])[0]
+  expect(denied).toMatchObject({ status: 'waiting', pendingRequest: true })
+  expect(denied.snippet).toContain('refused a tool') // copilot denials carry no tool names
+  const resumed = rowsFrom('copilot', '/x/alpha', [ev('working', 0), ev('completed', 2), ev('working', 0)])[0]
+  expect(resumed).toMatchObject({ status: 'running', pendingRequest: false })
+})
+
+test('a failed copilot run with denials still reads as failed, not needs-input', () => {
+  const ev = (status: string, deniedTools: number) => ({ type: 'copilot.session', sessionId: 'k1', status, lastOutput: '', deniedTools, running: false })
+  expect(rowsFrom('copilot', '/x/alpha', [ev('working', 2), ev('failed', 2)])[0].status).toBe('error')
+})
+
 test('a non-copilot event on the copilot stream is ignored', () => {
   expect(createNormaliser('copilot')({ type: 'something.else', sessionId: 'k1' })).toEqual([])
 })

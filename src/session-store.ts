@@ -18,6 +18,9 @@ export type SessionRow = {
   updatedAt: number
   createdAt: number
   agent: string | undefined
+  // Which backend's facts this row is made of; absent means opencode (M10). The one durable copy of
+  // session→backend identity — App's backendNameOf reads it rather than keeping a parallel map.
+  origin?: string
   pendingRequest: boolean
   waitingFor: 'permission prompt' | 'input needed' | undefined
   waitingSince: number
@@ -379,6 +382,9 @@ export function createStore() {
       updatedAt: r.updatedAt,
       createdAt: r.createdAt,
       agent: r.agent, // what `a:<name>` filters on; absent on sessions created before opencode tracked it
+      // Spread, not `origin: r.origin`: an opencode row must carry no new key at all, so an
+      // opencode-only roster keeps exactly the shape it had before backends were selectable.
+      ...(r.origin ? { origin: r.origin } : {}),
       // Whether `waiting` rests on a request the server actually reported, or on the question
       // heuristic. A guess is fine for sorting a row; it is not fine for ringing a bell or putting
       // a number in the terminal's tab title, so the difference has to survive to the caller.
@@ -710,11 +716,14 @@ export function createStore() {
 
     // Tags a record as belonging to a backend other than opencode, so the seeds below — each of
     // which treats one opencode GET as the full truth for a projectKey — leave it alone. Called
-    // from the same place App learns the fact (noteBackend), which covers every way a foreign row
-    // arrives: its events, its listing, and the dispatch that created it.
+    // everywhere App learns the fact, which covers every way a foreign row arrives: its events,
+    // its listing, the roster membership a restart restores, and the dispatch that created it.
+    // The single source of session→backend identity (M10): App reads it back through get().origin.
     noteOrigin(projectKey: string, id: string, origin: string) {
       const r = upsert(projectKey, id)
-      if (r) r.origin = origin
+      if (!r || r.origin === origin) return
+      r.origin = origin
+      notify() // the roster's backend tag and the capability gates render off this
     },
 
     // The text fleetview shows on a freshly dispatched row until opencode's own name arrives. Kept

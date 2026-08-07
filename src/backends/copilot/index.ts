@@ -23,6 +23,7 @@ const CAPABILITIES = {
   rename: false, // -n/--name titles a session at creation; nothing renames one after
   delete: false, // the CLI has no surface for removing a stored session
   questions: false, // headless denial is silent and unanswerable
+  messages: false, // the transcript is a file in copilot's state dir, not a wire API peek can fetch
 } as const
 
 // How often events() re-reads the sessions in a directory. Every tick is a directory listing and a
@@ -77,7 +78,6 @@ export function createCopilotBackend({
   // paths, and whatever the session printed, so it must not be world-readable (openPrivateAppend
   // re-tightens a pre-existing dir and file, and refuses a symlinked log).
   const openLog = (id: string) => openPrivateAppend(logDir, logPath(id))
-
 
   // Both dispatch and prompt are the same spawn with a different session flag — copilot has no
   // notion of an existing-but-unprompted session, so "start" and "continue" differ only in whether

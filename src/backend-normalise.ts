@@ -150,7 +150,14 @@ function copilotNormaliser(): (event: unknown) => StoreEvent[] {
     const e = event as any
     if (e?.type !== 'copilot.session' || typeof e.sessionId !== 'string') return []
     const sessionID: string = e.sessionId
-    const status: string = typeof e.status === 'string' ? e.status : 'working'
+    const reported: string = typeof e.status === 'string' ? e.status : 'working'
+    // Denied-tools parity with claude (M12): a copilot run refused a tool mid-run exits 0 and
+    // reports `completed`, but tools it needed were silently withheld — the honest state is the
+    // same synthetic needs-input claude renders, "a person has to attach and approve". Copilot's
+    // denials carry no tool names (events.ts only counts them), so the banner takes denialLabel's
+    // generic wording. A `failed` run keeps its failure: the error outranks the denial.
+    const deniedTools: number = typeof e.deniedTools === 'number' ? e.deniedTools : 0
+    const status: string = reported === 'completed' && deniedTools > 0 ? 'needs-input' : reported
     const lastOutput: string = typeof e.lastOutput === 'string' ? e.lastOutput : ''
     const before = last.get(sessionID)
     last.set(sessionID, { status, lastOutput })

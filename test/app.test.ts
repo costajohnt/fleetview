@@ -3020,7 +3020,7 @@ test('the header count survives a filter that hides the blocked session', async 
 // Every test here builds an explicit registry — App's default is opencode alone, which is what keeps
 // every test above describing a single-backend roster.
 
-const ALL_CAPS = { fork: true, rename: true, delete: true, questions: true }
+const ALL_CAPS = { fork: true, rename: true, delete: true, questions: true, messages: true }
 
 // A stand-in adapter. `handlers` is captured so a test can push an event the way the real poller
 // would, without a process, a log file or a timer.
@@ -3028,7 +3028,7 @@ function fakeBackend(name: string, capabilities: any = {}, sessions: any[] = [])
   const captured: any = { handlers: null, stop: vi.fn() }
   return {
     name,
-    capabilities: { fork: false, rename: false, delete: false, questions: false, ...capabilities },
+    capabilities: { fork: false, rename: false, delete: false, questions: false, messages: false, ...capabilities },
     captured,
     listSessions: vi.fn(async () => sessions),
     dispatch: vi.fn(async ({ directory }: any) => ({ id: `${name}-9`, directory })),
@@ -3157,7 +3157,7 @@ test('claude sessions discovered in a shown directory join the roster with live 
 })
 
 // The restart path: the only thing saying c1 is claude's is the persisted membership. If that seed
-// skips noteBackend, the store never learns the row's origin and opencode's periodic
+// skips store.noteOrigin, the store never learns the row's origin and opencode's periodic
 // seedStatuses(closeRuns) sweep — which never lists c1 — marks the running row idle.
 test('a claude row restored from the roster survives the opencode status sweep', async () => {
   const deps = makeDeps()
@@ -3211,6 +3211,26 @@ test('an opencode-only roster renders no backend tag at all', async () => {
   )
   await waitFor(() => lastFrame().includes('fix tests'))
   expect(lastFrame().split('\n').find((l) => l.includes('fix tests'))).not.toContain('opencode')
+})
+
+// M13: the peek gate is capabilities.messages, not "is there an adapter" — what it renders for a
+// backend without a wire transcript, and that it never asks the opencode server about a foreign id.
+test('peeking a row whose backend has no message API says so instead of fetching', async () => {
+  const deps = makeDeps()
+  const claude = fakeBackend('claude', {}, [claudeRow('c1', 'claude work')])
+  const { stdin, lastFrame } = render(
+    React.createElement(App, {
+      ...deps,
+      onAction: vi.fn(),
+      backends: { opencode: opencodeStub(), claude },
+      initialBackend: 'claude',
+      roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1, backend: 'claude' }] },
+    }),
+  )
+  await waitFor(() => lastFrame().includes('claude work'))
+  stdin.write(' ') // open peek on the claude row
+  await waitFor(() => lastFrame().includes('no transcript over the wire'))
+  expect(deps.client.listMessages).not.toHaveBeenCalled()
 })
 
 test('^r on a row whose backend cannot rename says so instead of opening the dialog', async () => {
