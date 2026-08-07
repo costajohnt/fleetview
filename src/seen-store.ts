@@ -1,16 +1,11 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, renameSync } from 'node:fs'
+import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { atomicWrite, fleetviewDir } from './paths.ts'
 
 // Same legacy fallback as the config stores: an existing pre-rename state dir keeps working.
-const baseDir = () => {
-  const fresh = join(homedir(), '.local', 'state', 'fleetview')
-  const legacy = join(homedir(), '.local', 'state', 'roost')
-  return existsSync(fresh) || !existsSync(legacy) ? fresh : legacy
-}
-
 export const defaultSeenFile = () =>
-  join((process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? baseDir(), 'seen.json')
+  join((process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? fleetviewDir(join(homedir(), '.local', 'state')), 'seen.json')
 
 // { "<repoId>:<sessionId>": { updated: <ms>, hasRun: <bool>, stopped?: <bool>, error?: <string|true> } }
 // #53: `stopped` is written by the store's snapshot() and read back by setSessions — the server
@@ -66,13 +61,5 @@ export function setAside(file: string) {
 }
 
 export function saveSeen(file: string, map: SeenMap) {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  // mkdir's `mode` only applies when it creates the dir (see saveRoster) — re-tighten an existing
-  // one on every save, best-effort.
-  try {
-    chmodSync(dirname(file), 0o700)
-  } catch {}
-  const tmp = `${file}.${process.pid}.tmp` // per-pid: two fleetview instances must not share a tmp inode
-  writeFileSync(tmp, JSON.stringify(map, null, 2), { mode: 0o600 })
-  renameSync(tmp, file)
+  atomicWrite(file, JSON.stringify(map, null, 2))
 }

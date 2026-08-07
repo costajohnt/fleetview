@@ -12,7 +12,8 @@ import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } fro
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
-import { psInfo, type PidInfo } from '../ps.ts'
+import { psInfo, sameRun, type PidInfo } from '../ps.ts'
+import { reapRunLogs } from '../run-logs.ts'
 import { assertSessionId } from '../session-id.ts'
 
 // Every flag is a "fleetview can't", stated rather than inherited. `fork` is the one worth naming:
@@ -29,13 +30,6 @@ const CAPABILITIES = {
 // backend's latency, and it is a local file stat: 500ms costs nothing and keeps a row within half a
 // second of the truth.
 const POLL_MS = 500
-
-// How long a finished run's captured stream is kept. The run dir gains one log and one meta per
-// dispatch and nothing ever removed them, so a heavy user's events() poll ended up doing a readdir
-// over every session they had ever dispatched, twice a second, forever. Thirty days is long enough
-// that the log is still there for anything the roster is plausibly still showing, and the transcript
-// under ~/.claude/projects — which fleetview does not own and does not touch — outlives it anyway.
-const KEEP_RUNS_MS = 30 * 24 * 60 * 60 * 1000
 
 // What fleetview records for a session it dispatched, next to the log. The pid is the only handle
 // abort() has, and the directory is what lets events() find this run's log from a directory alone.
@@ -81,29 +75,10 @@ export function createClaudeBackend({
     }
   }
 
-  // Drop runs whose last activity is older than the retention window. Hung off dispatch rather than
-  // given its own timer: there is no long-lived process here to schedule against, and the run dir
-  // only grows when something is dispatched, so that is exactly when it is worth a look. Best
-  // effort throughout — a run that cannot be removed is not a reason to fail the dispatch.
+  // The pair is keyed off the log (run-logs.ts): a reaped run's meta and cache entry go with it.
   function reap() {
-    let names: string[]
-    try {
-      names = readdirSync(runDir)
-    } catch {
-      return
-    }
-    const cutoff = now() - KEEP_RUNS_MS
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue // pair is keyed off the log; the meta goes with it
-      const id = name.slice(0, -'.jsonl'.length)
-      try {
-        // mtime, not meta.startedAt: a session resumed last week is live work whatever the day its
-        // first prompt was sent, and deleting its log would blank the row it still feeds.
-        if (statSync(logPath(id)).mtimeMs >= cutoff) continue
-      } catch {
-        continue
-      }
-      for (const file of [logPath(id), metaPath(id)]) rmSync(file, { force: true })
+    for (const id of reapRunLogs(runDir, now())) {
+      rmSync(metaPath(id), { force: true })
       metaCache.delete(id)
     }
   }
@@ -339,26 +314,12 @@ export function createClaudeBackend({
       const meta = readMeta(id)
       if (!meta?.pid) return { aborted: false }
       // The meta outlives the run by up to KEEP_RUNS_MS, so this pid can be weeks stale and the OS
-      // may have handed it to an unrelated process — which the group signal below would kill. A live
-      // pid is only trusted when it still looks like this run: its argv carries this session's id
-      // (every run is spawned with --session-id or --resume <id>), or failing that it is a claude
-      // (or the node running one) born when the meta says the run started — a recycled pid is off
-      // by hours. A ps that cannot answer ('unavailable') falls through to the signal: unverifiable
-      // is not verified-stale, and refusing would make every abort on such a host a silent no-op.
+      // may have handed it to an unrelated process — which the group signal below would kill. A
+      // live pid is only trusted when it still looks like this run (sameRun in ps.ts).
       // Known trade: the old unconditional kill(-pid) also swept a group whose leader had already
       // exited but whose tool children lived on; the guard gives that up, and such children fall to
       // the run's own teardown instead.
-      const info = psImpl(meta.pid)
-      if (info === null) return { aborted: false } // the run already finished
-      if (info !== 'unavailable') {
-        // The argv carrying this session's id is the only accepted identity: every run is spawned
-        // with --session-id or --resume <id>, so a live run always shows it. The old fallback — any
-        // claude-or-node born within a minute of the meta — accepted a whole class of processes and
-        // reopened the recycled-pid group-kill through that window, so "no id in argv" is now
-        // refused rather than guessed at. A ps that answered but cannot show argv still lands here
-        // and refuses; one that cannot answer at all is 'unavailable' above and falls through.
-        if (!info.command.includes(id)) return { aborted: false }
-      }
+      if (!sameRun(psImpl(meta.pid), id)) return { aborted: false }
       try {
         killImpl(-meta.pid, 'SIGTERM')
         return { aborted: true }

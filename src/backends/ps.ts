@@ -49,8 +49,16 @@ export function psInfo(pid: number): PidInfo {
   return { startedAt, command: tokens.slice(5).join(' ') }
 }
 
-// How far the process's start time may sit from when the run was recorded before the pid is
-// presumed recycled. The two are written the same instant, so a genuine match is off by
-// milliseconds and lstart only resolves to the second — the slack is for a clock stepped between
-// dispatch and abort, not for either of those. A recycled pid is off by hours or days.
-export const PID_MATCH_SLACK_MS = 60 * 1000
+// Whether a stored pid still looks like the run it was recorded for, i.e. whether abort() may
+// signal it. Both process-backed backends persist a pid past the life of the run that named it, so
+// the OS may have recycled it onto an unrelated process — which the group signal would kill.
+//
+// The argv carrying the session's id is the only accepted identity: every run is spawned with
+// --session-id <id> or --resume(=)<id>, so a live run always shows it, where the old fallback (any
+// claude/copilot-or-node born within a minute of the recorded time) accepted a whole class of
+// processes and reopened the recycled-pid kill through that window. "No id in argv" is therefore
+// refused rather than guessed at — including a ps that answered but cannot show argv. null (the
+// run already finished) refuses too; 'unavailable' (no usable ps at all) passes, because
+// unverifiable is not verified-stale, and refusing would make every abort on such a host a silent
+// no-op forever.
+export const sameRun = (info: PidInfo, id: string): boolean => info !== null && (info === 'unavailable' || info.command.includes(id))

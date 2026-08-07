@@ -4,13 +4,14 @@
 // 1.0.75 — docs/specs/2026-07-25-copilot-backend-wire.md records what was run and what came back.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, openSync, readSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Backend } from '../../types.ts'
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { foldEvents, initialRun, parseJsonlChunk, type CopilotStatus, type RunState } from './events.ts'
 import { listSessions, lockInfo, runningPid, sessionStateDir } from './sessions.ts'
-import { psInfo, type PidInfo } from '../ps.ts'
+import { psInfo, sameRun, type PidInfo } from '../ps.ts'
+import { reapRunLogs } from '../run-logs.ts'
 import { assertSessionId } from '../session-id.ts'
 
 // Measured, not aspirational — each `false` is a thing the CLI cannot do, not a thing left unbuilt.
@@ -31,13 +32,6 @@ const CAPABILITIES = {
 const POLL_MS = 1500
 
 const logDirFor = () => join(configDir(), 'copilot')
-
-// How long a run's captured log is kept. The log dir gained a file per dispatch and nothing ever
-// removed them, so a heavy user accumulated every session they had ever dispatched, forever. Same
-// window and same reasoning as the claude backend: copilot's own transcript under
-// ~/.copilot/session-state — which fleetview does not own — outlives it anyway, and events() falls
-// back to it for an owned session whose capture is gone.
-const KEEP_RUNS_MS = 30 * 24 * 60 * 60 * 1000
 
 // Non-interactive mode's fixed argv. `--allow-all-tools` is what the CLI's own help calls "required
 // for non-interactive mode", and without it a dispatched session can read and answer but not act —
@@ -84,30 +78,6 @@ export function createCopilotBackend({
   // re-tightens a pre-existing dir and file, and refuses a symlinked log).
   const openLog = (id: string) => openPrivateAppend(logDir, logPath(id))
 
-  // Drop captures whose last activity is older than the retention window. Hung off dispatch rather
-  // than given a timer: the directory only grows when something is dispatched, so that is when it is
-  // worth a look. Best effort — a log that cannot be removed is not a reason to fail the dispatch.
-  function reap() {
-    let names: string[]
-    try {
-      names = readdirSync(logDir)
-    } catch {
-      return
-    }
-    const cutoff = now() - KEEP_RUNS_MS
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue
-      const file = join(logDir, name)
-      try {
-        // mtime, not the dispatch time: a session resumed last week is live work whatever day its
-        // first prompt was sent, and deleting its capture would blank the row it still feeds.
-        if (statSync(file).mtimeMs >= cutoff) continue
-      } catch {
-        continue
-      }
-      rmSync(file, { force: true })
-    }
-  }
 
   // Both dispatch and prompt are the same spawn with a different session flag — copilot has no
   // notion of an existing-but-unprompted session, so "start" and "continue" differ only in whether
@@ -171,7 +141,7 @@ export function createCopilotBackend({
       const id = randomUUIDImpl()
       const extra = [...(model ? ['--model', model] : []), ...(agent ? ['--agent', agent] : [])]
       run(id, ['--session-id', id], prompt, directory, extra)
-      reap()
+      reapRunLogs(logDir, now())
       return { id, directory }
     },
 
@@ -341,22 +311,12 @@ export function createCopilotBackend({
       // holding the session, and it is not a group leader — so it is signalled directly, which was
       // verified to end the run and remove the lock. A lock left behind by a crash names a pid that
       // is gone — or, worse, recycled — so before trusting it the pid has to still look like this
-      // session's copilot: a copilot (or the node wrapper it runs under) born when the lock was
-      // written. Same guard, same reasons, as the claude backend's abort; 'unavailable' (no usable
-      // ps) falls through to the signal because unverifiable is not verified-stale.
+      // session's copilot: its argv names this session (a resume always carries `--resume=<id>`,
+      // and the lock's own holder is that resume). Same guard as the claude backend's abort, and
+      // the same reasons — sameRun in ps.ts holds them.
       const lock = lockInfo(join(stateDir, id))
       if (lock === null) return { aborted: false } // nothing running; abort has already happened
-      const info = psImpl(lock.pid)
-      if (info === null) return { aborted: false } // the lock outlived its process
-      if (info !== 'unavailable') {
-        // The argv naming this session is the only accepted identity — it needs no clock, where the
-        // old fallback (any copilot-or-node whose lstart sat within a minute of the lock's mtime)
-        // accepted a whole class of processes and reopened the recycled-pid kill through that
-        // window. A resume always carries `--resume=<id>`, and the lock's own holder is that
-        // resume, so a live run always shows the id; "no id in argv" is refused rather than guessed
-        // at. Same rule, same reasons, as the claude backend's abort.
-        if (!info.command.includes(id)) return { aborted: false }
-      }
+      if (!sameRun(psImpl(lock.pid), id)) return { aborted: false }
       try {
         killImpl(lock.pid, 'SIGTERM')
         return { aborted: true }
