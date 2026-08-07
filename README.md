@@ -85,7 +85,8 @@ supports it. peek lists them all with their URLs.
 
 Group headers are rows too: `↑`/`↓` land on them, `⏎` collapses (the header keeps a count, and
 the choice persists), and `^x` deletes every session in the group — twice, like the per-session
-form. `completed` folds into a `… N more` line when the screen runs out; failures never fold.
+form. `completed` folds into a `… N more` line when the screen runs out; failures, sessions with
+an open pull request, and the row you have selected never fold.
 
 ![A pinned group on top, a folded `… 3 more` line under working, and completed collapsed to its header and count](docs/images/groups.png)
 
@@ -177,7 +178,11 @@ from, so it can't drift from this one.
 Two keys are fleetview's own, with no agent-view equivalent: `^b` browses every opencode session,
 including ones started from opencode's own TUI, and `^a` adds or removes the selected one from
 the roster. That matters because the main list only shows sessions you dispatched from fleetview
-or added yourself; removing one from the roster doesn't stop it.
+or added yourself; removing one from the roster doesn't stop it. A member whose session has gone
+for good (deleted elsewhere, or its worktree removed) still gets a dim row under `completed` so
+`^x` can drop it, rather than becoming an invisible entry you can only clear by editing
+`roster.json`. A session dispatched with `fleetview bg` from another terminal joins a running
+roster on the next poll, without a restart.
 
 ![Browse: every opencode session grouped by project, with `[roster]` marking the ones on the main list](docs/images/browse.png)
 
@@ -186,7 +191,9 @@ or added yourself; removing one from the roster doesn't stop it.
 `space` opens the peek panel on the selected session: its recent output, whatever it's blocked
 on, and an input of its own. Type there and press ⏎ to send a follow-up without attaching, or
 prefix with `!` to run a shell command in that session instead. `↑`/`↓` peek adjacent sessions
-without closing, `→` attaches, `esc` clears a half-typed reply and then closes the panel.
+without closing, `→` attaches, `esc` clears a half-typed reply and then closes the panel. A reply
+you have started typing is protected: the first `↑`/`↓`/`→` after it clears the draft rather
+than moving, so a follow-up written for one session can never be sent to another.
 
 A pending permission is answerable with `y` allow once · `a` always · `d` deny; a pending
 question shows its choices as a numbered list, answerable by pressing that number. Both only
@@ -214,7 +221,8 @@ above the list with the session you just left selected, and the next `esc` that 
 re-opens that conversation instead. For `claude`/`copilot` attaches, a detach while the session is
 mid-turn asks for a second press ("still working — press again to detach"), since killing the
 interactive client there would kill the in-flight turn; opencode detaches immediately, its
-sessions live on the server.
+sessions live on the server. The same second press guards `alt+1`…`alt+9` there, since switching
+away kills that client exactly as detaching does.
 
 Because fleetview stays resident, its terminal-level signals keep working while you're attached
 to something else: the tab title carries the awaiting-input count, and the bell rings when a
@@ -313,6 +321,14 @@ Verified against opencode 1.18.4: unauthenticated requests then get 401 and flee
 200. A password only applies to a server fleetview itself spawns — if a passwordless opencode
 already holds the port, fleetview reuses it as-is and warns that the server does not require a
 password; stop that server to get a protected one.
+
+The saved password is never handed to a listener that hasn't proved it wants one: fleetview probes
+the port unauthenticated first and only retries with credentials against something that answered
+401. If a listener rejects the saved password, that password is treated as burned — the server it
+was saved for is gone, so a fresh one is minted for the replacement rather than reused. Adoption
+also checks that the thing on the port answers like opencode (a well-formed project listing, not
+merely a JSON array), and fleetview says so in one line whenever it adopts a server it did not
+spawn itself.
 
 ## From the shell
 
