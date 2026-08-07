@@ -5,7 +5,7 @@ import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
-import { createOpencodeBackend } from './backends/opencode/index.ts'
+import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
 import { createNormaliser, normaliseSessions } from './backend-normalise.ts'
 import { hasSession, type Roster as RosterType } from './roster-store.ts'
@@ -104,11 +104,6 @@ export function foldCompleted(groups: any[], maxRows: number, sel?: any) {
     g === completed ? { ...g, sessions: kept, hidden: g.sessions.length - kept.length } : g,
   )
 }
-
-// The parity baseline, used only when a row's backend cannot be resolved at all (see
-// capabilitiesOf). Deliberately not imported from the opencode adapter: this is a fallback for the
-// case where that adapter is absent.
-const OPENCODE_CAPABILITIES = { fork: true, rename: true, delete: true, questions: true }
 
 // Pure roster-mutation helpers mirroring roster-store.ts's addSession/removeSession semantics —
 // duplicated rather than imported because those do file IO directly; App only persists via the
@@ -228,24 +223,12 @@ export function App({
     () => backends ?? { opencode: createOpencodeBackend({ server, client }) },
     [backends, server, client],
   )
-  // `${directory}:${id}` → backend name, for every session that isn't opencode's. Kept here rather
-  // than in session-store because it is roster wiring, not session state: the store's job is to
-  // reduce events into rows, and it does that identically whichever CLI the events came from.
-  // Absent means opencode, which is what makes an opencode-only roster carry no extra state at all.
-  const sessionBackends = useRef(new Map<string, string>())
-  const noteBackend = useCallback(
-    (directory: string, id: string, name: string) => {
-      const key = `${directory}:${id}`
-      if (sessionBackends.current.get(key) === name) return
-      sessionBackends.current.set(key, name)
-      // The store needs the same fact for one purpose only: its three seeds treat an opencode GET as
-      // the full truth for a directory, and these rows are not in it. See session-store.noteOrigin.
-      if (name !== DEFAULT_BACKEND) store.noteOrigin(directory, id, name)
-      force((n) => n + 1) // the tag and the capability gates read this; a Map mutation renders nothing
-    },
-    [store],
-  )
-  const backendNameOf = (row: any) => sessionBackends.current.get(`${row.projectKey}:${row.id}`) ?? DEFAULT_BACKEND
+  // Which backend a session belongs to, read from the one durable copy: the `origin` the store
+  // keeps per record (M10). A parallel `${directory}:${id}` → name map used to live here and had
+  // to be manually kept in step with store.noteOrigin — a desync (the map satisfied its dedup
+  // guard, the store never learned) already happened once. Absent means opencode, which is what
+  // makes an opencode-only roster carry no extra state at all.
+  const backendNameOf = (row: any) => store.get(row.projectKey, row.id)?.origin ?? DEFAULT_BACKEND
   // The adapter a row's keys and actions have to go through, or null for opencode — null is what the
   // call sites read as "take the original client path", so no opencode call changes shape.
   const backendFor = (row: any) => {
@@ -497,6 +480,12 @@ export function App({
     streamProjectRef.current = (w: any) => seedAndStream(w)
 
     const seedAndStream = async (worktree: any) => {
+      // M14: idempotency lives here, not at callers — the dispatch path and a poll tick can both
+      // reach this for the same worktree (the poll awaits gh calls before computing newOnes), and
+      // a second run's `conns.current.set` would orphan the first connection's stop() so it
+      // reconnects and double-delivers forever. knownWorktrees covers the in-flight window (it is
+      // added below and deleted on failure, so retries still work); conns covers established ones.
+      if (conns.current.has(worktree) || knownWorktrees.current.has(worktree)) return
       knownWorktrees.current.add(worktree)
       try {
         const sessions = await client.listSessions(worktree)
@@ -559,10 +548,9 @@ export function App({
     for (const m of rosterRef.current.sessions as any[]) {
       if (m.backend && m.backend !== DEFAULT_BACKEND) {
         activeBackends.add(m.backend)
-        // Through noteBackend, not a bare map set: the map alone satisfies its dedup guard, which
-        // would then suppress store.noteOrigin for this key forever — leaving a restored row
-        // untagged in the store, and so swept as opencode's by the three seeds.
-        noteBackend(m.worktree, m.id, m.backend)
+        // Without this a restored row is untagged in the store, and so swept as opencode's by the
+        // three seeds the moment its project comes online.
+        store.noteOrigin(m.worktree, m.id, m.backend)
       }
     }
     const backendConns = new Map<string, any>() // `${name}:${worktree}` → subscription, for unmount
@@ -588,7 +576,7 @@ export function App({
                 // Not every union member carries sessionID (session.updated nests an info object),
                 // and the ones a normaliser emits all do — the loose read says so once.
                 const id = (store_event.properties as { sessionID?: string }).sessionID
-                if (id) noteBackend(directory, id, name)
+                if (id) store.noteOrigin(directory, id, name)
                 store.apply(directory, store_event)
               }
             },
@@ -600,7 +588,7 @@ export function App({
       try {
         const list = normaliseSessions(name, await backend.listSessions(worktree))
         if (cancelled) return
-        for (const s of list) noteBackend(worktree, s.id, name)
+        for (const s of list) store.noteOrigin(worktree, s.id, name)
         // Never `retire: true`: that sweep is scoped to a project, not to a backend, so a claude
         // listing armed with it would delete the opencode rows in the same directory. Leaving these
         // records unlisted is also what keeps opencode's own retiring listing from deleting them —
@@ -800,8 +788,7 @@ export function App({
         const m = memberOf(s.projectKey, s.id)
         // `backend` is only ever set for a row that isn't opencode's — absent is the default, so an
         // opencode-only roster carries no new field and nothing downstream changes shape.
-        const backend = sessionBackends.current.get(`${s.projectKey}:${s.id}`)
-        return { ...s, prs: prsFor(s.projectKey), pinned: Boolean(m?.pinned), rank: m?.rank, ...(backend ? { backend } : {}) }
+        return { ...s, prs: prsFor(s.projectKey), pinned: Boolean(m?.pinned), rank: m?.rank, ...(s.origin ? { backend: s.origin } : {}) }
       }),
     ]),
   )
@@ -1124,7 +1111,13 @@ export function App({
   const updateRoster = (updater: (prev: RosterState) => RosterState) => {
     const updated = updater(rosterRef.current)
     rosterRef.current = updated
-    persistRoster?.(updated)
+    // A failed save must not throw through the Ink input handlers that call this (it would crash
+    // the TUI over a disk hiccup). The in-memory update stands; persist retries on the next change.
+    try {
+      persistRoster?.(updated)
+    } catch {
+      flash("couldn't save roster — will retry on next change")
+    }
     setRosterState(updated)
   }
 
@@ -1317,7 +1310,7 @@ export function App({
         // target CLI would be rejected argv rather than a useful default.
         model: dispatchModel?.id ?? undefined,
       })
-      noteBackend(target, ref.id, name)
+      if (name !== DEFAULT_BACKEND) store.noteOrigin(target, ref.id, name)
       store.setProvisionalTitle(target, ref.id, text)
       // `backend` rides the membership so a restart knows which CLI this row belongs to before any
       // event has arrived — the same soft-migration shape as every other member field (absent means
@@ -1399,7 +1392,9 @@ export function App({
       updateRoster((prev: any) =>
         withMember(prev, worktree, session.id, { ...(shell ? { shell: true } : {}), prompt: text.slice(0, 2000) }),
       )
-      if (shell) await client.runShell(session.id, text, worktree, agent ?? 'build')
+      // Same launch --agent fallback as the prompt branch's effectiveAgent — a `fleetview --agent
+      // foo` run must not silently send `!` jobs as 'build' (the CLI's runBg --exec honors it).
+      if (shell) await client.runShell(session.id, text, worktree, agent ?? initialAgent ?? 'build')
       else await client.promptAsync(session.id, text, worktree)
       // Past this point the session exists and is running. Anything that fails from here is a
       // refresh problem, not a dispatch problem — handing the prompt back would invite the user

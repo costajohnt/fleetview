@@ -45,6 +45,25 @@ import { MOUSE_OFF } from './ui/mouse.ts'
 
 const DEFAULT_SERVER = { host: '127.0.0.1', port: 4900, pid: null }
 
+// A saved password that whatever holds the port has just rejected has also been SEEN by that
+// listener (probeServer presents it on the 401 retry), so it is burned: dropped from the env, where
+// nothing in this process may present it again, and from server.json, where the next run would
+// otherwise adopt it and show it to the same squatter. Shared by ensureServer and `server
+// status`/`stop` — the two entry points that adopt the saved credential before probing a port they
+// have no other evidence about.
+export function burnSavedPassword(
+  server: ServerRef,
+  {
+    serverFile,
+    saveServerImpl = saveServer,
+    env = process.env,
+  }: { serverFile: string; saveServerImpl?: typeof saveServer; env?: NodeJS.ProcessEnv },
+) {
+  delete env.OPENCODE_SERVER_PASSWORD
+  const { password, ...bare } = server
+  saveServerImpl(serverFile, bare)
+}
+
 // TODO(types): `seen`/`snap` are wire-derived watermark maps; kept as loose string-keyed records.
 export function makePersistSeen({
   seen,
@@ -190,8 +209,9 @@ export function makeEnsureServer({
       // port. Two things follow: that listener is not the server the password was saved for, and it
       // has now seen the password. Reusing it for the replacement fleetview is about to spawn on a
       // fallback port would arm that server with a credential the rejecting listener already holds,
-      // so the saved one is burned here and `generated` below mints a fresh UUID instead.
-      delete env.OPENCODE_SERVER_PASSWORD
+      // so the saved one is burned (env and server.json both) and `generated` below mints a fresh
+      // UUID instead.
+      burnSavedPassword(server, { serverFile, saveServerImpl: saveServer, env })
       stalePassword = true
     } else if (server.password && env.OPENCODE_SERVER_PASSWORD !== server.password) {
       const userPassword = env.OPENCODE_SERVER_PASSWORD
@@ -338,6 +358,11 @@ export async function runServer(
     serverFile,
     loadServerImpl = loadServer,
     isServerHealthyImpl = isServerHealthy,
+    // Tri-state form of the same probe, defaulted off isServerHealthyImpl the way makeEnsureServer
+    // defaults its own — existing callers and tests that inject only the boolean keep working, and
+    // main() passes the real probeServer so the 401-vs-dead difference is visible in production.
+    probeServerImpl = async (s: ServerRef) => ((await isServerHealthyImpl(s)) ? 'healthy' : 'unreachable'),
+    saveServerImpl = saveServer,
     identifyServer = looksLikeOpencodeServer,
     processKill = process.kill,
     pollMs = 250,
@@ -354,12 +379,17 @@ export async function runServer(
   // through authHeader(), which reads the env var and nothing else. A password fleetview generated
   // lives in server.json and never in a fresh process's env, so without this line `server status`
   // reports fleetview's own server dead and `server stop` no-ops before reaching the kill.
-  // Putting it in the environment is not the same as showing it to the port: probeServer (which
-  // isServerHealthy runs on) asks unauthenticated first and only presents the credential to a
-  // listener that answered 401. `status`/`stop` spawn nothing, so there is no replacement server
-  // here for a rejected password to ride onto — that half is handled in makeEnsureServer.
-  if (server.password && !env.OPENCODE_SERVER_PASSWORD) env.OPENCODE_SERVER_PASSWORD = server.password
-  const healthy = await isServerHealthyImpl(server)
+  // Putting it in the environment is not the same as showing it to the port: probeServer asks
+  // unauthenticated first and only presents the credential to a listener that answered 401.
+  const adoptedSaved = Boolean(server.password) && !env.OPENCODE_SERVER_PASSWORD
+  if (adoptedSaved) env.OPENCODE_SERVER_PASSWORD = server.password
+  const state = await probeServerImpl(server)
+  // A 401 after the adoption means the port's occupant is not the server the password was saved
+  // for, and it has now seen that password — the same burn rule as makeEnsureServer's, which used
+  // to live only there, so `server status` against a port squatter leaked the credential and then
+  // left it on disk for the next run to leak again.
+  if (state === 'unauthorized' && adoptedSaved) burnSavedPassword(server, { serverFile, saveServerImpl, env })
+  const healthy = state === 'healthy'
   if (args.serverAction === 'status') {
     log(`host     ${server.host}`)
     log(`port     ${server.port}`)
@@ -570,7 +600,7 @@ export async function main() {
 
   if (args.command === 'bg') return runBg(args, { ensureServer: ensureServerForCommands, serverFile })
   // No ensureServer passed on purpose — `server` is the one command that must never spawn one.
-  if (args.command === 'server') return runServer(args, { serverFile })
+  if (args.command === 'server') return runServer(args, { serverFile, probeServerImpl: probeServer })
   if (args.command === 'ls') return listSessions(args, ensureServerForCommands, serverFile)
 
   if (args.command === 'attach') {

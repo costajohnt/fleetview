@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { mkdtempSync, writeFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readdirSync, mkdirSync, rmdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadRoster, saveRoster, hasSession, makePersistRoster } from '../src/roster-store.ts'
@@ -160,6 +160,22 @@ test('makePersistRoster resolves groupBy/collapsed disagreement last-writer-wins
   one({ groupBy: 'project', sessions: [], collapsed: ['project:/x'] })
   two({ groupBy: 'state', sessions: [], collapsed: [] })
   expect(loadRoster(file)).toEqual({ groupBy: 'state', sessions: [], collapsed: [] })
+})
+
+// A failed save must not commit the snapshot: advancing `prev` before the write meant an in-flight
+// removal was remembered as done while it never reached disk, and the next successful persist
+// merged the row back from disk — resurrecting what the user deleted.
+test('makePersistRoster retries a removal whose save failed instead of resurrecting it', () => {
+  const file = tmpFile()
+  const mounted = rosterOf(member('a'), member('b'))
+  saveRoster(file, mounted)
+  const persist = makePersistRoster({ roster: mounted, file })
+  const tmp = `${file}.${process.pid}.tmp`
+  mkdirSync(tmp) // saveRoster's tmp write lands on a directory and throws
+  expect(() => persist(rosterOf(member('a')))).toThrow() // ^x removed b, but nothing reached disk
+  rmdirSync(tmp)
+  persist(rosterOf(member('a'))) // the retry must still know b was removed here, not merge it back
+  expect(loadRoster(file).sessions.map((s) => s.id)).toEqual(['a'])
 })
 
 // A file corrupted mid-run must not take the running instance down on its next keystroke; writing

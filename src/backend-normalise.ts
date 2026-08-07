@@ -19,10 +19,6 @@ import type { OpencodeEvent } from './types.ts'
 // inventing a fourth vocabulary the store silently drops.
 export type StoreEvent = OpencodeEvent
 
-// A session row in the shape session-store.setSessions reads: id, title, and opencode's `time`
-// envelope. Nothing else in a listing survives normalisation, because nothing else is read.
-export type StoreSessionRow = { id: string; title?: string; time?: { created?: number; updated?: number } }
-
 // Rows for `setSessions`. opencode's own listings pass through untouched — this must never become a
 // place opencode's payloads get rewritten, because that is the one path where behaviour is fixed.
 export function normaliseSessions(backend: string, rows: any[] | null | undefined): any[] {
@@ -154,7 +150,14 @@ function copilotNormaliser(): (event: unknown) => StoreEvent[] {
     const e = event as any
     if (e?.type !== 'copilot.session' || typeof e.sessionId !== 'string') return []
     const sessionID: string = e.sessionId
-    const status: string = typeof e.status === 'string' ? e.status : 'working'
+    const reported: string = typeof e.status === 'string' ? e.status : 'working'
+    // Denied-tools parity with claude (M12): a copilot run refused a tool mid-run exits 0 and
+    // reports `completed`, but tools it needed were silently withheld — the honest state is the
+    // same synthetic needs-input claude renders, "a person has to attach and approve". Copilot's
+    // denials carry no tool names (events.ts only counts them), so the banner takes denialLabel's
+    // generic wording. A `failed` run keeps its failure: the error outranks the denial.
+    const deniedTools: number = typeof e.deniedTools === 'number' ? e.deniedTools : 0
+    const status: string = reported === 'completed' && deniedTools > 0 ? 'needs-input' : reported
     const lastOutput: string = typeof e.lastOutput === 'string' ? e.lastOutput : ''
     const before = last.get(sessionID)
     last.set(sessionID, { status, lastOutput })

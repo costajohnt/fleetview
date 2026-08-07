@@ -644,6 +644,54 @@ const serverHarness = ({ healthy = true, pid = 4242, identity = { ok: true, comm
   return { out, errs, codes, killed, deps }
 }
 
+// `server status`/`stop` adopt the saved password before probing, and probeServer presents it to
+// any listener that answers 401 — so a rejection means a port squatter has now seen it. The burn
+// rule used to live only in makeEnsureServer; without it here the credential stayed in server.json
+// for every later run to leak again.
+test('server status burns a saved password the port occupant rejected', async () => {
+  const saved: any[] = []
+  const env: any = {}
+  const codes: any[] = []
+  await runServer(
+    { command: 'server', serverAction: 'status' },
+    {
+      serverFile: '/tmp/s.json',
+      loadServerImpl: () => ({ host: '127.0.0.1', port: 4900, pid: 4242, password: 'saved-secret' }),
+      probeServerImpl: () => Promise.resolve('unauthorized'),
+      saveServerImpl: (_file: any, server: any) => saved.push(server),
+      log: () => {},
+      error: () => {},
+      setExitCode: (c: any) => codes.push(c),
+      env,
+    },
+  )
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined() // nothing in this process may present it again
+  expect(saved).toEqual([{ host: '127.0.0.1', port: 4900, pid: 4242 }]) // and the next run must not adopt it
+  expect(codes).toEqual([1])
+})
+
+// The counterpart: a password the user set in the environment is theirs, not an adopted one — a 401
+// under it is not fleetview's to burn, and server.json is left alone.
+test('server status does not burn a user-set password on a 401', async () => {
+  const saved: any[] = []
+  const env: any = { OPENCODE_SERVER_PASSWORD: 'users-own' }
+  await runServer(
+    { command: 'server', serverAction: 'status' },
+    {
+      serverFile: '/tmp/s.json',
+      loadServerImpl: () => ({ host: '127.0.0.1', port: 4900, pid: 4242, password: 'saved-secret' }),
+      probeServerImpl: () => Promise.resolve('unauthorized'),
+      saveServerImpl: (_file: any, server: any) => saved.push(server),
+      log: () => {},
+      error: () => {},
+      setExitCode: () => {},
+      env,
+    },
+  )
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe('users-own')
+  expect(saved).toEqual([])
+})
+
 test('server status prints host/port/pid/health and exits 0 while the server answers', async () => {
   const h = serverHarness({ healthy: true, pid: 4242 })
   await runServer({ command: 'server', serverAction: 'status' }, h.deps)
