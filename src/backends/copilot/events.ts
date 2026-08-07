@@ -15,25 +15,15 @@ export type CopilotEvent = {
   [key: string]: unknown
 }
 
+import { parseNdjsonChunk } from '../shared.ts'
+
 // JSONL, not SSE: one complete JSON object per line, no blank-line framing. A partial trailing line
 // stays buffered — a chunk boundary lands mid-object often enough that dropping it would lose
-// roughly one event per read on a busy run.
+// roughly one event per read on a busy run. Delegates to the shared NDJSON parser; `events` is the
+// field name this module's callers and tests already use.
 export function parseJsonlChunk(buffer: string): { events: CopilotEvent[]; rest: string } {
-  const events: CopilotEvent[] = []
-  const lines = buffer.split('\n')
-  const rest = lines.pop() ?? ''
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    try {
-      events.push(JSON.parse(trimmed))
-    } catch {
-      // Not a JSON line. Copilot writes plain-text errors to stderr (`error: cannot change working
-      // directory to …`), and stderr shares the log fd, so this is a real case rather than defensive
-      // padding. The run is still readable; the failure shows up as a missing `result`.
-    }
-  }
-  return { events, rest }
+  const { items, rest } = parseNdjsonChunk<CopilotEvent>(buffer)
+  return { events: items, rest }
 }
 
 // `working` until the run says otherwise. There is no `needs input` here: a headless copilot run

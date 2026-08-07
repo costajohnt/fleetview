@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, existsSync, statSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, existsSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { atomicWrite } from './backends/shared.ts'
 
 // Prefer the fleetview dir, but keep reading an existing pre-rename ~/.config/roost until the
 // user (or a future migration) moves it — a rename must not orphan anyone's roster or server.
@@ -47,16 +48,8 @@ export function loadRoster(file: string): Roster {
 }
 
 export function saveRoster(file: string, roster: Roster) {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  // mkdir's `mode` only applies when it creates the dir, so one that already exists keeps whatever
-  // perms it had. Re-tighten on every save; best-effort, since a dir we can't chmod is no reason to
-  // fail the write.
-  try {
-    chmodSync(dirname(file), 0o700)
-  } catch {}
-  const tmp = `${file}.${process.pid}.tmp` // per-pid: two fleetview instances must not share a tmp inode
-  writeFileSync(tmp, JSON.stringify(roster, null, 2), { mode: 0o600 })
-  renameSync(tmp, file)
+  // atomicWrite: mkdir/chmod/tmp/rename/0600. See backends/shared.ts for the full rationale.
+  atomicWrite(file, JSON.stringify(roster, null, 2))
 }
 
 export function hasSession(roster: Roster, worktree: string, id: string) {

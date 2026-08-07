@@ -4,13 +4,14 @@
 // 1.0.75 — docs/specs/2026-07-25-copilot-backend-wire.md records what was run and what came back.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Backend } from '../../types.ts'
 import { configDir, childEnv } from '../../registry.ts'
 import { foldEvents, initialRun, parseJsonlChunk, type CopilotStatus, type RunState } from './events.ts'
 import { listSessions, lockInfo, runningPid, sessionStateDir } from './sessions.ts'
-import { PID_MATCH_SLACK_MS, psInfo, type PidInfo } from '../ps.ts'
+import { psInfo, sameRun, type PidInfo } from '../ps.ts'
+import { reapRunLogs } from '../shared.ts'
 
 // Measured, not aspirational — each `false` is a thing the CLI cannot do, not a thing left unbuilt.
 // `questions` is the load-bearing one: a headless run that lacks a permission fails the tool with
@@ -31,12 +32,6 @@ const POLL_MS = 1500
 
 const logDirFor = () => join(configDir(), 'copilot')
 
-// How long a run's captured log is kept. The log dir gained a file per dispatch and nothing ever
-// removed them, so a heavy user accumulated every session they had ever dispatched, forever. Same
-// window and same reasoning as the claude backend: copilot's own transcript under
-// ~/.copilot/session-state — which fleetview does not own — outlives it anyway, and events() falls
-// back to it for an owned session whose capture is gone.
-const KEEP_RUNS_MS = 30 * 24 * 60 * 60 * 1000
 
 // Non-interactive mode's fixed argv. `--allow-all-tools` is what the CLI's own help calls "required
 // for non-interactive mode", and without it a dispatched session can read and answer but not act —
@@ -89,25 +84,7 @@ export function createCopilotBackend({
   // than given a timer: the directory only grows when something is dispatched, so that is when it is
   // worth a look. Best effort — a log that cannot be removed is not a reason to fail the dispatch.
   function reap() {
-    let names: string[]
-    try {
-      names = readdirSync(logDir)
-    } catch {
-      return
-    }
-    const cutoff = now() - KEEP_RUNS_MS
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue
-      const file = join(logDir, name)
-      try {
-        // mtime, not the dispatch time: a session resumed last week is live work whatever day its
-        // first prompt was sent, and deleting its capture would blank the row it still feeds.
-        if (statSync(file).mtimeMs >= cutoff) continue
-      } catch {
-        continue
-      }
-      rmSync(file, { force: true })
-    }
+    reapRunLogs(logDir, now())
   }
 
   // Both dispatch and prompt are the same spawn with a different session flag — copilot has no
@@ -348,15 +325,9 @@ export function createCopilotBackend({
       const info = psImpl(lock.pid)
       if (info === null) return { aborted: false } // the lock outlived its process
       if (info !== 'unavailable') {
-        // An argv naming this session is the strongest identity and needs no clock — on Linux a
-        // forward wall-clock step shifts every procps lstart while the lock mtime stays put, and
-        // the time check alone would refuse a live run. Failing that: one-sided on purpose — a
-        // recycled pid can only have started *after* the lock was written (verified live: lock
-        // mtime lands ~3s after the holder's lstart), while a lock copilot re-touches later would
-        // push mtime past lstart, which must not strand a live run.
-        const looksLikeCopilot = info.command.includes('copilot') || info.command.startsWith('node')
-        const sameRun = info.command.includes(id) || (looksLikeCopilot && info.startedAt - lock.mtimeMs <= PID_MATCH_SLACK_MS)
-        if (!sameRun) return { aborted: false }
+        if (!sameRun(info, id, lock.mtimeMs, (cmd) => cmd.includes('copilot') || cmd.startsWith('node'))) {
+          return { aborted: false }
+        }
       }
       try {
         killImpl(lock.pid, 'SIGTERM')

@@ -5,14 +5,15 @@
 // verified against claude 2.1.220.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
 import { configDir, childEnv } from '../../registry.ts'
 import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
-import { PID_MATCH_SLACK_MS, psInfo, type PidInfo } from '../ps.ts'
+import { psInfo, sameRun, type PidInfo } from '../ps.ts'
+import { atomicWrite, reapRunLogs } from '../shared.ts'
 
 // Every flag is a "fleetview can't", stated rather than inherited. `fork` is the one worth naming:
 // `claude --resume --fork-session` does exactly what the flag means, but the Backend contract has no
@@ -29,12 +30,6 @@ const CAPABILITIES = {
 // second of the truth.
 const POLL_MS = 500
 
-// How long a finished run's captured stream is kept. The run dir gains one log and one meta per
-// dispatch and nothing ever removed them, so a heavy user's events() poll ended up doing a readdir
-// over every session they had ever dispatched, twice a second, forever. Thirty days is long enough
-// that the log is still there for anything the roster is plausibly still showing, and the transcript
-// under ~/.claude/projects — which fleetview does not own and does not touch — outlives it anyway.
-const KEEP_RUNS_MS = 30 * 24 * 60 * 60 * 1000
 
 // What fleetview records for a session it dispatched, next to the log. The pid is the only handle
 // abort() has, and the directory is what lets events() find this run's log from a directory alone.
@@ -89,27 +84,13 @@ export function createClaudeBackend({
   // given its own timer: there is no long-lived process here to schedule against, and the run dir
   // only grows when something is dispatched, so that is exactly when it is worth a look. Best
   // effort throughout — a run that cannot be removed is not a reason to fail the dispatch.
+  // reapRunLogs removes the .jsonl; the callback cleans the paired .json meta and the in-memory
+  // cache entry so a resumed session's old pid is never signalled again.
   function reap() {
-    let names: string[]
-    try {
-      names = readdirSync(runDir)
-    } catch {
-      return
-    }
-    const cutoff = now() - KEEP_RUNS_MS
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue // pair is keyed off the log; the meta goes with it
-      const id = name.slice(0, -'.jsonl'.length)
-      try {
-        // mtime, not meta.startedAt: a session resumed last week is live work whatever the day its
-        // first prompt was sent, and deleting its log would blank the row it still feeds.
-        if (statSync(logPath(id)).mtimeMs >= cutoff) continue
-      } catch {
-        continue
-      }
-      for (const file of [logPath(id), metaPath(id)]) rmSync(file, { force: true })
+    reapRunLogs(runDir, now(), (id) => {
+      rmSync(metaPath(id), { force: true })
       metaCache.delete(id)
-    }
+    })
   }
 
   // Both dispatch and prompt spawn the same way: detached, stdout and stderr onto one appended log,
@@ -159,12 +140,9 @@ export function createClaudeBackend({
       // already closed, or never valid
     }
     const meta: RunMeta = { id, directory, pid: child.pid ?? null, startedAt: now() }
-    // tmp+rename, not a plain write: readMeta runs on every poll, and a concurrent read landing
-    // mid-write got torn JSON → null → the session looked never-dispatched. Rename is atomic, so a
-    // reader sees either the old meta or the new one, never half. (Mirrors registry.saveServer.)
-    const tmp = `${metaPath(id)}.${process.pid}.tmp`
-    writeFileSync(tmp, JSON.stringify(meta, null, 2), { mode: 0o600 })
-    renameSync(tmp, metaPath(id))
+    // atomicWrite: tmp+rename so readMeta (which runs on every poll) never sees torn JSON.
+    // Mirrors registry.saveServer and the three store saves.
+    atomicWrite(metaPath(id), JSON.stringify(meta, null, 2))
     // A resume rewrites the meta with the new child's pid, so the cache entry from the first run
     // must go with it — abort() reading the old pid would signal a dead group and leave the live
     // resume running.
@@ -351,14 +329,9 @@ export function createClaudeBackend({
       const info = psImpl(meta.pid)
       if (info === null) return { aborted: false } // the run already finished
       if (info !== 'unavailable') {
-        // The time check is one-sided on purpose: a recycled pid can only have started *after* the
-        // meta was written, and a clock stepped backwards must not strand a live run unabortable.
-        const sameRun =
-          info.command.includes(id) ||
-          ((info.command.includes('claude') || info.command.startsWith('node')) &&
-            Number.isFinite(meta.startedAt) &&
-            info.startedAt - meta.startedAt <= PID_MATCH_SLACK_MS)
-        if (!sameRun) return { aborted: false }
+        if (!sameRun(info, id, meta.startedAt, (cmd) => cmd.includes('claude') || cmd.startsWith('node'))) {
+          return { aborted: false }
+        }
       }
       try {
         killImpl(-meta.pid, 'SIGTERM')

@@ -54,3 +54,26 @@ export function psInfo(pid: number): PidInfo {
 // milliseconds and lstart only resolves to the second — the slack is for a clock stepped between
 // dispatch and abort, not for either of those. A recycled pid is off by hours or days.
 export const PID_MATCH_SLACK_MS = 60 * 1000
+
+// Whether a live process still looks like the run whose pid was recorded. Both process-backed
+// backends persist a pid past the life of the run (claude's meta for up to 30 days, copilot's lock
+// across a crash), and the OS may have reused that pid for an unrelated process.
+//
+// The id-in-command check is the strongest signal and needs no clock: every run is spawned with
+// the session id in its argv. Failing that, the process must look like the right binary and have
+// started within PID_MATCH_SLACK_MS of when the run was recorded — a recycled pid is off by hours
+// or days. `recordedAt` is the meta's startedAt or the lock's mtimeMs; `looksLike` is the
+// backend-specific command predicate (e.g. `cmd => cmd.includes('claude') || cmd.startsWith('node')`).
+//
+// One-sided check on purpose: a recycled pid can only have started *after* the meta was written, so
+// `info.startedAt - recordedAt` is positive for a genuine match and large-and-positive for a
+// recycled one. A clock stepped backwards must not strand a live run unabortable.
+export function sameRun(
+  info: Exclude<PidInfo, 'unavailable' | null>,
+  id: string,
+  recordedAt: number,
+  looksLike: (command: string) => boolean,
+): boolean {
+  if (info.command.includes(id)) return true
+  return looksLike(info.command) && Number.isFinite(recordedAt) && info.startedAt - recordedAt <= PID_MATCH_SLACK_MS
+}

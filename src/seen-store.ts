@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, renameSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { atomicWrite } from './backends/shared.ts'
 
 // Same legacy fallback as the config stores: an existing pre-rename state dir keeps working.
 const baseDir = () => {
@@ -66,13 +67,6 @@ export function setAside(file: string) {
 }
 
 export function saveSeen(file: string, map: SeenMap) {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  // mkdir's `mode` only applies when it creates the dir (see saveRoster) — re-tighten an existing
-  // one on every save, best-effort.
-  try {
-    chmodSync(dirname(file), 0o700)
-  } catch {}
-  const tmp = `${file}.${process.pid}.tmp` // per-pid: two fleetview instances must not share a tmp inode
-  writeFileSync(tmp, JSON.stringify(map, null, 2), { mode: 0o600 })
-  renameSync(tmp, file)
+  // atomicWrite: mkdir/chmod/tmp/rename/0600. See backends/shared.ts for the full rationale.
+  atomicWrite(file, JSON.stringify(map, null, 2))
 }

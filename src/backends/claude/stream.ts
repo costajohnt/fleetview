@@ -41,24 +41,15 @@ export const emptyRunState = (): ClaudeRunState => ({
 // module inventing a result event.
 export const emptyTranscriptState = (): ClaudeRunState => ({ ...emptyRunState(), status: 'idle' })
 
+import { parseNdjsonChunk } from '../shared.ts'
+
 // NDJSON, so the split is by line rather than by SSE's blank-line frame — but the same
 // buffer-the-tail contract as parseSseChunk, because a tailed file is read mid-line just as often as
-// a socket is.
+// a socket is. Delegates to the shared NDJSON parser; `events` is the field name this module's
+// callers and tests already use.
 export function parseStreamChunk(buffer: string): { events: unknown[]; rest: string } {
-  const events: unknown[] = []
-  const lines = buffer.split('\n')
-  const rest = lines.pop() ?? '' // partial line stays buffered
-  for (const line of lines) {
-    if (!line.trim()) continue
-    try {
-      events.push(JSON.parse(line))
-    } catch {
-      // Not JSON. The log is the child's stdout *and* stderr on one fd, so a spawn failure or a
-      // node warning lands here as plain text; keeping it in the file is worth more than refusing
-      // to parse the rest of the run.
-    }
-  }
-  return { events, rest }
+  const { items, rest } = parseNdjsonChunk<unknown>(buffer)
+  return { events: items, rest }
 }
 
 const textOf = (event: any): string | undefined => {
