@@ -101,7 +101,11 @@ const pressUntil = async (stdin: any, key: string, fn: () => any, timeoutMs = 30
   }
 }
 
-const waitFor = async (fn: () => any, timeoutMs = 3000, stepMs = 10) => {
+// 15s default, not 3s: the ceiling only bounds failure-detection latency — the condition is polled
+// and a passing wait returns as soon as it holds. 3s was repeatedly not enough on a loaded macOS CI
+// runner with 40 test files competing for the event loop (the reseed tests carried per-call 15000
+// overrides for exactly this; the default then flaked on their EARLIER waits instead).
+const waitFor = async (fn: () => any, timeoutMs = 15000, stepMs = 10) => {
   const start = Date.now()
   for (;;) {
     if (fn()) return
