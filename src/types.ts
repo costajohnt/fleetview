@@ -47,7 +47,6 @@ export type OpencodeSessionStatus =
 // reads after a `type === 'text'` check without a catch-all member poisoning the
 // narrowing of the other members.
 export type Part = { type: string; text?: string; messageID?: string; [key: string]: unknown }
-export type TextPart = Part & { type: 'text'; text: string }
 
 // GET /session/:id/message item — the {info, parts} envelope peek renders
 // (schemas: Message + Part). fleetview reads info.role and text parts' .text.
@@ -178,9 +177,9 @@ export type EventSubscription = {
 // row it is acting on, and a process-backed backend has no server to fall back on — so the one
 // place the default could be used is the one place it would be wrong.
 //
-// One backend adapter = one agent CLI fleetview can drive. opencode is the only implementation
-// today (src/backends/opencode); the contract exists so the second one lands as a file rather than
-// as branches through the roster.
+// One backend adapter = one agent CLI fleetview can drive. Three implementations exist today
+// (src/backends/opencode, src/backends/claude, src/backends/copilot); each lands as a file rather
+// than as branches through the roster.
 //
 // Deliberately narrow: only what every backend family can plausibly do. opencode's extra surface
 // (worktrees, permissions, shell, providers, agent/command lists) stays on OpencodeClient, because

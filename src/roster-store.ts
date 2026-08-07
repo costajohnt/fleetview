@@ -130,10 +130,13 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
       seen.add(k)
       sessions.push(m)
     }
-    prev = snap
     // groupBy and collapsed are one terminal's view state, not per-member facts, so there is
     // nothing to merge: last writer wins, exactly as before this merge existed.
     saveRoster(file, { ...snap, sessions })
+    // Only after the write lands: committing `prev = snap` before a failed save would remember an
+    // in-flight removal as done while it never reached disk, and the next successful persist
+    // would merge the row back from disk — resurrecting what the user deleted.
+    prev = snap
     lastStamp = stamp()
   }
   persist.reload = () => {

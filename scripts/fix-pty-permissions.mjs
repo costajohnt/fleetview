@@ -33,9 +33,11 @@ if (prebuilds && existsSync(prebuilds)) {
     // about the path and then re-resolved it, so a symlink swapped in between the two calls got its
     // TARGET chmodded. The open refuses a symlink outright (ELOOP), and fchmod applies to the exact
     // file the open returned — there is no second path resolution to race.
+    // O_NONBLOCK so a planted FIFO at this path cannot hang the install waiting for a writer —
+    // it opens immediately, fstat says not-a-file, and the loop moves on. No effect on regular files.
     let fd
     try {
-      fd = openSync(helper, constants.O_RDONLY | constants.O_NOFOLLOW)
+      fd = openSync(helper, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     } catch (error) {
       // Absent on this platform build, or a planted symlink — neither is a file to fix.
       if (error.code === 'ENOENT' || error.code === 'ELOOP' || error.code === 'ENOTDIR') continue

@@ -23,8 +23,6 @@ export type ClaudeRunState = {
   denials: unknown[]
   // Set only on a failed run. `result.errors` when the CLI gave one, else the final text.
   error: string | undefined
-  costUsd: number | undefined
-  durationMs: number | undefined
 }
 
 export const emptyRunState = (): ClaudeRunState => ({
@@ -33,8 +31,6 @@ export const emptyRunState = (): ClaudeRunState => ({
   sessionId: undefined,
   denials: [],
   error: undefined,
-  costUsd: undefined,
-  durationMs: undefined,
 })
 
 // The seed for a session read out of a Claude Code transcript. Same reducer, different starting
@@ -112,8 +108,6 @@ export function applyEvent(state: ClaudeRunState, event: unknown): ClaudeRunStat
       sessionId: typeof e.session_id === 'string' ? e.session_id : state.sessionId,
       denials,
       error: failed ? (errors.join('; ') || result || 'claude run failed') : undefined,
-      costUsd: typeof e.total_cost_usd === 'number' ? e.total_cost_usd : state.costUsd,
-      durationMs: typeof e.duration_ms === 'number' ? e.duration_ms : state.durationMs,
     }
   }
   return state

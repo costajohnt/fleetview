@@ -5,7 +5,7 @@ import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
-import { createOpencodeBackend } from './backends/opencode/index.ts'
+import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
 import { createNormaliser, normaliseSessions } from './backend-normalise.ts'
 import { hasSession, type Roster as RosterType } from './roster-store.ts'
@@ -104,11 +104,6 @@ export function foldCompleted(groups: any[], maxRows: number, sel?: any) {
     g === completed ? { ...g, sessions: kept, hidden: g.sessions.length - kept.length } : g,
   )
 }
-
-// The parity baseline, used only when a row's backend cannot be resolved at all (see
-// capabilitiesOf). Deliberately not imported from the opencode adapter: this is a fallback for the
-// case where that adapter is absent.
-const OPENCODE_CAPABILITIES = { fork: true, rename: true, delete: true, questions: true }
 
 // Pure roster-mutation helpers mirroring roster-store.ts's addSession/removeSession semantics —
 // duplicated rather than imported because those do file IO directly; App only persists via the
@@ -497,6 +492,12 @@ export function App({
     streamProjectRef.current = (w: any) => seedAndStream(w)
 
     const seedAndStream = async (worktree: any) => {
+      // M14: idempotency lives here, not at callers — the dispatch path and a poll tick can both
+      // reach this for the same worktree (the poll awaits gh calls before computing newOnes), and
+      // a second run's `conns.current.set` would orphan the first connection's stop() so it
+      // reconnects and double-delivers forever. knownWorktrees covers the in-flight window (it is
+      // added below and deleted on failure, so retries still work); conns covers established ones.
+      if (conns.current.has(worktree) || knownWorktrees.current.has(worktree)) return
       knownWorktrees.current.add(worktree)
       try {
         const sessions = await client.listSessions(worktree)
@@ -1124,7 +1125,13 @@ export function App({
   const updateRoster = (updater: (prev: RosterState) => RosterState) => {
     const updated = updater(rosterRef.current)
     rosterRef.current = updated
-    persistRoster?.(updated)
+    // A failed save must not throw through the Ink input handlers that call this (it would crash
+    // the TUI over a disk hiccup). The in-memory update stands; persist retries on the next change.
+    try {
+      persistRoster?.(updated)
+    } catch {
+      flash("couldn't save roster — will retry on next change")
+    }
     setRosterState(updated)
   }
 
@@ -1399,7 +1406,9 @@ export function App({
       updateRoster((prev: any) =>
         withMember(prev, worktree, session.id, { ...(shell ? { shell: true } : {}), prompt: text.slice(0, 2000) }),
       )
-      if (shell) await client.runShell(session.id, text, worktree, agent ?? 'build')
+      // Same launch --agent fallback as the prompt branch's effectiveAgent — a `fleetview --agent
+      // foo` run must not silently send `!` jobs as 'build' (the CLI's runBg --exec honors it).
+      if (shell) await client.runShell(session.id, text, worktree, agent ?? initialAgent ?? 'build')
       else await client.promptAsync(session.id, text, worktree)
       // Past this point the session exists and is running. Anything that fails from here is a
       // refresh problem, not a dispatch problem — handing the prompt back would invite the user

@@ -212,6 +212,44 @@ test('a reply typed while a queued send is in flight is not clobbered by that se
   expect(lastFrame()).toContain('saved — will send when it is reachable: second')
 })
 
+// M15: sendReply's success path deletes the key, so a failed flush could not tell "nothing
+// happened" from "the user already sent a newer reply directly" — it re-queued the stale body,
+// which the next tick delivered AFTER the newer instruction. The per-key epoch a successful send
+// bumps makes the late-failing flush drop it instead.
+test('a flush that fails after a newer reply was sent directly does not resurrect the stale one', async () => {
+  const deps = makeDeps()
+  const inFlight: any = { reject: null }
+  let staleSends = 0
+  deps.client.promptAsync = vi.fn((_id: any, body: any) => {
+    if (body === 'stale') {
+      staleSends += 1
+      if (staleSends === 1) return Promise.reject(new Error('down')) // the peek reply fails, queueing it
+      return new Promise((_resolve, reject) => {
+        inFlight.reject = reject // the flush's retry hangs — the window the newer reply lands in
+      })
+    }
+    return Promise.resolve({}) // 'newer' goes straight through
+  }) as any
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction: vi.fn(), projectPollMs: 40 }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write(SPACE)
+  await waitFor(() => lastFrame().includes('reply · ! runs a shell command'))
+  stdin.write('stale')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => staleSends === 2) // queued, then picked up by the flush, now in flight
+  stdin.write('newer')
+  await tick()
+  stdin.write('\r') // delivered directly while the flush send is still hanging
+  await waitFor(() => deps.client.promptAsync.mock.calls.some(([, body]: any) => body === 'newer'))
+  const polls = () => deps.client.listProjects.mock.calls.length
+  const mark = polls()
+  inFlight.reject(new Error('down')) // the superseded flush finally fails
+  await waitFor(() => polls() >= mark + 3) // enough flush ticks for a re-queued body to have gone out
+  expect(staleSends).toBe(2) // never re-queued, never delivered after 'newer'
+  expect(lastFrame()).not.toContain('saved — will send')
+})
+
 // --- #61: a typed reply must not follow the arrows to another session ---
 
 const DOWN = '[B'

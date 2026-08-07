@@ -9,8 +9,9 @@ import { assertSessionId } from '../session-id.ts'
 
 // opencode is the server-backed family, so every flag is true — which is exactly why the flags could
 // not be inferred from it. It is the parity baseline the process-backed backends are measured
-// against, not the default.
-const CAPABILITIES = {
+// against, not the default. Exported because it doubles as the fallback capability set where a
+// row's backend cannot be resolved (app.ts, use-peek.ts).
+export const OPENCODE_CAPABILITIES = {
   fork: true, // POST /session/:id/fork
   rename: true, // PATCH /session/:id
   delete: true, // DELETE /session/:id
@@ -32,7 +33,7 @@ export function createOpencodeBackend({
 }): Backend {
   return {
     name: 'opencode',
-    capabilities: CAPABILITIES,
+    capabilities: OPENCODE_CAPABILITIES,
     listSessions: (directory) => client.listSessions(directory),
     async dispatch({ prompt, directory, agent, model }) {
       const session = await client.createSession({ agent, model }, directory)

@@ -5,7 +5,7 @@
 // verified against claude 2.1.220.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
@@ -81,10 +81,6 @@ export function createClaudeBackend({
     }
   }
 
-  // 0o700/0o600 like every other file fleetview writes: the log holds the prompt, the paths and
-  // whatever the session printed, so it must not be world-readable (openPrivateAppend re-tightens
-  // a pre-existing dir and file, and refuses a symlinked log).
-
   // Drop runs whose last activity is older than the retention window. Hung off dispatch rather than
   // given its own timer: there is no long-lived process here to schedule against, and the run dir
   // only grows when something is dispatched, so that is exactly when it is worth a look. Best
@@ -116,6 +112,9 @@ export function createClaudeBackend({
   // and no handle kept. `claude` is not a daemon — it runs, writes and exits — so nothing waits on
   // it, and the log is the only record that it happened.
   function run(argv: string[], id: string, directory: string) {
+    // 0o700/0o600 like every other file fleetview writes: the log holds the prompt, the paths and
+    // whatever the session printed, so it must not be world-readable (openPrivateAppend re-tightens
+    // a pre-existing dir and file, and refuses a symlinked log).
     const fd = openPrivateAppend(runDir, logPath(id))
     // env without the opencode server password, and without this process's Claude Code session
     // markers: a dispatched agent runs attacker-influenced prompts, and that credential would hand
