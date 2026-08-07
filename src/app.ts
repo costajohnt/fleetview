@@ -155,7 +155,9 @@ type AppProps = {
   seen?: any
   persistSeen?: (...args: any[]) => void
   roster?: RosterState
-  persistRoster?: (roster: RosterState) => void
+  // `reload` is optional so any caller can pass a bare callback; only makePersistRoster's carries
+  // it, and without it the #44 external-member sync is simply off.
+  persistRoster?: ((roster: RosterState) => void) & { reload?: () => RosterState | null }
   initialModel?: any
   initialAgent?: any
   backends?: Record<string, any>
@@ -329,6 +331,10 @@ export function App({
   const rerender = useCallback(() => force((n) => n + 1), [])
   const seededProjectKeys = useRef(new Set<string>()) // worktrees that successfully listSessions'd this process lifetime
   const knownWorktrees = useRef(new Set<string>()) // worktrees already handed to seedAndStream (new-vs-repeat gate for repoll)
+  // #43: set once a `client.listProjects()` round has completed successfully. It is the evidence
+  // the second ghost arm below needs — an unreachable server never completes one, so F1's offline
+  // protection survives untouched.
+  const projectsListed = useRef(false)
   const knownSandboxes = useRef(new Map<string, string>()) // every worktree ever listed in a project's `sandboxes` -> its repo (#22)
   const conns = useRef(new Map<string, any>()) // worktree -> stream handle, for unmount cleanup
   // onEvent below is captured once by the mount-only discovery effect, so it can't read fresh
@@ -644,16 +650,46 @@ export function App({
       setPullRequests({ byBranch: merged, branches, reasons })
     }
 
+    // #44: a `fleetview bg` dispatch from another terminal appends to roster.json and the running
+    // TUI never noticed — it read the file once at mount and holds membership in React state, so
+    // the session streamed fine in browse while its member row stayed invisible until restart.
+    // Re-read on the tick that already polls projects and union in what state lacks.
+    //
+    // Additions only. Removals are deliberately NOT synced: two instances would fight over deletes,
+    // and one instance's ^x would silently eat a membership the other is still using.
+    //
+    // Nothing already in state is ever rewritten from disk — a pin, rank, prompt or collapse this
+    // instance just made stays exactly as it is, and groupBy/collapsed are never read at all. And
+    // nothing is persisted here: these members are on disk already, and writing back would hand
+    // makePersistRoster's `prev` a foreign member to later mistake for one of its own.
+    const syncExternalMembers = () => {
+      const disk = persistRoster?.reload?.() // null when unchanged, unreadable, or not wired (tests)
+      if (!disk) return
+      const have = new Set(rosterRef.current.sessions.map((m: any) => `${m.worktree}:${m.id}`))
+      const added = disk.sessions.filter((m: any) => !have.has(`${m.worktree}:${m.id}`))
+      if (added.length === 0) return
+      const next = { ...rosterRef.current, sessions: [...rosterRef.current.sessions, ...added] }
+      // The ref leads, as it does everywhere else in this effect (F1): updateRoster writes through
+      // rosterRef.current, and a call site that fires before the state flush must see these members.
+      rosterRef.current = next
+      setRosterState(next)
+    }
+
     const refreshProjects = async () => {
       if (polling) return
       polling = true
       flushSavedReplies.current() // anything queued by a failed peek reply gets another go
+      // Before listProjects, not after: #43 ghosts a member whose worktree is in no project record,
+      // and the listing is only fair evidence if it ran AFTER the member became known. Reading the
+      // roster first makes that ordering unconditional.
+      syncExternalMembers()
       try {
         // Sandboxes included: a worktree is not reliably published as a project row of its own, and
         // a session fleetview never streams is a row that never updates.
         const fresh = allProjectDirectories(await client.listProjects())
         if (cancelled) return
         setServerDown(false)
+        projectsListed.current = true // #43: a completed round is the ghost arm's only evidence
         setProjects((prev) => mergeProjects(prev, fresh))
         // Pull requests refresh on the tick that already re-lists projects: no second timer and no
         // TTL bookkeeping. A poll is unavoidable rather than a shortcut — the label's colour encodes
@@ -798,8 +834,26 @@ export function App({
   // (seededProjectKeys) and its project is not currently flagged offline. A project that never
   // seeded, or whose stream is down, is merely unreachable — its members must survive untouched,
   // or a dropped connection would start eating the roster.
+  //
+  // #43: that strictness left a residual gap. A per-session worktree that has been DELETED is in no
+  // project record at all after a restart, so seedAndStream is never called for it, so it is never
+  // seeded — and its members qualified under neither arm. They rendered nothing in any view, could
+  // not be selected, could not be removed, and survived every restart. So qualify the complementary
+  // case too: a member whose worktree appears in no project record after a successful listProjects
+  // round is exactly as gone as one whose seeded listing lacks the session. `projects` is the merged
+  // list and mergeProjects never drops, so a directory listed once this run stays listed — absence
+  // here means absence for the whole run, not one flaky poll.
+  //
+  // `knownWorktrees` closes the just-dispatched window: a worktree minted by `createWorktree` is
+  // handed to seedAndStream (streamProjectRef) BEFORE createSession, so it is in this set before the
+  // membership it is about to gain exists — a session dispatched seconds ago can never satisfy this
+  // arm, however far off the next projects poll is. An externally-added member (#44) is unioned in
+  // *before* that tick's listProjects, so the listing that judges it always ran after it was known.
+  const projectDirs = new Set(projects.map((p: any) => p.worktree))
+  const vanishedProject = (worktree: string) =>
+    projectsListed.current && !projectDirs.has(worktree) && !knownWorktrees.current.has(worktree)
   const ghostMembers = rosterState.sessions
-    .filter((m: any) => seededProjectKeys.current.has(m.worktree) && !offlineProjects.has(m.worktree))
+    .filter((m: any) => !offlineProjects.has(m.worktree) && (seededProjectKeys.current.has(m.worktree) || vanishedProject(m.worktree)))
     .filter((m: any) => !(byProjectSessions.get(m.worktree) ?? []).some((s: any) => s.id === m.id))
     .map((m: any) => ({
       id: m.id,

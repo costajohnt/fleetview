@@ -1,7 +1,11 @@
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
 import { render as inkRender } from 'ink-testing-library'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { App } from '../src/app.ts'
+import { makePersistRoster } from '../src/roster-store.ts'
 import { headerRows } from '../src/ui/header.ts'
 
 // Every render is torn down after its test. Without this, each instance keeps its timers alive —
@@ -3390,6 +3394,89 @@ test('#34: a member of an OFFLINE project is not treated as a ghost', async () =
   expect(deps.persistRoster).not.toHaveBeenCalled()
 })
 
+// --- #43: the residual half of #34 — the worktree itself is gone, not just the session ---
+
+// #34's qualification requires the member's worktree to have listed successfully this run, which a
+// DELETED per-session worktree never does: it is in no project record, so seedAndStream is never
+// called for it. Its members rendered nothing anywhere, could not be selected, could not be
+// removed, and survived every restart (there was a live one in John's own roster.json).
+test('#43: a member whose worktree is in no project record renders a ghost row and ^x drops it', async () => {
+  const deps = makeDeps()
+  deps.roster = {
+    groupBy: 'state',
+    sessions: [{ worktree: '/wt/alpha/deleted', id: 'v1', addedAt: 1, prompt: 'dispatch into a deleted worktree' }],
+  }
+  // listProjects only ever answers with /x/alpha, so /wt/alpha/deleted is never seeded at all.
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('∙ dispatch into a deleted worktree'))
+  expect(deps.client.listSessions).not.toHaveBeenCalledWith('/wt/alpha/deleted')
+  // The only row on screen, so it is the selection; one press, because there is nothing behind it
+  // to confirm a delete against.
+  stdin.write('\x18')
+  await waitFor(() => !lastFrame().includes('dispatch into a deleted worktree'))
+  expect(deps.persistRoster).toHaveBeenCalledWith(expect.objectContaining({ sessions: [] }))
+  expect(deps.client.deleteSession).not.toHaveBeenCalled()
+})
+
+// The new arm must not weaken F1 either: offline is still "unreachable", never "gone".
+test('#43: a member of an OFFLINE project is not ghosted by the no-project-record arm', async () => {
+  const deps = makeDeps()
+  deps.roster = {
+    groupBy: 'state',
+    sessions: [{ worktree: '/wt/alpha/deleted', id: 'v1', addedAt: 1, prompt: 'dispatch into a deleted worktree' }],
+  }
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('dispatch into a deleted worktree'))
+  // onOffline is keyed by directory, so a flag can land on this worktree however it was reached.
+  // Once it does, the member is merely unreachable again and the exit is withdrawn rather than
+  // offering to delete a membership that is coming back.
+  deps.connectEventsImpl.mock.calls[0][1].onOffline('/wt/alpha/deleted')
+  await waitFor(() => !lastFrame().includes('dispatch into a deleted worktree'))
+  stdin.write('\x18')
+  await tick()
+  expect(deps.persistRoster).not.toHaveBeenCalled()
+})
+
+// The projects poll is the evidence, so with no successful round there is no ghost: a server that
+// never answers must leave every membership exactly where it is.
+test('#43: no member is ghosted before a successful listProjects round', async () => {
+  const deps = makeDeps()
+  deps.roster = {
+    groupBy: 'state',
+    sessions: [{ worktree: '/wt/alpha/deleted', id: 'v1', addedAt: 1, prompt: 'dispatch into a deleted worktree' }],
+  }
+  deps.client.listProjects = vi.fn(() => Promise.reject(new Error('down')))
+  const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  await tick()
+  expect(lastFrame()).not.toContain('dispatch into a deleted worktree')
+})
+
+// The just-dispatched window: a worktree minted moments ago is legitimately in no project record
+// yet, and ghosting its brand-new member would be a far worse bug than the one being fixed. The
+// guard is that the dispatch hands the worktree to seedAndStream (knownWorktrees) before the
+// session — and so the membership — exists at all.
+test('#43: a session dispatched into a not-yet-published worktree is never ghosted', async () => {
+  const { deps, wt } = isolatingDeps()
+  // The repository alone: the worktree createWorktree just minted is not a project row yet, which
+  // is exactly the state every dispatch leaves behind for up to one poll interval.
+  deps.client.listProjects = vi.fn(() => Promise.resolve([{ ...project, sandboxes: [] }]))
+  deps.projectPollMs = 30 // several polls run inside this test, all of them without the worktree
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => deps.client.promptAsync.mock.calls.length > 0)
+  expect(deps.client.createSession).toHaveBeenCalledWith(expect.anything(), wt)
+  await waitFor(() => lastFrame().includes('in the worktree'))
+  await new Promise((r) => setTimeout(r, 100)) // let a few poll ticks go by without it
+  // A live row, not the `∙` glyph the ghost synthesises, and not the stored prompt standing in for
+  // a title — the session behind it is real and streaming.
+  expect(lastFrame()).toContain('in the worktree')
+  expect(lastFrame()).not.toContain('∙ fix the thing')
+})
+
 // --- #35: space on a group header ---
 
 // The peek branch requires a selected session; on a header there is none, so the space used to
@@ -3586,3 +3673,67 @@ test('#47: Escape inside the post-resume quiet window does not clear the just-ed
   // And after the window a typed Escape clears it, so the guard is a delay and not a new dead key.
   await pressUntil(stdin, '\x1B', cleared)
 }, 30000)
+
+// --- #44: a `fleetview bg` dispatch from another terminal must reach an already-running TUI ---
+
+// The TUI reads roster.json once at mount and holds membership in React state from then on, so a
+// bg append was invisible until restart — the session streamed fine in browse, the member row just
+// never appeared. These drive the real makePersistRoster over a real file, because `reload` and the
+// merge-on-write are two halves of the same contract.
+const rosterFileDeps = (sessions: any[]) => {
+  const deps = makeDeps()
+  const dir = mkdtempSync(join(tmpdir(), 'fleetview-roster-'))
+  const file = join(dir, 'roster.json')
+  const initial = { groupBy: 'state' as const, sessions, collapsed: [] }
+  writeFileSync(file, JSON.stringify(initial, null, 2))
+  deps.roster = initial
+  deps.persistRoster = makePersistRoster({ roster: initial, file })
+  deps.projectPollMs = 30 // the sync rides the projects poll; this test should not wait 30s for it
+  deps.client.listSessions = vi.fn(() =>
+    Promise.resolve([
+      { id: 's1', title: 'fix tests', time: { updated: Date.now() } },
+      { id: 'bg1', title: 'bg dispatch', time: { updated: Date.now() } },
+    ]),
+  )
+  const writeExternally = (next: any[]) =>
+    writeFileSync(file, JSON.stringify({ ...initial, sessions: next }, null, 2))
+  return { deps, file, writeExternally }
+}
+
+test('#44: a member appended to roster.json externally appears on the next poll tick', async () => {
+  const { deps, writeExternally } = rosterFileDeps([{ worktree: '/x/alpha', id: 's1', addedAt: 1, pinned: true, rank: 3 }])
+  const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  // bg1's session is in the store and streaming; it is only the membership that is missing.
+  expect(lastFrame()).not.toContain('bg dispatch')
+  writeExternally([
+    { worktree: '/x/alpha', id: 's1', addedAt: 1, pinned: true, rank: 3 },
+    { worktree: '/x/alpha', id: 'bg1', addedAt: 2, prompt: 'from another terminal' },
+  ])
+  await waitFor(() => lastFrame().includes('bg dispatch'))
+  // And the union did not overwrite what this instance holds: s1 is still pinned (its own group,
+  // above the status sections), which the on-disk copy would have had to be re-read to lose.
+  const lines = lastFrame().split('\n')
+  expect(lines.findIndex((l) => l.includes('fix tests'))).toBeGreaterThan(
+    lines.findIndex((l) => l.trim() === 'pinned'),
+  )
+})
+
+// The other half, and the reason removals are not synced: two instances would fight over deletes,
+// and one terminal's ^x would silently eat a membership the other is still using.
+test('#44: a member REMOVED from roster.json externally stays in the running TUI', async () => {
+  const { deps, writeExternally } = rosterFileDeps([{ worktree: '/x/alpha', id: 's1', addedAt: 1 }])
+  const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  // First prove the sync is live at all, so the assertion below cannot pass by doing nothing.
+  writeExternally([
+    { worktree: '/x/alpha', id: 's1', addedAt: 1 },
+    { worktree: '/x/alpha', id: 'bg1', addedAt: 2 },
+  ])
+  await waitFor(() => lastFrame().includes('bg dispatch'))
+  // Now the other instance drops both. Neither row may leave this one.
+  writeExternally([])
+  await new Promise((r) => setTimeout(r, 150)) // several poll ticks
+  expect(lastFrame()).toContain('fix tests')
+  expect(lastFrame()).toContain('bg dispatch')
+})

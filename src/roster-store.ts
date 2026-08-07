@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, existsSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -80,9 +80,32 @@ const memberKey = (m: RosterSession) => `${m.worktree}:${m.id}`
 // addition and must survive. prev tracks what this instance knew, never the merged result —
 // adopting the merge would make the next save read a foreign member as one of its own and delete
 // it, resurrecting the bug one write later.
-export function makePersistRoster({ roster, file }: { roster: Roster; file: string }) {
+//
+// #44: the same file is also the only channel a `fleetview bg` dispatch from another terminal has
+// into an already-running TUI, which holds its membership in React state from mount. `reload` is
+// hung off the persist callback rather than made a separate export so App needs no new wiring (and
+// no roster-file prop) to reach the file cli.ts already chose — a persistRoster stub without it,
+// as every existing test passes, simply has no external-member sync.
+export type PersistRoster = ((snap: Roster) => void) & {
+  // The roster as it is on disk RIGHT NOW, or null when it has not changed since this callback last
+  // read or wrote it (and on any read error — an unreadable roster is not news). mtime+size rather
+  // than a parse per call, and stamped after our own saves so a write of ours is never re-read as
+  // someone else's change.
+  reload: () => Roster | null
+}
+
+export function makePersistRoster({ roster, file }: { roster: Roster; file: string }): PersistRoster {
   let prev = roster
-  return (snap: Roster) => {
+  const stamp = () => {
+    try {
+      const s = statSync(file)
+      return `${s.mtimeMs}:${s.size}`
+    } catch {
+      return '' // missing/unreadable: no stamp to compare, and reload's loadRoster will answer for it
+    }
+  }
+  let lastStamp = stamp()
+  const persist = (snap: Roster) => {
     let disk: Roster
     try {
       disk = loadRoster(file)
@@ -110,6 +133,18 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
     prev = snap
     // groupBy and collapsed are one terminal's view state, not per-member facts, so there is
     // nothing to merge: last writer wins, exactly as before this merge existed.
-    return saveRoster(file, { ...snap, sessions })
+    saveRoster(file, { ...snap, sessions })
+    lastStamp = stamp()
   }
+  persist.reload = () => {
+    const now = stamp()
+    if (now === lastStamp) return null
+    lastStamp = now
+    try {
+      return loadRoster(file)
+    } catch {
+      return null // corrupt mid-run: the in-memory roster is the better answer, and persist repairs the file
+    }
+  }
+  return persist
 }
