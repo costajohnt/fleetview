@@ -1327,7 +1327,13 @@ export function App({
       // No worktree isolation: creating one is opencode's `/experimental/worktree`, and there is no
       // equivalent to ask claude or copilot for. Said out loud in the notice rather than left for the
       // user to discover from a dirty checkout.
-      else flash(`dispatched into ${basename(target) || target} on ${name} — it edits the checkout`, 5000)
+      else {
+        // Land the selection on the row this dispatch just created, so Enter attaches to it.
+        // By identity (see the opencode path below) — the row may render a poll later.
+        selectedSessionRef.current = { projectKey: target, id: ref.id }
+        setSelectedKey(null)
+        flash(`dispatched into ${basename(target) || target} on ${name} — it edits the checkout`, 5000)
+      }
     } catch {
       setInput((current) => (current === '' ? typed : current))
       flash(`${name} dispatch failed`)
@@ -1415,6 +1421,14 @@ export function App({
       // Say where it went. An `@name` that matches no repository stays in the prompt and the
       // dispatch falls back to another project, which is otherwise invisible until you notice the
       // row is in the wrong place.
+      // Select the row this dispatch just created — the next Enter attaches to it instead of
+      // whatever happened to be under the cursor. By identity, not pendingSelect: the row may not
+      // render for another poll, and pendingSelect drops a request it can't resolve. The identity
+      // re-resolution keeps looking every render until the row appears.
+      if (!thenAttach) {
+        selectedSessionRef.current = { projectKey: worktree, id: session.id }
+        setSelectedKey(null)
+      }
       if (thenAttach) attach({ id: session.id, projectKey: worktree })
       // Names the repository: the worktree path is a hashed cache directory that means nothing to
       // the user, and the repository is what they actually chose. When isolation was expected and

@@ -250,6 +250,25 @@ test('dispatch auto-adds the new session to the roster and persists before promp
   expect(order[2]).toBe('promptAsync') // membership persisted BEFORE promptAsync — dispatch counts even if the prompt fails
 })
 
+test('dispatch selects the new session, so Enter attaches to it', async () => {
+  const deps = makeDeps()
+  deps.client.listSessions = vi.fn(() => Promise.resolve([
+    { id: 's1', title: 'fix tests', time: { updated: Date.now() } },
+    { id: 's9', title: 'do a thing', time: { updated: Date.now() } },
+  ]))
+  const onAction = vi.fn()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('do a thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('dispatched into'))
+  // empty input + Enter attaches the selected row — it must be the session just dispatched,
+  // not whatever was under the cursor before
+  await pressUntil(stdin, '\r', () => onAction.mock.calls.some((c: any) => c[0].type === 'enter'))
+  expect((onAction.mock.calls as any).at(-1)[0]).toMatchObject({ type: 'enter', sessionId: 's9' })
+})
+
 test('dispatch membership survives a promptAsync failure', async () => {
   const deps = makeDeps()
   deps.client.promptAsync = vi.fn(() => Promise.reject(new Error('down')))
