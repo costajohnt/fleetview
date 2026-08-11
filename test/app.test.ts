@@ -269,6 +269,34 @@ test('dispatch selects the new session, so Enter attaches to it', async () => {
   expect((onAction.mock.calls as any).at(-1)[0]).toMatchObject({ type: 'enter', sessionId: 's9' })
 })
 
+test('an arrow-key move while the dispatch is in flight wins over the auto-select', async () => {
+  const deps = makeDeps()
+  deps.client.listSessions = vi.fn(() => Promise.resolve([
+    { id: 's1', title: 'fix tests', time: { updated: Date.now() } },
+    { id: 's2', title: 'other work', time: { updated: Date.now() - 1000 } },
+    // s9 sorts below s2: its roster row appears mid-dispatch (membership lands before promptAsync),
+    // and the single ↓ below must step onto s2, not onto the new row.
+    { id: 's9', title: 'do a thing', time: { updated: Date.now() - 5000 } },
+  ]))
+  deps.roster = { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 's1', addedAt: 1 }, { worktree: '/x/alpha', id: 's2', addedAt: 2 }] }
+  let release: any
+  deps.client.promptAsync = vi.fn(() => new Promise((r) => { release = r }))
+  const onAction = vi.fn()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  await waitFor(() => lastFrame().includes('other work'))
+  stdin.write('do a thing')
+  await tick()
+  stdin.write('\r') // dispatch, now held open inside promptAsync
+  await waitFor(() => !!release)
+  stdin.write('\x1B[B') // user steps onto s2 while the dispatch is still in flight
+  await tick()
+  release({})
+  await waitFor(() => lastFrame().includes('dispatched into'))
+  // Enter attaches the row the user walked to, not the just-dispatched session
+  await pressUntil(stdin, '\r', () => onAction.mock.calls.some((c: any) => c[0].type === 'enter'))
+  expect((onAction.mock.calls as any).at(-1)[0]).toMatchObject({ type: 'enter', sessionId: 's2' })
+})
+
 test('dispatch membership survives a promptAsync failure', async () => {
   const deps = makeDeps()
   deps.client.promptAsync = vi.fn(() => Promise.reject(new Error('down')))
