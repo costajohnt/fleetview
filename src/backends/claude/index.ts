@@ -5,7 +5,7 @@
 // verified against claude 2.1.220.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
@@ -14,6 +14,7 @@ import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
 import { psInfo, sameRun, type PidInfo } from '../ps.ts'
 import { reapRunLogs } from '../run-logs.ts'
+import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
 import { assertSessionId } from '../session-id.ts'
 
 // Every flag is a "fleetview can't", stated rather than inherited. `fork` is the one worth naming:
@@ -190,59 +191,20 @@ export function createClaudeBackend({
     events({ directory }: { directory: string }, { onEvent, onOnline }: BackendEventHandlers): EventSubscription {
       let stopped = false
       let wake: (() => void) | undefined
-      // Byte offset and partial-line tail per file, so each poll reads only what was appended. The
-      // decoder is per file and kept across polls for the same reason event-mux.ts keeps one: a read
-      // ends wherever the file did, which is happily mid-character, and decoding each chunk on its
-      // own turns every multi-byte character straddling a poll boundary into U+FFFD.
-      const cursors = new Map<string, { offset: number; rest: string; ino: number; decoder: InstanceType<typeof TextDecoder> }>()
+      // One tail cursor per file (see tail.ts), so each poll reads only what was appended.
+      const cursors = new Map<string, TailCursor>()
 
       // Reads whatever has been appended to `file` since the last call and hands each parsed line to
       // onEvent. Keyed separately from the path so a run log and a transcript can never share a
       // cursor, though in practice only one of the two is ever tailed for a given session.
       function tail(key: string, file: string, source: 'run' | 'transcript') {
-        let size: number
-        let ino: number
-        try {
-          const st = statSync(file)
-          size = st.size
-          ino = Number(st.ino)
-        } catch {
-          return // meta written, log not yet — the next poll will find it
-        }
-        const cursor = cursors.get(key) ?? { offset: 0, rest: '', ino: 0, decoder: new TextDecoder() }
+        const cursor = cursors.get(key) ?? newTailCursor()
         cursors.set(key, cursor)
-        // A different inode is a different file: compaction that renames a rewritten transcript over
-        // the old path lands at whatever size it likes, so size alone misses every rewrite that
-        // happens to be equal-or-larger and the tail then reads mid-line garbage from a stale
-        // offset. ino 0 (some Windows filesystems report it) is no signal at all, so it never
-        // triggers a reset and those hosts keep the size heuristic they had.
-        const replaced = cursor.ino !== 0 && ino !== 0 && cursor.ino !== ino
-        cursor.ino = ino
-        if (size < cursor.offset || replaced) {
-          // The file shrank or was replaced. Re-reading from zero is the only way back: keeping the
-          // old offset means the tail never sees another byte of that session, and a partial line
-          // held over belongs to a file that no longer exists.
-          // Same reset, same reasons, as the copilot backend's readFrom.
-          cursor.offset = 0
-          cursor.rest = ''
-          cursor.decoder = new TextDecoder()
-        }
-        if (size <= cursor.offset) return
-        let chunk = ''
-        try {
-          const fd = openSync(file, 'r')
-          try {
-            const buf = Buffer.allocUnsafe(size - cursor.offset)
-            const read = readSync(fd, buf, 0, buf.length, cursor.offset)
-            chunk = cursor.decoder.decode(buf.subarray(0, read), { stream: true })
-            cursor.offset += read
-          } finally {
-            closeSync(fd)
-          }
-        } catch {
-          return
-        }
-        const { events, rest } = parseStreamChunk(cursor.rest + chunk)
+        const r = tailFile(cursor, file)
+        // null: meta written, log not yet — the next poll will find it. Empty text: nothing
+        // appended (a bare reset already cleared the cursor; there is nothing to parse).
+        if (!r?.text) return
+        const { events, rest } = parseStreamChunk(cursor.rest + r.text)
         cursor.rest = rest
         // Raw objects, unnormalised, exactly as opencode hands over its raw SSE payloads — per
         // types.ts the shape is the backend's own and the roster reads it through per-backend
@@ -267,18 +229,27 @@ export function createClaudeBackend({
           // session has both a captured stream and a transcript, and tailing both would deliver
           // every assistant message twice.
           const dispatched = new Set<string>()
+          // Every key this poll tailed. A cursor whose file is no longer visible — its run log
+          // reaped after KEEP_RUNS_MS, its transcript deleted — pins an offset, a decoder and a
+          // partial-line string forever; in a long-lived TUI that is a slow leak, so anything not
+          // seen this poll is dropped. A file that comes back starts from a fresh cursor, which is
+          // what a new file needs anyway.
+          const live = new Set<string>()
           for (const name of names) {
             if (!name.endsWith('.json')) continue
             const id = name.slice(0, -'.json'.length)
             const meta = readMeta(id)
             if (meta?.directory !== directory) continue
             dispatched.add(id)
+            live.add(`run:${id}`)
             tail(`run:${id}`, logPath(id), 'run')
           }
           for (const t of listTranscripts(directory, { home })) {
             if (dispatched.has(t.id)) continue
+            live.add(`transcript:${t.id}`)
             tail(`transcript:${t.id}`, join(projectsDir(home), encodeProjectDir(directory), `${t.id}.jsonl`), 'transcript')
           }
+          for (const key of cursors.keys()) if (!live.has(key)) cursors.delete(key)
           if (stopped) break
           await new Promise<void>((resolve) => {
             const timer = setTimeout(resolve, pollMs)

@@ -4,7 +4,7 @@
 // 1.0.75 — docs/specs/2026-07-25-copilot-backend-wire.md records what was run and what came back.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Backend } from '../../types.ts'
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
@@ -12,6 +12,7 @@ import { foldEvents, initialRun, parseJsonlChunk, type CopilotStatus, type RunSt
 import { listSessions, lockInfo, runningPid, sessionStateDir } from './sessions.ts'
 import { psInfo, sameRun, type PidInfo } from '../ps.ts'
 import { reapRunLogs } from '../run-logs.ts'
+import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
 import { assertSessionId } from '../session-id.ts'
 
 // Measured, not aspirational — each `false` is a thing the CLI cannot do, not a thing left unbuilt.
@@ -196,13 +197,9 @@ export function createCopilotBackend({
         return [...disk, ...pending]
       }
 
-      // Per session: where the read got to, the partial trailing line, and the folded run state, so
-      // each tick reads only the bytes appended since the last one. The decoder is per session and
-      // kept across ticks for the same reason event-mux.ts keeps one: a positional read ends
-      // wherever the file did, which is happily mid-character, and decoding each chunk on its own
-      // turns a multi-byte character straddling a tick into U+FFFD — inside a line that then fails
-      // to parse, and the line it kills can be the `result`.
-      const tails = new Map<string, { file: string; offset: number; rest: string; ino: number; run: RunState; emitted: string; decoder: InstanceType<typeof TextDecoder> }>()
+      // Per session: a tail cursor over the log (see tail.ts) plus the folded run state, so each
+      // tick reads only the bytes appended since the last one.
+      const tails = new Map<string, { file: string; cursor: TailCursor; run: RunState; emitted: string }>()
       let announced = false
 
       const tick = () => {
@@ -213,7 +210,14 @@ export function createCopilotBackend({
           announced = true
           onOnline?.(directory)
         }
-        for (const session of visible(directory)) {
+        const sessions = visible(directory)
+        // A session's tail outliving the session pins a folded RunState, a decoder and a
+        // partial-line string for the life of the subscription — a slow leak once runs are reaped
+        // after KEEP_RUNS_MS. Anything not visible this tick is dropped; a session that comes back
+        // re-folds from zero, which is what statusOf needs anyway.
+        const seen = new Set(sessions.map((s) => s.id))
+        for (const key of tails.keys()) if (!seen.has(key)) tails.delete(key)
+        for (const session of sessions) {
           // fleetview's own capture is preferred for runs this process started, because it also
           // holds stderr and the synthetic failure line above. Only for those: the log dir is never
           // reaped, so after a restart a session's stale capture — frozen on some earlier run's
@@ -226,25 +230,19 @@ export function createCopilotBackend({
           const file = owned.has(session.id) && existsSync(own) ? own : existsSync(transcript) ? transcript : own
           let tail = tails.get(session.id)
           if (!tail || tail.file !== file) {
-            tail = { file, offset: 0, rest: '', ino: 0, run: initialRun(), emitted: '', decoder: new TextDecoder() }
+            tail = { file, cursor: newTailCursor(), run: initialRun(), emitted: '' }
             tails.set(session.id, tail)
           }
-          const chunk = readFrom(tail.file, tail.offset, tail.ino)
+          const chunk = tailFile(tail.cursor, tail.file)
           if (chunk === null) continue // no log yet: the run has not written its first line
           if (chunk.reset) {
             // The file shrank or is a different inode — copilot rotated, rewrote or renamed over it.
-            // Re-folding from zero is the only way back to a correct state, and a stale offset would
-            // otherwise read from the middle of a line forever. The decoder goes with it: it may be
-            // holding the head of a character from the file that no longer exists.
-            tail.offset = 0
-            tail.rest = ''
+            // tailFile already zeroed the cursor; the folded state read out of the old file goes
+            // with it, because re-folding from zero is the only way back to a correct state.
             tail.run = initialRun()
-            tail.decoder = new TextDecoder()
           }
-          tail.offset = chunk.offset
-          tail.ino = chunk.ino
-          const { events, rest } = parseJsonlChunk(tail.rest + tail.decoder.decode(chunk.buf, { stream: true }))
-          tail.rest = rest
+          const { events, rest } = parseJsonlChunk(tail.cursor.rest + chunk.text)
+          tail.cursor.rest = rest
           tail.run = foldEvents(tail.run, events)
 
           const status = statusOf(tail.run, session.running)
@@ -346,40 +344,4 @@ export function createCopilotBackend({
 function statusOf(run: RunState, running: boolean): CopilotStatus {
   if (run.exitCode !== null) return run.status
   return running ? 'working' : 'failed'
-}
-
-// Positional read rather than readFileSync: a long session's transcript reaches megabytes, and
-// re-reading all of it every 1.5 seconds to look at the tail is the difference between a poll that
-// costs nothing and one that shows up in a profile. Bytes, not a string — decoding belongs to the
-// caller's per-session TextDecoder, because this read ends wherever the file does.
-function readFrom(file: string, offset: number, ino: number): { buf: Buffer; offset: number; reset: boolean; ino: number } | null {
-  let size: number
-  let currentIno: number
-  try {
-    const st = statSync(file)
-    size = st.size
-    currentIno = Number(st.ino)
-  } catch {
-    return null
-  }
-  // A different inode is a different file: a rewrite delivered by rename-over lands at whatever size
-  // it likes, so `size < offset` misses every one that is equal-or-larger and the caller then folds
-  // mid-line garbage read from a stale offset. ino 0 (some Windows filesystems report it) is no
-  // signal, so it never triggers a reset and those hosts keep the size heuristic they had.
-  const reset = size < offset || (ino !== 0 && currentIno !== 0 && ino !== currentIno)
-  const from = reset ? 0 : offset
-  if (size === from) return { buf: Buffer.alloc(0), offset: from, reset, ino: currentIno }
-  let fd: number
-  try {
-    fd = openSync(file, 'r')
-  } catch {
-    return null
-  }
-  try {
-    const buf = Buffer.alloc(size - from)
-    const read = readSync(fd, buf, 0, buf.length, from)
-    return { buf: buf.subarray(0, read), offset: from + read, reset, ino: currentIno }
-  } finally {
-    closeSync(fd)
-  }
 }
