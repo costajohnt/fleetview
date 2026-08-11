@@ -16,7 +16,7 @@
 
 <header class="hero">
   <h1>fleetview <span class="badge">beta</span></h1>
-  <p class="pitch">Claude Code's agent view for opencode, claude, and copilot. A roster TUI for backgrounded agent sessions.</p>
+  <p class="pitch">One screen for all your background coding agents. Claude Code's agent view, ported to opencode, claude, and copilot.</p>
   <p class="note">This is a beta release, so expect rough edges and breaking changes between versions. It has been tested most with opencode in iTerm2; the claude and copilot backends are newer, and other terminals should work but have seen less use.</p>
   <img src="images/demo.gif" alt="The fleetview roster: a task is dispatched from the input box, isolates into its own worktree, streams its progress, blocks on a question that is answered with a single keypress, and lands under completed.">
 </header>
@@ -28,7 +28,7 @@
       <code id="cmd">npm i -g fleetview</code>
       <button id="copy" type="button">copy</button>
     </div>
-    <p class="note">Needs Node 24 or newer. Then run <code>fleetview</code>.</p>
+    <p class="note">Needs Node 24 or newer. Then run <code>fleetview</code> — or try it first with <code>npx fleetview</code>, nothing left behind.</p>
     <a class="gh" href="https://github.com/costajohnt/fleetview">
       <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
       View the source on GitHub
@@ -41,29 +41,29 @@
       <li>
         <h3>Multi-backend</h3>
         <p>One roster over opencode, claude, and copilot sessions, whichever you happen to have installed.</p>
-        <img src="images/backends.png" alt="Backend picker listing opencode, claude, and copilot.">
+        <img src="images/backends.png" alt="A roster with opencode, claude, and copilot sessions, each row carrying its backend name.">
       </li>
       <li>
         <h3>Dispatch</h3>
-        <p>Describe a task in the input box and fleetview starts a backgrounded agent for it, with suggestions drawn from the repo.</p>
-        <img src="images/dispatch-suggestions.png" alt="Dispatch input showing suggested tasks below the prompt.">
+        <p>Describe a task in the input box and fleetview starts a backgrounded agent for it. <code>@</code> completes to a repository, a subagent, or another backend.</p>
+        <img src="images/dispatch-suggestions.png" alt="The dispatch input with @ typed, listing subagents, repositories, and backends to complete to.">
       </li>
       <li>
         <h3>Peek and answer</h3>
-        <p>Read an agent's latest output without attaching, and answer its question inline when it is blocked.</p>
-        <img src="images/peek.png" alt="Peek pane showing an agent's recent transcript beside the roster.">
+        <p>Read an agent's latest output without attaching. A permission is one key, a question is a numbered list.</p>
+        <img src="images/peek-answer.png" alt="Peek on a blocked session: a permission banner with y/a/d, a question as a numbered list, and a reply input.">
       </li>
       <li>
         <h3>Attach and detach</h3>
-        <p>Enter drops you into a live session; detach puts it back on the roster still running.</p>
+        <p>Enter drops you into a live session; ^z puts it back on the roster still running. Close fleetview entirely and the sessions keep going.</p>
       </li>
       <li>
         <h3>Worktree isolation</h3>
-        <p>Dispatched agents can each get their own git worktree, so parallel work never fights over your checkout.</p>
+        <p>Each dispatch runs in its own git worktree on an ordinary branch, so parallel agents never fight over your checkout.</p>
       </li>
       <li>
         <h3>PR awareness</h3>
-        <p>Sessions show the branch and pull request they belong to, so a long-running roster stays legible.</p>
+        <p>A session with an open pull request carries a #N label, coloured by what needs attention, so a long-running roster stays legible.</p>
       </li>
     </ul>
   </section>

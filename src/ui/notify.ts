@@ -1,6 +1,24 @@
 import { spawn } from 'node:child_process'
 import { stripControl } from '../text-utils.ts'
 import { envWithoutServerPassword } from '../registry.ts'
+import type { StatusCountable } from './view-types.ts'
+
+// What the two escape writers need off a stream: `isTTY` to stay silent on a pipe, and a write.
+// `writeThrough` is gated-stdout's escape hatch (see gated-stdout.ts) — a plain process.stdout has
+// only `write`, and both are accepted rather than importing the gate's type into every caller.
+export type TitleStream = {
+  isTTY?: boolean
+  write(text: string): unknown
+  writeThrough?: (text: string) => unknown
+}
+
+// The child a notify hook spawns. Narrower than node's ChildProcess so a test can hand over a stub
+// with nothing but `unref`, which is all this module ever touches.
+export type SpawnLike = (
+  command: string,
+  args: string[],
+  options: { detached: boolean; stdio: 'ignore'; env: NodeJS.ProcessEnv },
+) => { unref?: () => void }
 // Terminal-level signals agent view sends while it's open:
 //
 //   "The terminal tab title shows the awaiting-input count while agent view is open:
@@ -16,22 +34,22 @@ import { envWithoutServerPassword } from '../registry.ts'
 // or question. The `?` heuristic is a guess about prose, and a guess should not put a number in
 // the user's tab title or interrupt them; it earns a place in the `needs input` group and nothing
 // louder.
-export const titleFor = (sessions: any[]) => {
-  const waiting = sessions.filter((s) => s.status === 'waiting' && s.pendingRequest).length
+export const titleFor = (sessions: readonly StatusCountable[]) => {
+  const waiting = sessions.filter((s) => s.status === 'waiting' && Boolean(s.pendingRequest)).length
   return waiting > 0 ? `${waiting} awaiting input · fleetview` : 'fleetview'
 }
 
 // Neither of these is drawing, so both bypass the render gate when one is present — see
 // gated-stdout. Wrapped so a non-TTY (tests, pipes) is a no-op.
-const emit = (stream: any, text: string) => (stream.writeThrough ? stream.writeThrough(text) : stream.write(text))
+const emit = (stream: TitleStream, text: string) => (stream.writeThrough ? stream.writeThrough(text) : stream.write(text))
 
 // OSC 0 sets both the window and tab title.
-export function setTitle(stream: any, title: string) {
+export function setTitle(stream: TitleStream | null | undefined, title: string) {
   if (!stream?.isTTY) return
   emit(stream, `\u001B]0;${title}\u0007`)
 }
 
-export const bell = (stream: any) => stream?.isTTY && emit(stream, '\u0007')
+export const bell = (stream: TitleStream | null | undefined) => stream?.isTTY && emit(stream, '\u0007')
 
 // Which sessions crossed into a state worth interrupting the user for. Compares two snapshots of
 // `${projectKey}:${id}` → status, so a session that was already waiting doesn't re-notify on every
@@ -56,7 +74,13 @@ export function hookTransitions(previous: Map<string, string>, current: Map<stri
   return out
 }
 
-export function runNotifyHook({ event, session }: { event: string; session: any }, { spawnImpl, command = process.env.FLEETVIEW_NOTIFY_CMD ?? process.env.ROOST_NOTIFY_CMD }: { spawnImpl?: any; command?: string } = {}) {
+export function runNotifyHook(
+  { event, session }: { event: string; session?: { id?: string; title?: string; projectKey?: string } | null },
+  {
+    spawnImpl,
+    command = process.env.FLEETVIEW_NOTIFY_CMD ?? process.env.ROOST_NOTIFY_CMD,
+  }: { spawnImpl?: SpawnLike; command?: string } = {},
+) {
   if (!command) return
   try {
     const child = (spawnImpl ?? spawn)('sh', ['-c', command], {

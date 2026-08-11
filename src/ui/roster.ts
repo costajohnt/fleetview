@@ -5,8 +5,9 @@ import { truncateGraphemes, graphemes, osc8 } from '../text-utils.ts'
 import { prLabel, mostUrgentPr, prColor } from '../pull-requests.ts'
 
 import { theme } from './theme.ts'
+import type { KeySet, RosterGroup, RosterLine, RosterSession } from './view-types.ts'
 
-export const flattenGroups = (groups: any[]) => groups.flatMap((g: any) => g.sessions)
+export const flattenGroups = (groups: RosterGroup[]) => groups.flatMap((g) => g.sessions)
 
 // Pure: relative-time label for a row's dim metadata suffix. now defaults to Date.now() at call
 // time (component callers), but takes an explicit `now` so it's deterministically unit-testable.
@@ -24,7 +25,7 @@ export function relTime(ms: number, now = Date.now()) {
 // from when the session was created; a finished session's age freezes at how long the run took".
 // The `in 4m`-style prefix agent view uses for sleeping loops has no opencode analog, so a frozen
 // duration renders bare.
-export function ageLabel(session: any, now = Date.now()) {
+export function ageLabel(session: Pick<RosterSession, 'ranForMs' | 'createdAt' | 'updatedAt'>, now = Date.now()) {
   if (typeof session.ranForMs === 'number') return spanLabel(session.ranForMs)
   const from = session.createdAt || session.updatedAt
   return typeof from === 'number' && from > 0 ? relTime(from, now) : null
@@ -44,8 +45,8 @@ function spanLabel(ms: number) {
 // (text-utils), so a row never wraps past one physical terminal line regardless of `columns`.
 // ponytail: width is grapheme count per cell (matches peek.ts's wrapLines), not true wcwidth —
 // wide/emoji glyphs can still overrun by a cell or two; upgrade both together if that ever bites.
-function snippetBudget(columns: number, fixedParts: any[]) {
-  const used = fixedParts.reduce((sum: number, p: any) => sum + graphemes(p).length, 0) + fixedParts.length // + one gap per part (N-1 internal + 1 leading into the snippet)
+function snippetBudget(columns: number, fixedParts: string[]) {
+  const used = fixedParts.reduce((sum, p) => sum + graphemes(p).length, 0) + fixedParts.length // + one gap per part (N-1 internal + 1 leading into the snippet)
   return Math.max(0, columns - used - 2) // -2 for the snippet's own "— " prefix
 }
 
@@ -56,8 +57,8 @@ function snippetBudget(columns: number, fixedParts: any[]) {
 // keeps its header and hides its sessions, and its arrow says which it is.
 export const headerKey = (projectKey: string) => `header:${projectKey}`
 
-export function buildLines(groups: any[], offlineProjects: Set<string> = new Set(), collapsed: Set<string> = new Set()) {
-  const lines = []
+export function buildLines(groups: RosterGroup[], offlineProjects: KeySet = new Set(), collapsed: KeySet = new Set()) {
+  const lines: RosterLine[] = []
   for (const g of groups) {
     const suffix = offlineProjects.has(g.projectKey) ? ' (offline)' : ''
     const isCollapsed = collapsed.has(g.projectKey)
@@ -82,7 +83,7 @@ export function buildLines(groups: any[], offlineProjects: Set<string> = new Set
       // section is for. Falls back to `no items` for any empty group without one (e.g. a project).
       lines.push({ type: 'placeholder', key: `empty:${g.projectKey}`, text: g.hint ? `  ${g.hint}` : '  no items' })
     }
-    if (g.hidden > 0) lines.push({ type: 'hidden', key: `hidden:${g.projectKey}`, text: `  … ${g.hidden} more` })
+    if ((g.hidden ?? 0) > 0) lines.push({ type: 'hidden', key: `hidden:${g.projectKey}`, text: `  … ${g.hidden} more` })
   }
   return lines
 }
@@ -90,12 +91,14 @@ export function buildLines(groups: any[], offlineProjects: Set<string> = new Set
 // The rows ↑/↓ can land on, in screen order — headers and sessions, never the `… N more` marker,
 // which is a count rather than a thing to act on. App navigates this; the roster draws from the
 // same buildLines, so the two can't disagree about what is on screen.
-export const navigableRows = (groups: any[], collapsed?: Set<string>) =>
+export const navigableRows = (groups: RosterGroup[], collapsed?: Set<string>) =>
   buildLines(groups, new Set(), collapsed).filter((l) => l.type === 'header' || l.type === 'session')
 
 // Pure: window `lines` to fit `maxRows` (reserving 2 rows for ↑/↓ edge indicators), keeping
 // `selectedIdx` in view — centered when possible, clamped at the list's edges.
-export function windowLines(lines: any[], selectedIdx: number, maxRows: number) {
+// Generic in the line type: the roster passes RosterLine[], and App's tests (and the viewport unit
+// tests) pass plain values, which the counting rule below deliberately still supports.
+export function windowLines<T>(lines: readonly T[], selectedIdx: number, maxRows: number) {
   // Below 3 rows there is no room for a slice plus both indicators, and the old floor of 1 row
   // still added them — rendering 3 lines however small maxRows got, including when it went
   // negative on a tiny terminal. The contract is "fits"; drop the indicators instead.
@@ -112,8 +115,9 @@ export function windowLines(lines: any[], selectedIdx: number, maxRows: number) 
   // Count sessions, not lines: group headers and fold markers are chrome the user has already
   // seen, and counting them makes `↑ 12 more` promise sessions that aren't there. Untyped entries
   // are counted as-is, so the function still means "lines" for callers that pass plain values.
+  const kindOf = (l: unknown) => (typeof l === 'object' && l !== null && 'type' in l ? l.type : undefined)
   const sessionsIn = (from: number, to: number) =>
-    lines.slice(from, to).filter((l: any) => l?.type === undefined || l.type === 'session').length
+    lines.slice(from, to).filter((l) => kindOf(l) === undefined || kindOf(l) === 'session').length
   return {
     slice: lines.slice(start, end),
     above: sessionsIn(0, start),
@@ -132,7 +136,22 @@ export function titleBudget(columns: number) {
 // only in its group headers, so a state-grouped row has nowhere to put it. markMembers: browse
 // view — Set of `${worktree}:${id}` roster members, flagged with a dim `[roster]` suffix so
 // browsing shows current membership.
-// TODO(types): props are session groups (opencode wire data) plus dynamic UI state — any.
+export type RosterProps = {
+  groups: RosterGroup[]
+  // Index into the flattened sessions — the pre-header selection model, still accepted (see below).
+  selected?: number
+  selectedKey?: string
+  offlineProjects: KeySet
+  collapsed?: KeySet
+  maxRows?: number
+  columns?: number
+  // Browse view: `${projectKey}:${id}` of every roster member, flagged with a dim `[roster]`.
+  markMembers?: KeySet
+  showStateWord?: boolean
+  showBackendTag?: boolean
+  now?: number
+}
+
 export function Roster({
   groups,
   selected,
@@ -148,12 +167,12 @@ export function Roster({
   // no gap, no change to the snippet budget.
   showBackendTag = false,
   now,
-}: any) {
+}: RosterProps) {
   const flat = flattenGroups(groups)
   const lines = buildLines(groups, offlineProjects, collapsed)
   // Selection is a key now that headers are selectable too. `selected` (an index into the sessions)
   // stays accepted so existing callers and tests that predate headers keep working.
-  const selectedSession = selectedKey === undefined ? flat[selected] : undefined
+  const selectedSession = selectedKey === undefined && selected !== undefined ? flat[selected] : undefined
   const selectedLineIdx = Math.max(
     0,
     selectedKey === undefined
@@ -214,7 +233,11 @@ export function Roster({
       // same column, so the roster reads as title column | summary column, agent-view style.
       const rawTitle = truncateGraphemes(s.title ?? '', titleBudget(columns))
       const title = rawTitle + ' '.repeat(Math.max(0, titleBudget(columns) - graphemes(rawTitle).length))
-      const fixedParts = [' ', badgeLabel(), title, timeText, prBadge, stateWord, backendTag, isMember ? '[roster]' : null].filter(Boolean)
+      // The predicate is what `.filter(Boolean)` already does at runtime — spelled out so the
+      // budget math below sees strings rather than "string or the absent parts we just dropped".
+      const fixedParts = [' ', badgeLabel(), title, timeText, prBadge, stateWord, backendTag, isMember ? '[roster]' : null].filter(
+        (p): p is string => Boolean(p),
+      )
       // The right-aligned cluster is the PR label then the age; each present part costs one gap.
       const budget = snippetBudget(columns, fixedParts) - (timeText ? 1 : 0) - (prBadge ? 1 : 0)
       // M3: below-zero budget means even the "— " prefix has no room — drop the snippet entirely
@@ -251,7 +274,10 @@ export function Roster({
         snippetText ? React.createElement(Text, { dimColor: true }, ` ${snippetText}`) : '',
         isMember ? React.createElement(Text, { dimColor: true }, ' [roster]') : '',
         rightText ? ' '.repeat(pad) : '',
-        prBadge ? React.createElement(Text, { color: prColor(prUrgent!) }, prUrl ? osc8(prUrl, prBadge) : prBadge) : '',
+        // `prBadge && prUrgent` rather than a non-null assertion on prUrgent: both come from the
+        // same badgeable-PR list, so a badge without an urgent PR cannot happen — and the narrowing
+        // says so without asserting it.
+        prBadge && prUrgent ? React.createElement(Text, { color: prColor(prUrgent) }, prUrl ? osc8(prUrl, prBadge) : prBadge) : '',
         prBadge && timeText ? ' ' : '',
         timeText ? React.createElement(Text, { dimColor: true }, timeText) : '',
         endPad ? ' '.repeat(endPad) : '',

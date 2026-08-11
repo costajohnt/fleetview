@@ -9,13 +9,16 @@
 // Set BEFORE imports — chalk reads the environment once at load, same as scripts/preview.ts.
 process.env.FORCE_COLOR = '3'
 
+// Type-only, so it is erased and cannot import anything before the env above is set.
+import type { BackendEventHandlers, EventSubscription, OpencodeMessage } from '../src/types.ts'
+
 const React = (await import('react')).default
 const { render } = await import('ink')
-const { App } = (await import('../src/app.ts')) as any
+const { App } = await import('../src/app.ts')
 
 const REPO = '/work/fleetview'
 
-type Row = { id: string; dir: string; title: string; updated: number; messages: any[] }
+type Row = { id: string; dir: string; title: string; updated: number; messages: OpencodeMessage[] }
 
 const text = (role: string, body: string) => ({ info: { role }, parts: [{ type: 'text', text: body }] })
 
@@ -46,7 +49,7 @@ const client = {
   // real: the app asks for a worktree, gets a directory back, and streams it as a new project.
   listWorktrees: async () => [],
   createWorktree: async (name: string, target: string) => ({ name, directory: `${target}/.worktrees/${name}` }),
-  createSession: async (_opts: any, dir: string) => {
+  createSession: async (_opts: { agent?: string; model?: unknown }, dir: string) => {
     const id = `s${rows.size + 1}`
     rows.set(id, { id, dir, title: 'New session', updated: Date.now(), messages: [] })
     return { id }
@@ -62,7 +65,9 @@ const client = {
   listMessages: async (id: string) => rows.get(id)?.messages ?? [],
   // Answering from the roster is the point of the whole view, so the demo actually does it: the
   // reply clears the question and the session goes back to work and finishes, on camera.
-  respondQuestion: async (requestID: string, answers: any[], dir: string) => {
+  // answers is opencode's shape: one array of chosen labels per sub-question (use-peek sends
+  // `[[label]]`), and a label is only as certain as the option the session offered.
+  respondQuestion: async (requestID: string, answers: (string | undefined)[][], dir: string) => {
     const id = [...rows.values()].find((r) => r.dir === dir)?.id
     if (!id) return {}
     const choice = answers?.[0]?.[0] ?? 'per-request'
@@ -164,7 +169,7 @@ render(
   React.createElement(App, {
     server: { host: '127.0.0.1', port: 4096 },
     client,
-    connectEventsImpl: (target: any, handlers: any) => {
+    connectEventsImpl: (target: { directory: string }, handlers: BackendEventHandlers): EventSubscription => {
       sinks.set(target.directory, (event) => handlers.onEvent(target.directory, event))
       return { done: new Promise(() => {}), stop: () => {} }
     },
@@ -181,6 +186,9 @@ render(
     // with no repository and no network.
     fetchPullRequestsImpl: async () => [],
     branchOfImpl: () => 'main',
+    // The fixture repo never exists on disk, and dispatch refuses a target directory that is gone
+    // (#22) — the same injection test/app.test.ts uses.
+    dirExistsImpl: () => true,
     projectPollMs: 3_600_000,
     onAction: () => {},
   }),
