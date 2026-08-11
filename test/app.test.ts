@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { App } from '../src/app.ts'
 import { makePersistRoster } from '../src/roster-store.ts'
+import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
+import { claudeNormaliser, copilotNormaliser, normaliseClaudeSessions, normaliseCopilotSessions } from '../src/backend-normalise.ts'
 import { headerRows } from '../src/ui/header.ts'
 
 // Every render is torn down after its test. Without this, each instance keeps its timers alive —
@@ -3024,8 +3026,6 @@ test('the header count survives a filter that hides the blocked session', async 
 // Every test here builds an explicit registry — App's default is opencode alone, which is what keeps
 // every test above describing a single-backend roster.
 
-const ALL_CAPS = { fork: true, rename: true, delete: true, questions: true, messages: true }
-
 // A stand-in adapter. `handlers` is captured so a test can push an event the way the real poller
 // would, without a process, a log file or a timer.
 function fakeBackend(name: string, capabilities: any = {}, sessions: any[] = []) {
@@ -3049,12 +3049,19 @@ function fakeBackend(name: string, capabilities: any = {}, sessions: any[] = [])
     delete: vi.fn(async () => {
       throw new Error(`${name} cannot delete`)
     }),
+    // The real normalisers, reached the way the roster reaches them now (Backend contract, #83):
+    // the events these tests push are real claude/copilot wire shapes, so the fake must translate
+    // them the way the real adapter would.
+    normaliseSessions: (rows: any[] | null | undefined) =>
+      name === 'claude' ? normaliseClaudeSessions(rows) : name === 'copilot' ? normaliseCopilotSessions(rows) : rows ?? [],
+    createNormaliser: () => (name === 'claude' ? claudeNormaliser() : name === 'copilot' ? copilotNormaliser() : (e: unknown) => [e]),
   }
 }
 
-// The opencode entry only ever answers capability questions — App routes opencode rows through
-// `client`, exactly as it did before backends existed — so a stub with every flag on is enough.
-const opencodeStub = () => ({ name: 'opencode', capabilities: ALL_CAPS })
+// The real opencode adapter over the test's fake client: App routes opencode rows through the
+// adapter now (H2), and the adapter is a plain mapping onto OpencodeClient, so the calls that land
+// on `deps.client` are exactly the ones the old direct-client wiring made.
+const opencodeStub = (deps: any) => createOpencodeBackend({ server, client: deps.client })
 
 // A claude transcript listing, in the shape backends/claude/projects.ts returns.
 const claudeRow = (id = 'c1', title = 'claude work') => ({ id, title, directory: '/x/alpha', updatedAt: Date.now() })
@@ -3063,7 +3070,7 @@ test('@backend routes the dispatch to that backend, never to the opencode client
   const deps = makeDeps()
   const claude = fakeBackend('claude')
   const { stdin } = render(
-    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(), claude } }),
+    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }),
   )
   await tick()
   stdin.write('@claude fix the tests')
@@ -3079,7 +3086,7 @@ test('an unprefixed dispatch still goes to opencode when a second backend is mer
   const deps = makeDeps()
   const claude = fakeBackend('claude')
   const { stdin } = render(
-    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(), claude } }),
+    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }),
   )
   await tick()
   stdin.write('do a thing')
@@ -3096,7 +3103,7 @@ test('--backend claude makes an unprefixed dispatch land on claude', async () =>
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
     }),
   )
@@ -3115,7 +3122,7 @@ test('a `!` shell job is refused on a backend with no shell surface', async () =
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
     }),
   )
@@ -3130,7 +3137,7 @@ test('a `!` shell job is refused on a backend with no shell surface', async () =
 test('a pure-opencode roster never streams another backend', async () => {
   const deps = makeDeps()
   const claude = fakeBackend('claude', {}, [claudeRow()])
-  render(React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(), claude } }))
+  render(React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }))
   await waitFor(() => deps.client.listSessions.mock.calls.length > 0)
   await tick()
   expect(claude.events).not.toHaveBeenCalled()
@@ -3144,7 +3151,7 @@ test('claude sessions discovered in a shown directory join the roster with live 
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
       // Browse shows every discovered session, member or not — the roster's main view is memberships.
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1 }] },
@@ -3170,7 +3177,7 @@ test('a claude row restored from the roster survives the opencode status sweep',
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1, backend: 'claude' }] },
       projectPollMs: 20,
     }),
@@ -3190,7 +3197,7 @@ test('rows carry a backend tag only once a second backend has sessions', async (
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
       roster: {
         groupBy: 'state',
@@ -3211,7 +3218,7 @@ test('rows carry a backend tag only once a second backend has sessions', async (
 test('an opencode-only roster renders no backend tag at all', async () => {
   const deps = makeDeps()
   const { lastFrame } = render(
-    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(), claude: fakeBackend('claude') } }),
+    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude: fakeBackend('claude') } }),
   )
   await waitFor(() => lastFrame().includes('fix tests'))
   expect(lastFrame().split('\n').find((l) => l.includes('fix tests'))).not.toContain('opencode')
@@ -3226,7 +3233,7 @@ test('peeking a row whose backend has no message API says so instead of fetching
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1, backend: 'claude' }] },
     }),
@@ -3244,7 +3251,7 @@ test('^r on a row whose backend cannot rename says so instead of opening the dia
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1 }] },
     }),
@@ -3263,7 +3270,7 @@ test('/fork on a row whose backend cannot fork says so instead of calling forkSe
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1 }] },
     }),
@@ -3283,7 +3290,7 @@ test('^x stops a claude row through its own adapter, not the opencode client', a
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1 }] },
     }),
@@ -3301,7 +3308,7 @@ test("^x^x on a row whose backend cannot delete says so, keeps the project onlin
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1 }] },
     }),
@@ -3325,7 +3332,7 @@ test('attaching a claude row tells the host which backend to launch', async () =
     React.createElement(App, {
       ...deps,
       onAction,
-      backends: { opencode: opencodeStub(), claude },
+      backends: { opencode: opencodeStub(deps), claude },
       initialBackend: 'claude',
       roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1 }] },
     }),

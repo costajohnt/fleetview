@@ -4,6 +4,7 @@ import { graphemes } from './text-utils.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
 import { questionOptions, suggestedReply } from './ui/peek.ts'
 import { OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
+import { DEFAULT_BACKEND } from './backends/index.ts'
 
 // Peek's controller: the state, the message fetch, the reply/answer paths and the panel's own key
 // handling, lifted out of App so the roster closure stops carrying them. Everything App owns and
@@ -119,15 +120,18 @@ export function usePeek({
     if (!body) return
     const key = `${row.projectKey}:${row.id}`
     const backend = backendFor(row)
+    // opencode-vs-everything-else, by the adapter's own name now that backendFor returns one for
+    // opencode rows too (H2): the two branches below are about surface opencode alone has (the
+    // shell route, the saved-reply queue), not about whether an adapter exists.
+    const external = backend.name !== DEFAULT_BACKEND
     // A `!` reply is opencode's shell route; the process-backed CLIs have no equivalent, and sending
     // the command as a prompt would run something else entirely.
-    if (bang && backend) return setPeekError({ id: row.id, message: "! shell replies run on opencode only" })
+    if (bang && external) return setPeekError({ id: row.id, message: "! shell replies run on opencode only" })
     try {
       if (bang) await client.runShell(row.id, body, row.projectKey)
-      // A follow-up IS in the Backend contract (prompt()), and on both process backends it is a
-      // resume of the same session — so replies work here even where answering a permission cannot.
-      else if (backend) await backend.prompt(row.id, body, row.projectKey)
-      else await client.promptAsync(row.id, body, row.projectKey)
+      // A follow-up IS in the Backend contract (prompt()) — on opencode it is the same promptAsync
+      // call this always made, and on both process backends it is a resume of the same session.
+      else await backend.prompt(row.id, body, row.projectKey)
       replyEpochs.current.set(key, (replyEpochs.current.get(key) ?? 0) + 1) // M15: supersedes any in-flight flush
       savedReplies.current.delete(key)
     } catch {
@@ -139,7 +143,7 @@ export function usePeek({
       // The saved-reply queue re-sends through `client` off a string key alone, with no way back to
       // the row's adapter — so a process-backed reply is reported as failed rather than queued to be
       // delivered to the wrong place later.
-      if (backend) return setPeekError({ id: row.id, message: `couldn't send — ${backend.name} refused the resume` })
+      if (external) return setPeekError({ id: row.id, message: `couldn't send — ${backend.name} refused the resume` })
       savedReplies.current.set(key, body)
       setPeekError({ id: row.id, message: "couldn't send — saved for when it's reachable" })
       rerender()

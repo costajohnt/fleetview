@@ -9,6 +9,7 @@ import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSyn
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
+import { claudeNormaliser, normaliseClaudeSessions } from '../../backend-normalise.ts'
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
@@ -338,5 +339,9 @@ export function createClaudeBackend({
     delete: async () => {
       throw new Error('claude cannot delete a session: it would mean unlinking a transcript out of ~/.claude/projects, which is Claude Code state')
     },
+    // The translation into the store's vocabulary lives in backend-normalise.ts with the rest of
+    // the vocabulary machinery; the contract is what puts it on this adapter (H3).
+    normaliseSessions: normaliseClaudeSessions,
+    createNormaliser: claudeNormaliser,
   }
 }
