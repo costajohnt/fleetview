@@ -1,6 +1,7 @@
 // The backend registry: the one place that knows which agent CLIs fleetview can drive and how to
-// build one. Everything else takes a `Record<string, Backend>` and a name, so adding a fourth CLI is
-// a line here plus its own folder — not a branch in the roster.
+// build one. Everything else takes a `Record<string, Backend>` and a name — normalisation included,
+// since every adapter carries its own normaliseSessions/createNormaliser (#83) — so adding a fourth
+// CLI is a line here plus its own folder, not a branch in the roster or in backend-normalise.ts.
 import type { Backend, ServerRef } from '../types.ts'
 import type { OpencodeClient } from './opencode/client.ts'
 import { createOpencodeBackend } from './opencode/index.ts'

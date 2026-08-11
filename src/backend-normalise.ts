@@ -19,34 +19,31 @@ import type { OpencodeEvent } from './types.ts'
 // inventing a fourth vocabulary the store silently drops.
 export type StoreEvent = OpencodeEvent
 
-// Rows for `setSessions`. opencode's own listings pass through untouched — this must never become a
-// place opencode's payloads get rewritten, because that is the one path where behaviour is fixed.
-export function normaliseSessions(backend: string, rows: any[] | null | undefined): any[] {
-  const list = rows ?? []
-  if (backend === 'opencode') return list
-  if (backend === 'claude') {
-    // `created` is the transcript's first record timestamp (projects.ts reads it out during the
-    // scan it already runs), not its mtime: the age column means time-since-creation on every other
-    // row, and using the mtime made a nine-day-old claude session that had just replied render
-    // `now`. 0 when no record carried a parseable timestamp — ageLabel's `createdAt || updatedAt`
-    // then falls back to the mtime, which is the behaviour this row had before.
-    // #46: the title passes through empty rather than falling back to the id. Claude Code does not
-    // name a session on creation, so `|| s.id` put a UUID in the title of every session it had not
-    // titled yet — and a UUID is not `isPlaceholderTitle`, so the first relist after a dispatch
-    // overwrote the provisional prompt the store was showing and the row read as its own id while
-    // peek showed the prompt. An empty title is the honest report of "this backend has not named it",
-    // which is exactly what the store's placeholder test is looking for. What a never-dispatched
-    // session shows instead is projects.ts's job: it falls back to the transcript's opening prompt.
-    return list.map((s: any) => ({ id: s.id, title: s.title ?? '', time: { created: s.createdAt ?? 0, updated: s.updatedAt ?? 0 } }))
-  }
-  if (backend === 'copilot') {
-    // Already carries id/title/time in milliseconds (sessions.ts converts them deliberately), so
-    // this is a projection rather than a conversion — `running` is dropped because liveness reaches
-    // the store through the event path, where it can be told apart from a finished run.
-    return list.map((s: any) => ({ id: s.id, title: s.title || s.id, time: s.time }))
-  }
-  return list
-}
+// Rows for `setSessions`, one function per backend, referenced from each adapter's
+// `normaliseSessions` (Backend contract, H3). opencode has no entry here: its own listings pass
+// through untouched (identity on the adapter), and this file must never become a place opencode's
+// payloads get rewritten, because that is the one path where behaviour is fixed.
+
+// `created` is the transcript's first record timestamp (projects.ts reads it out during the
+// scan it already runs), not its mtime: the age column means time-since-creation on every other
+// row, and using the mtime made a nine-day-old claude session that had just replied render
+// `now`. 0 when no record carried a parseable timestamp — ageLabel's `createdAt || updatedAt`
+// then falls back to the mtime, which is the behaviour this row had before.
+// #46: the title passes through empty rather than falling back to the id. Claude Code does not
+// name a session on creation, so `|| s.id` put a UUID in the title of every session it had not
+// titled yet — and a UUID is not `isPlaceholderTitle`, so the first relist after a dispatch
+// overwrote the provisional prompt the store was showing and the row read as its own id while
+// peek showed the prompt. An empty title is the honest report of "this backend has not named it",
+// which is exactly what the store's placeholder test is looking for. What a never-dispatched
+// session shows instead is projects.ts's job: it falls back to the transcript's opening prompt.
+export const normaliseClaudeSessions = (rows: any[] | null | undefined): any[] =>
+  (rows ?? []).map((s: any) => ({ id: s.id, title: s.title ?? '', time: { created: s.createdAt ?? 0, updated: s.updatedAt ?? 0 } }))
+
+// Already carries id/title/time in milliseconds (sessions.ts converts them deliberately), so
+// this is a projection rather than a conversion — `running` is dropped because liveness reaches
+// the store through the event path, where it can be told apart from a finished run.
+export const normaliseCopilotSessions = (rows: any[] | null | undefined): any[] =>
+  (rows ?? []).map((s: any) => ({ id: s.id, title: s.title || s.id, time: s.time }))
 
 // The status half of a backend's state, in store events. Order matters and is load-bearing:
 //   - `session.status busy` is what sets hasRun/clears a previous error, so it leads.
@@ -117,7 +114,7 @@ const outputEvents = (sessionID: string, text: string): StoreEvent[] => [
 // Claude Code: raw `--output-format=stream-json` lines, one session's run interleaved with any other
 // session's in the same directory. Every line carries `session_id` (verified against 2.1.220 — see
 // the wire doc), which is what makes the per-session fold possible from a shared stream.
-function claudeNormaliser(): (event: unknown) => StoreEvent[] {
+export function claudeNormaliser(): (event: unknown) => StoreEvent[] {
   const states = new Map<string, ClaudeRunState>()
   return (event: unknown) => {
     const e = event as any
@@ -144,7 +141,7 @@ function claudeNormaliser(): (event: unknown) => StoreEvent[] {
 
 // Copilot CLI: index.ts already folds the JSONL and emits one `copilot.session` per change, so the
 // state arrives whole and this only has to diff it against what was reported last.
-function copilotNormaliser(): (event: unknown) => StoreEvent[] {
+export function copilotNormaliser(): (event: unknown) => StoreEvent[] {
   const last = new Map<string, { status: string; lastOutput: string }>()
   return (event: unknown) => {
     const e = event as any
@@ -173,11 +170,3 @@ function copilotNormaliser(): (event: unknown) => StoreEvent[] {
   }
 }
 
-// One normaliser per events() subscription. opencode's payloads are already the store's vocabulary —
-// they ARE the vocabulary — so its normaliser is identity, which is what keeps the opencode path
-// free of any normalisation cost or behaviour change at all.
-export function createNormaliser(backend: string): (event: unknown) => StoreEvent[] {
-  if (backend === 'claude') return claudeNormaliser()
-  if (backend === 'copilot') return copilotNormaliser()
-  return (event: unknown) => [event as StoreEvent]
-}
