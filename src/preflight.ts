@@ -20,16 +20,30 @@ export function nodeVersionError(version: string): string | null {
   return 'fleetview needs Node >= ' + MIN_NODE_MAJOR + ' (you have ' + version + '). Upgrade: https://nodejs.org or brew upgrade node'
 }
 
+// The guard body, extracted so the refusal path is testable: refuse-and-exit on an old Node,
+// otherwise reach cli through the injected dynamic import — whose failure must also be reported
+// and exit non-zero, not vanish as an unhandled rejection.
+export function run(
+  versions: { node: string },
+  importImpl: () => Promise<{ main: () => unknown }>,
+  exitImpl: (code: number) => void,
+): Promise<unknown> | undefined {
+  const problem = nodeVersionError(versions.node)
+  if (problem) {
+    console.error(problem)
+    exitImpl(1)
+    return undefined
+  }
+  return importImpl()
+    .then((cli) => cli.main())
+    .catch((e) => {
+      console.error(e.message)
+      exitImpl(1)
+    })
+}
+
 // Same entry guard as cli.ts: realpath argv[1] before comparing, because node resolves the ESM
 // main module's symlinks for import.meta.url while argv[1] stays the symlink npm's bin shim made.
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
-  const problem = nodeVersionError(process.versions.node)
-  if (problem) {
-    console.error(problem)
-    process.exit(1)
-  }
-  import('./cli.ts').then((cli) => cli.main()).catch((e) => {
-    console.error(e.message)
-    process.exit(1)
-  })
+  run(process.versions, () => import('./cli.ts'), process.exit)
 }
