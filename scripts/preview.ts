@@ -8,18 +8,20 @@
 process.env.FORCE_COLOR = '3'
 process.env.FLEETVIEW_REDUCED_MOTION = '1'
 
+// Type-only, so it is erased and cannot import anything before the env above is set.
+import type { RosterSession } from '../src/ui/view-types.ts'
+
 const React = (await import('react')).default
 const { render } = await import('ink-testing-library')
 const { writeFileSync, mkdirSync } = await import('node:fs')
 const { dirname, join } = await import('node:path')
 const { fileURLToPath } = await import('node:url')
 
-// TODO(types): src components are untyped here; cast to any so fixture props (loose render shapes) pass.
-const { Roster } = (await import('../src/ui/roster.ts')) as any
-const { DispatchInput } = (await import('../src/ui/dispatch-input.ts')) as any
-const { Peek } = (await import('../src/ui/peek.ts')) as any
-const { Help } = (await import('../src/ui/help.ts')) as any
-const { Header } = (await import('../src/ui/header.ts')) as any
+const { Roster } = await import('../src/ui/roster.ts')
+const { DispatchInput } = await import('../src/ui/dispatch-input.ts')
+const { Peek } = await import('../src/ui/peek.ts')
+const { Help } = await import('../src/ui/help.ts')
+const { Header } = await import('../src/ui/header.ts')
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'previews')
 mkdirSync(OUT, { recursive: true })
@@ -38,7 +40,7 @@ const pr = (number: number, state = 'OPEN') => ({
   reviewDecision: '',
 })
 
-const session = (id: string, title: string, status: string, over: any = {}) => ({
+const session = (id: string, title: string, status: string, over: Partial<RosterSession> = {}): RosterSession => ({
   id,
   projectKey: '/repo',
   title,
@@ -72,7 +74,7 @@ const groups = [
   },
 ]
 
-const shoot = (name: string, element: any) => {
+const shoot = (name: string, element: React.ReactElement) => {
   const frame = render(element).lastFrame() ?? ''
   writeFileSync(join(OUT, `${name}.txt`), frame + '\n')
   console.log(`${name}: ${frame.split('\n').length} rows`)

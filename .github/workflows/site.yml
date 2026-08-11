@@ -35,7 +35,7 @@ jobs:
         run: |
           mkdir -p _site/images
           cp site/index.html site/style.css site/CNAME _site/
-          cp docs/images/roster.png docs/images/peek.png \
+          cp docs/images/roster.png docs/images/peek-answer.png \
              docs/images/dispatch-suggestions.png docs/images/backends.png _site/images/
           cp docs/demo.gif _site/images/
       # Every src="images/..." in the page must exist in the artifact. Catches a screenshot

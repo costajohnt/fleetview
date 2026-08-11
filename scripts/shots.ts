@@ -13,6 +13,9 @@
 process.env.FORCE_COLOR = '3'
 process.env.FLEETVIEW_REDUCED_MOTION = '1' // pin animation frames so reruns are byte-stable
 
+// Type-only, so it is erased and cannot import anything before the env above is set.
+import type { PeekQuestion, PeekPermission, RosterSession } from '../src/ui/view-types.ts'
+
 const React = (await import('react')).default
 const { render } = await import('ink-testing-library')
 const { writeFileSync, mkdirSync, readdirSync, existsSync, statSync } = await import('node:fs')
@@ -21,11 +24,11 @@ const { dirname, join } = await import('node:path')
 const { fileURLToPath } = await import('node:url')
 const { homedir } = await import('node:os')
 
-// TODO(types): src components are untyped here; cast to any so fixture props (loose render shapes) pass.
-const { Roster } = (await import('../src/ui/roster.ts')) as any
-const { DispatchInput } = (await import('../src/ui/dispatch-input.ts')) as any
-const { Peek } = (await import('../src/ui/peek.ts')) as any
-const { Header } = (await import('../src/ui/header.ts')) as any
+const { Roster } = await import('../src/ui/roster.ts')
+const { DispatchInput } = await import('../src/ui/dispatch-input.ts')
+const { Peek } = await import('../src/ui/peek.ts')
+const { Header } = await import('../src/ui/header.ts')
+const { Help } = await import('../src/ui/help.ts')
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const OUT = join(ROOT, 'docs', 'images')
@@ -35,7 +38,7 @@ const COLUMNS = 96
 const NOW = 1_753_000_000_000
 
 // ── fixtures ────────────────────────────────────────────────────────────────────────────────────
-const session = (id: string, title: string, status: string, over: any = {}) => ({
+const session = (id: string, title: string, status: string, over: Partial<RosterSession> = {}): RosterSession => ({
   id,
   projectKey: '/repo',
   title,
@@ -46,7 +49,7 @@ const session = (id: string, title: string, status: string, over: any = {}) => (
 })
 
 // A question exactly in the shape opencode 1.18.4's question.asked carries (see ui/peek.ts).
-const question = {
+const question: PeekQuestion = {
   id: 'q1',
   sessionID: 's1',
   questions: [
@@ -62,11 +65,10 @@ const question = {
 }
 
 // permission.asked's verified shape: {id, sessionID, permission, patterns, ...}
-const permission = { id: 'p1', sessionID: 's1', permission: 'bash', patterns: ['git push'] }
+const permission: PeekPermission = { id: 'p1', sessionID: 's1', permission: 'bash', patterns: ['git push'] }
 
 // ── scenes ──────────────────────────────────────────────────────────────────────────────────────
-// TODO(types): scene map holds arbitrary React elements keyed by name; any keeps fixtures loose.
-const scenes: Record<string, any> = {}
+const scenes: Record<string, React.ReactElement> = {}
 
 // Peek answering in place — the surface no existing screenshot shows: a pending permission with
 // its y/a/d hint, a question rendered as a numbered list, and the reply input under both.
@@ -87,6 +89,30 @@ scenes['peek-answer'] = React.createElement(
     now: NOW,
   },
 )
+
+// Peek without anything pending: a session's recent output and the reply input under it.
+scenes['peek'] = React.createElement(Peek, {
+  target: session('s2', 'port the parser', 'running', { snippet: 'rewriting tokenizer edge cases' }),
+  messages: [
+    {
+      info: { role: 'assistant' },
+      parts: [
+        {
+          type: 'text',
+          text: 'The old parser special-cased escaped quotes in three places; the new tokenizer handles them in one. Porting the last call site now, then the fixture tests.',
+        },
+      ],
+    },
+  ],
+  pending: [],
+  pendingQuestions: [],
+  columns: COLUMNS,
+  maxRows: 24,
+  now: NOW,
+})
+
+// The `?` shortcut list — generated from the same table the keys are bound from.
+scenes['help'] = React.createElement(Help, { maxRows: 24, columns: COLUMNS })
 
 // The input's grammar, mid-completion: `@` opened the target list and tab applies the first match.
 scenes['dispatch-suggestions'] = React.createElement(DispatchInput, {
@@ -191,6 +217,28 @@ scenes['groups'] = React.createElement(
     selectedKey: 'header:state:completed',
     collapsed: new Set(['state:completed']),
     offlineProjects: new Set(),
+    columns: COLUMNS,
+    now: NOW,
+  }),
+  React.createElement(DispatchInput, { value: '', view: 'main', kind: 'empty', columns: COLUMNS, focused: true }),
+)
+
+// The plain full frame — header, the three state groups, input — nothing folded or collapsed.
+// This one is the site's og:image (site.yml copies it), which wants a still rather than the GIF.
+scenes['roster'] = React.createElement(
+  React.Fragment,
+  null,
+  React.createElement(Header, {
+    sessions: stateGroups.flatMap((g) => g.sessions),
+    model: { providerID: 'anthropic', id: 'claude-opus-5' },
+    cwd: '/repo/fleetview',
+    columns: COLUMNS,
+  }),
+  React.createElement(Roster, {
+    groups: stateGroups,
+    selectedKey: 'state:waiting:s1',
+    collapsed: new Set<string>(),
+    offlineProjects: new Set<string>(),
     columns: COLUMNS,
     now: NOW,
   }),

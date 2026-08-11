@@ -27,7 +27,7 @@ const VIEW_COMMANDS = new Set(['exit', 'quit', 'model', 'fork'])
 
 // #51: the two view commands that take no arguments, and the only two whose action is
 // irreversible. `/model <provider>/<model>` and `/fork [prompt]` legitimately take args
-// (README.md:111), so they stay view commands whatever follows them; `/exit codes should be
+// (docs/guide.md, Dispatching), so they stay view commands whatever follows them; `/exit codes should be
 // documented in the README` is a prompt that happens to start with the word, and quitting on it
 // destroyed the text with no way to recover it.
 const NO_ARG_VIEW_COMMANDS = new Set(['exit', 'quit'])

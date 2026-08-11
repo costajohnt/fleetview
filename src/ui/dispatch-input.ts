@@ -2,6 +2,7 @@ import React from 'react'
 import { Box, Text } from 'ink'
 import { graphemes, truncateGraphemes } from '../text-utils.ts'
 import { theme } from './theme.ts'
+import type { SuggestionList } from './view-types.ts'
 
 // Agent view's input is always focused and always visible; it is the home row of the whole screen.
 // Text state lives in App, not here — App's single useInput handler has to decide whether a
@@ -14,7 +15,7 @@ import { theme } from './theme.ts'
 // that App had not reserved, so the frame was a row taller than the terminal and scrolled the top
 // of the roster out of the repaint region. The full list lives behind `?`, which is where agent
 // view puts it too.
-export function hints({ empty, view, kind }: { empty: boolean; view: string; kind: string }) {
+export function hints({ empty, view, kind }: { empty: boolean; view: string; kind?: string }) {
   if (kind === 'filter') return 'filtering · esc clears'
   const verb = kind === 'shell' ? '⏎ run shell job' : '⏎ dispatch · ⇧⏎ +attach'
   const primary = empty ? '⏎ attach · space peek' : verb
@@ -34,8 +35,21 @@ export const INPUT_BOX_ROWS = 2
 
 // Every line here is one physical row, truncated rather than wrapped: App reserves rows by
 // counting them, so a wrap silently makes the frame taller than the terminal.
-// TODO(types): props are dynamic UI state (suggestions is opencode wire data) — any.
-export function DispatchInput({ value, view, notice, kind, suggestions, columns = 80, focused = true }: any) {
+export type DispatchInputProps = {
+  value: string
+  // 'main' | 'browse' as App uses them, but the footer only ever compares against 'browse', so any
+  // future view name renders the default hints rather than failing to typecheck.
+  view: string
+  notice?: string | null
+  // What parseInput made of the text — 'dispatch' | 'shell' | 'filter' | 'empty'. Optional because
+  // the hints have a default reading ("⏎ dispatch") for an unclassified input.
+  kind?: string
+  suggestions?: SuggestionList | null
+  columns?: number
+  focused?: boolean
+}
+
+export function DispatchInput({ value, view, notice, kind, suggestions, columns = 80, focused = true }: DispatchInputProps) {
   const empty = value.length === 0
   // A solid block caret, no blink (John's polish pass — the animation earned nothing).
   const caret = focused ? '█' : ''
@@ -50,11 +64,11 @@ export function DispatchInput({ value, view, notice, kind, suggestions, columns 
     notice ? React.createElement(Text, { color: theme.warn }, fit(notice)) : null,
     // "Typing `@` lists these targets" / "`/<command>` Suggest skills and commands". Tab applies
     // the first one.
-    ...(suggestions?.matches ?? []).map((m: any) =>
+    ...(suggestions?.matches ?? []).map((m) =>
       React.createElement(
         Box,
         { key: `${m.kind}:${m.name}`, gap: 1 },
-        React.createElement(Text, { color: m.kind === 'agent' ? theme.info : m.kind === 'repo' ? theme.accent : undefined }, `  ${suggestions.sigil}${m.name}`),
+        React.createElement(Text, { color: m.kind === 'agent' ? theme.info : m.kind === 'repo' ? theme.accent : undefined }, `  ${suggestions?.sigil}${m.name}`),
         React.createElement(Text, { dimColor: true }, m.kind),
       ),
     ),

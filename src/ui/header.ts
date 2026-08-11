@@ -5,6 +5,7 @@ import { Box, Text } from 'ink'
 import { truncateGraphemes } from '../text-utils.ts'
 import { FINISHED_STATUSES } from '../session-store.ts'
 import { theme } from './theme.ts'
+import type { ModelRef, StatusCountable } from './view-types.ts'
 
 const VERSION = createRequire(import.meta.url)('../../package.json').version
 
@@ -16,9 +17,9 @@ const VERSION = createRequire(import.meta.url)('../../package.json').version
 // the roster's three always-shown groups. `awaiting input` counts only sessions blocked on a
 // server-reported request (same rule as the tab title, or the two numbers on screen contradict
 // each other), and `completed` collects the same statuses as the roster's completed group.
-export function summarise(sessions: any) {
-  const n = (pred: (s: any) => boolean) => sessions.filter(pred).length
-  const awaiting = n((s) => s.status === 'waiting' && s.pendingRequest)
+export function summarise(sessions: readonly StatusCountable[]) {
+  const n = (pred: (s: StatusCountable) => boolean) => sessions.filter(pred).length
+  const awaiting = n((s) => s.status === 'waiting' && Boolean(s.pendingRequest))
   const working = n((s) => s.status === 'running')
   const failed = n((s) => s.status === 'error')
   const completed = n((s) => FINISHED_STATUSES.has(s.status))
@@ -45,8 +46,15 @@ const MASCOT_WIDTH = 7 // icon column plus the gap before the text block
 // 5 = blank row above the mascot, three icon/text rows, blank row before the roster.
 export const headerRows = (columns: number) => (columns >= MASCOT_WIDTH + 40 ? 5 : 3)
 
-// TODO(types): model is opencode wire data, sessions are dynamic rows — any.
-export function Header({ sessions = [], model, cwd, columns = 80 }: any) {
+export type HeaderProps = {
+  sessions?: readonly StatusCountable[]
+  // Whatever `/model` set, or null/undefined for "the server's default".
+  model?: ModelRef | null
+  cwd?: string | null
+  columns?: number
+}
+
+export function Header({ sessions = [], model, cwd, columns = 80 }: HeaderProps) {
   const width = Math.max(20, columns)
   const fit = (text: string) => truncateGraphemes(text, width)
   const modelText = model ? `${model.providerID}/${model.id}` : 'default model'

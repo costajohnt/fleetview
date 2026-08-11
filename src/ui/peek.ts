@@ -5,6 +5,8 @@ import { graphemes, truncateGraphemes, osc8, stripControl } from '../text-utils.
 import { prStatus, prColor } from '../pull-requests.ts'
 import { permissionLabel, questionLabel, messageBody, errorLabel } from '../session-store.ts'
 import { theme } from './theme.ts'
+import type { OpencodeMessage, PullRequest } from '../types.ts'
+import type { PeekPermission, PeekQuestion, PeekQuestionOption, PeekRow, RosterSession } from './view-types.ts'
 
 // Only 'text' parts are ever the actual reply — 'reasoning' parts carry `.text` too but are
 // chain-of-thought and must never render (see .superpowers/sdd/v3-task-1-2-report.md).
@@ -13,7 +15,7 @@ import { theme } from './theme.ts'
 // can't disagree about what a session said. It owns the defensive shape handling (a message missing
 // `parts` would otherwise throw inside render, and an exception in an Ink render takes down the
 // whole app rather than one panel) and the stripControl (M12) this line used to do.
-const messageText = (m: any) => messageBody(m)
+const messageText = (m: OpencodeMessage) => messageBody(m)
 
 const ROLE_LABEL: Record<string, string> = { user: 'you:', assistant: 'opencode:' }
 
@@ -42,17 +44,17 @@ export function wrapLines(text: string, columns: number) {
 // Stripped here rather than at each render site so peek's numbered list, the Tab suggestion and
 // use-peek's answer all get a clean label from one place. Stripping before the answer goes back on
 // the wire is deliberate: a label that only matches with an ESC in it is not a label worth echoing.
-export const questionOptions = (q: any) =>
-  (q?.questions?.[0]?.options ?? []).map((o: any) => (typeof o?.label === 'string' ? { ...o, label: stripControl(o.label) } : o))
+export const questionOptions = (q: PeekQuestion | null | undefined): PeekQuestionOption[] =>
+  (q?.questions?.[0]?.options ?? []).map((o) => (typeof o?.label === 'string' ? { ...o, label: stripControl(o.label) } : o))
 
 // "Press Tab to fill the input with a suggested reply." The only reply fleetview can suggest honestly
 // is one the session already offered: the first option of a pending question. With no options
 // there is nothing to suggest, and inventing one would put words in the user's mouth.
-export const suggestedReply = (question: any) => questionOptions(question)[0]?.label ?? null
+export const suggestedReply = (question: PeekQuestion | null | undefined) => questionOptions(question)[0]?.label ?? null
 
 // "A `waiting Nm` line shows how long the session has waited — different from the row's age." The
 // row's age is how long the session has existed; this is how long it has been sitting on you.
-export function waitedLabel(since: number, now = Date.now()) {
+export function waitedLabel(since: number | undefined, now = Date.now()) {
   if (!since) return null
   const sec = Math.max(0, Math.floor((now - since) / 1000))
   if (sec < 60) return `waiting ${sec}s`
@@ -79,7 +81,7 @@ function wrapBanner(text: string, columns: number, maxRows = 2) {
 // "Open the peek panel to see them all" — the row can only show a number and a colour, so peek is
 // where a session's pull requests are actually listed, one per line, with the URL that the row
 // deliberately does not hyperlink.
-const prLine = (pr: any) => `${`#${pr.number}`} ${prStatus(pr)} · ${pr.url}`
+const prLine = (pr: PullRequest) => `${`#${pr.number}`} ${prStatus(pr)} · ${pr.url}`
 
 
 // messages: null = loading, 'error' = fetch failed, [] = loaded-but-empty, array = loaded turns.
@@ -87,7 +89,30 @@ const prLine = (pr: any) => `${`#${pr.number}`} ${prStatus(pr)} · ${pr.url}`
 // rest just count toward the "(+N more)" hint. pendingQuestions: same shape, and answerable here —
 // a question's predefined choices render as a numbered list and a number key picks one; anything
 // else takes a typed reply. error: peek-local respondPermission failure line.
-// TODO(types): props are session/opencode wire data plus dynamic UI state — any.
+// The row peek is open on. Only these four fields are read here, and a caller may hold nothing more
+// than a title and a project (App re-reads the live row, the fixtures build one by hand).
+export type PeekTarget = Pick<RosterSession, 'title' | 'projectKey' | 'waitingSince' | 'prs'>
+
+// null = loading, 'error' = the fetch failed, 'unsupported' = this backend has no wire transcript,
+// an array = the loaded turns (possibly empty).
+export type PeekMessages = OpencodeMessage[] | null | 'error' | 'unsupported'
+
+export type PeekProps = {
+  target: PeekTarget
+  messages: PeekMessages
+  pending?: PeekPermission[]
+  pendingQuestions?: PeekQuestion[]
+  error?: string | null
+  maxRows?: number
+  columns?: number
+  reply?: string
+  savedReply?: string | null
+  now?: number
+  prReason?: string | null
+  canAnswer?: boolean
+  backend?: string | null
+}
+
 export function Peek({
   target,
   messages,
@@ -106,14 +131,14 @@ export function Peek({
   // what the user actually has to do.
   canAnswer = true,
   backend = null,
-}: any) {
-  let lines
+}: PeekProps) {
+  let lines: PeekRow[]
   if (messages === null) lines = [{ text: 'loading…', dim: true }]
   else if (messages === 'error') lines = [{ text: "couldn't load messages", dim: true }]
   else if (messages === 'unsupported') lines = [{ text: 'no transcript over the wire — → to attach and read it', dim: true }]
   else if (messages.length === 0) lines = [{ text: 'no messages yet', dim: true }]
   else {
-    lines = messages.slice(-2).flatMap((m: any) => {
+    lines = messages.slice(-2).flatMap((m) => {
       const role = m?.info?.role
       const body = messageText(m)
       // #24: a failed turn carries its reason on `info.error` and, in the case that motivated this
@@ -122,7 +147,7 @@ export function Peek({
       // the body is empty, so a turn that said something before failing keeps both. errorLabel
       // stripControls it, like every other model-provided string this panel renders (M12).
       const err = errorLabel(m?.info?.error)
-      const rows: any[] = [{ text: role ? ROLE_LABEL[role] ?? `${role}:` : 'message:', dim: true }]
+      const rows: PeekRow[] = [{ text: role ? ROLE_LABEL[role] ?? `${role}:` : 'message:', dim: true }]
       if (body || !err) rows.push({ text: body })
       if (err) rows.push({ text: `error: ${err}`, color: theme.danger })
       return rows
@@ -133,7 +158,10 @@ export function Peek({
   const prs = target.prs ?? []
   // Each line is truncated rather than wrapped: a pull request URL is long, and letting three of
   // them wrap would eat the body of the panel on a narrow terminal.
-  const prRows = prs.map((pr: any) => ({ text: osc8(pr.url, truncateGraphemes(prLine(pr), columns)), color: prColor(pr) }))
+  // String(), not `?? ''`: `url` is optional on the wire type, and the line itself already
+  // interpolates it — so an absent url renders exactly what it always did rather than silently
+  // becoming a hyperlink to nowhere.
+  const prRows = prs.map((pr) => ({ text: osc8(String(pr.url), truncateGraphemes(prLine(pr), columns)), color: prColor(pr) }))
   // No pull requests and a reason means gh could not answer. Saying so here rather than as a
   // startup notice keeps fleetview from nagging in every repository that will never have one.
   const prReasonRow = prs.length === 0 && prReason ? truncateGraphemes(prReason, columns) : null
@@ -161,7 +189,7 @@ export function Peek({
   // Truncation must count rendered terminal ROWS, not message entries — a wrapped multi-line
   // message otherwise overflows the viewport even though it "counted" as one line (F3).
   // `color` rides along with `dim` so a wrapped error line keeps its colour on every row it takes.
-  const rows = lines.flatMap((l: any) => wrapLines(l.text, columns).map((text: string) => ({ text, dim: l.dim, color: l.color })))
+  const rows = lines.flatMap((l) => wrapLines(l.text, columns).map((text) => ({ text, dim: l.dim, color: l.color })))
   // reserve: title row + (permission banner rows + hint row) + (question banner rows + hint row) + (error row), all optional
   // reserve also covers the numbered options and the always-present reply input line.
   const reserved =
@@ -190,7 +218,7 @@ export function Peek({
       React.createElement(Text, { dimColor: true }, basename(target.projectKey) || target.projectKey),
     ),
     waited ? React.createElement(Text, { key: 'waited', dimColor: true }, waited) : null,
-    ...prRows.map((r: any, i: number) => React.createElement(Text, { key: `pr${i}`, color: r.color }, r.text)),
+    ...prRows.map((r, i) => React.createElement(Text, { key: `pr${i}`, color: r.color }, r.text)),
     prReasonRow ? React.createElement(Text, { key: 'prReason', dimColor: true }, prReasonRow) : null,
     ...permRows.map((t, i) => React.createElement(Text, { key: `perm${i}`, color: theme.warn }, t)),
     permLineText
@@ -201,7 +229,7 @@ export function Peek({
         )
       : null,
     ...questionRows.map((t, i) => React.createElement(Text, { key: `q${i}`, color: theme.info }, t)),
-    ...options.map((o: any, i: number) =>
+    ...options.map((o, i) =>
       React.createElement(Text, { key: `opt${i}` }, `  ${i + 1}. ${o.label}`),
     ),
     questionLineText
@@ -221,7 +249,7 @@ export function Peek({
     savedReply
       ? React.createElement(Text, { color: theme.warn }, `saved — will send when it is reachable: ${truncateGraphemes(savedReply, Math.max(8, columns - 40))}`)
       : null,
-    ...slice.map((l: any, i: number) => React.createElement(Text, { key: i, dimColor: l.dim, color: l.color }, l.text)),
+    ...slice.map((l, i) => React.createElement(Text, { key: i, dimColor: l.dim, color: l.color }, l.text)),
     truncated ? React.createElement(Text, { dimColor: true }, '…') : null,
     // The reply input is what makes peek more than a viewer: "Type a reply in the peek panel and
     // press Enter to send it to that session."

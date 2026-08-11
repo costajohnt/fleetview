@@ -2,6 +2,7 @@ import React from 'react'
 import { Box, Text } from 'ink'
 import { truncateGraphemes } from '../text-utils.ts'
 import { theme } from './theme.ts'
+import type { HelpLine } from './view-types.ts'
 
 // `?` opens this, matching agent view's "Press `?` in agent view to see every shortcut in context."
 // Only reachable on an empty input — with text typed, `?` is just a character.
@@ -17,7 +18,7 @@ const SHORTCUTS = [
   ['→', 'attach to the selected session'],
   ['^z', 'detach from an attached session and come back here'],
   ['⌥1..9', 'while attached, jump to that row (best-effort; see FLEETVIEW_NO_ALT_SWITCH)'],
-  ['←', 'while attached, back on empty prompt (opencode app_exit keybind, see README)'],
+  ['←', 'while attached, back on empty prompt (opencode app_exit keybind, see docs/guide.md)'],
   ['^s', 'switch grouping between state and project'],
   ['^r', 'rename the selected session'],
   ['^x', 'stop the session; press again within 2s to delete it'],
@@ -62,7 +63,7 @@ const SECTIONS: [string, string[][]][] = [
   ['fleetview only', FLEETVIEW_ONLY],
 ]
 
-export function helpLines() {
+export function helpLines(): HelpLine[] {
   return SECTIONS.flatMap(([heading, pairs]) => [
     { heading },
     ...pairs.map(([keys, what]) => ({ keys, what })),
@@ -70,7 +71,7 @@ export function helpLines() {
 }
 
 // Pure: the slice of help that fits, plus whether anything was cut. `page` scrolls it.
-export function helpPage(lines: any[], maxRows: number, page = 0) {
+export function helpPage(lines: readonly HelpLine[], maxRows: number, page = 0) {
   const body = Math.max(1, maxRows - 1) // last row is the footer
   const pages = Math.max(1, Math.ceil(lines.length / body))
   const current = Math.min(Math.max(0, page), pages - 1)
@@ -78,14 +79,19 @@ export function helpPage(lines: any[], maxRows: number, page = 0) {
   return { slice: lines.slice(start, start + body), page: current, pages }
 }
 
-export function Help({ maxRows = Infinity, columns = 80, page = 0 }) {
+export type HelpProps = { maxRows?: number; columns?: number; page?: number }
+
+export function Help({ maxRows = Infinity, columns = 80, page = 0 }: HelpProps) {
   const { slice, page: current, pages } = helpPage(helpLines(), maxRows, page)
   const width = Math.max(20, columns)
   return React.createElement(
     Box,
     { flexDirection: 'column' },
     ...slice.map((line, i) =>
-      line.heading
+      // `!== undefined`, not truthiness: a heading is the discriminant between the two line shapes,
+      // and only an explicit undefined check tells the compiler the other branch has keys/what.
+      // Every heading in SECTIONS is a non-empty string, so the branch taken is unchanged.
+      line.heading !== undefined
         ? React.createElement(Text, { key: `h${i}`, bold: true }, line.heading)
         : React.createElement(
             Box,

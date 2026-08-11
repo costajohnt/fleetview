@@ -10,7 +10,7 @@
 [36m→        [39m [2mattach to the selected session[22m
 [36m^z       [39m [2mdetach from an attached session and come back here[22m
 [36m⌥1..9    [39m [2mwhile attached, jump to that row (best-effort; see FLEETVIEW_NO_ALT_SWITCH)[22m
-[36m←        [39m [2mwhile attached, back on empty prompt (opencode app_exit keybind, see README)[22m
+[36m←        [39m [2mwhile attached, back on empty prompt (opencode app_exit keybind, see docs/guide.md)[22m
 [36m^s       [39m [2mswitch grouping between state and project[22m
 [36m^r       [39m [2mrename the selected session[22m
 [36m^x       [39m [2mstop the session; press again within 2s to delete it[22m
