@@ -7,7 +7,6 @@ import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
-import { createNormaliser, normaliseSessions } from './backend-normalise.ts'
 import { hasSession, type Roster as RosterType } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
@@ -563,7 +562,7 @@ export function App({
       if (!backendConns.has(key)) {
         // One normaliser per subscription, because it folds per-session state across events and two
         // directories' runs must never share that fold.
-        const normalise = createNormaliser(name)
+        const normalise = backend.createNormaliser()
         const conn = backend.events(
           { directory: worktree },
           {
@@ -582,7 +581,7 @@ export function App({
         backendConns.set(key, conn)
       }
       try {
-        const list = normaliseSessions(name, await backend.listSessions(worktree))
+        const list = backend.normaliseSessions(await backend.listSessions(worktree))
         if (cancelled) return
         for (const s of list) store.noteOrigin(worktree, s.id, name)
         // Never `retire: true`: that sweep is scoped to a project, not to a backend, so a claude
@@ -1332,7 +1331,7 @@ export function App({
       // Relist parity with the opencode path (H2): the same per-row origin-tagging the periodic
       // listing does (streamBackend), then the shared tail. A CLI that hasn't written its record
       // yet just lists without the new row, and the next poll catches up.
-      const list = normaliseSessions(name, await backend.listSessions(target))
+      const list = backend.normaliseSessions(await backend.listSessions(target))
       for (const s of list) store.noteOrigin(target, s.id, name)
       noteDispatchedProject(target, list)
       if (thenAttach) attach({ id: ref.id, projectKey: target, backend: name })

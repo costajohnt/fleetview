@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { App } from '../src/app.ts'
 import { makePersistRoster } from '../src/roster-store.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
+import { claudeNormaliser, copilotNormaliser, normaliseClaudeSessions, normaliseCopilotSessions } from '../src/backend-normalise.ts'
 import { headerRows } from '../src/ui/header.ts'
 
 // Every render is torn down after its test. Without this, each instance keeps its timers alive —
@@ -3048,6 +3049,12 @@ function fakeBackend(name: string, capabilities: any = {}, sessions: any[] = [])
     delete: vi.fn(async () => {
       throw new Error(`${name} cannot delete`)
     }),
+    // The real normalisers, reached the way the roster reaches them now (Backend contract, #83):
+    // the events these tests push are real claude/copilot wire shapes, so the fake must translate
+    // them the way the real adapter would.
+    normaliseSessions: (rows: any[] | null | undefined) =>
+      name === 'claude' ? normaliseClaudeSessions(rows) : name === 'copilot' ? normaliseCopilotSessions(rows) : rows ?? [],
+    createNormaliser: () => (name === 'claude' ? claudeNormaliser() : name === 'copilot' ? copilotNormaliser() : (e: unknown) => [e]),
   }
 }
 
