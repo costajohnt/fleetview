@@ -7,7 +7,6 @@ import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
-import { createNormaliser, normaliseSessions } from './backend-normalise.ts'
 import { hasSession, type Roster as RosterType } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
@@ -229,21 +228,17 @@ export function App({
   // guard, the store never learned) already happened once. Absent means opencode, which is what
   // makes an opencode-only roster carry no extra state at all.
   const backendNameOf = (row: any) => store.get(row.projectKey, row.id)?.origin ?? DEFAULT_BACKEND
-  // The adapter a row's keys and actions have to go through, or null for opencode — null is what the
-  // call sites read as "take the original client path", so no opencode call changes shape.
-  const backendFor = (row: any) => {
-    const name = backendNameOf(row)
-    return name === DEFAULT_BACKEND ? null : backendRegistry[name] ?? null
-  }
-  // Falls back to opencode's flags (every one true) when a row's backend can't be resolved: a
-  // missing adapter must not silently hide keys that have always worked.
-  const capabilitiesOf = (row: any) =>
-    backendFor(row)?.capabilities ?? backendRegistry[DEFAULT_BACKEND]?.capabilities ?? OPENCODE_CAPABILITIES
-  // The two verbs ^x drives. An opencode row takes the original client call — same method, same
-  // arguments, same order — so the heavily-tested stop/delete paths are untouched; anything else
-  // goes through its own adapter, which is the only thing that knows how to signal a detached CLI.
-  const abortRow = (row: any) => backendFor(row)?.abort(row.id, row.projectKey) ?? client.abortSession(row.id, row.projectKey)
-  const deleteRow = (row: any) => backendFor(row)?.delete(row.id, row.projectKey) ?? client.deleteSession(row.id, row.projectKey)
+  // The adapter a row's keys and actions go through — opencode's included (H2). Its adapter verbs
+  // are byte-for-byte the client calls the roster always made (backends/opencode/index.ts is a
+  // mapping onto OpencodeClient and nothing more), so routing opencode rows through it changes no
+  // call shape. Falls back to the default adapter when a row's backend can't be resolved: a missing
+  // adapter must not make a row inert or silently hide keys that have always worked.
+  const backendFor = (row: any) => backendRegistry[backendNameOf(row)] ?? backendRegistry[DEFAULT_BACKEND]
+  const capabilitiesOf = (row: any) => backendFor(row)?.capabilities ?? OPENCODE_CAPABILITIES
+  // The two verbs ^x drives, through the row's adapter — the only thing that knows whether stopping
+  // means an HTTP abort or signalling a detached CLI's process group.
+  const abortRow = (row: any) => backendFor(row).abort(row.id, row.projectKey)
+  const deleteRow = (row: any) => backendFor(row).delete(row.id, row.projectKey)
   // Selection is a session identity, not a row number: stopping a session moves it from `working`
   // to `completed` mid-keystroke, and an index would silently retarget the second Ctrl+X at
   // whatever slid into that slot. The index is derived from this on every render.
@@ -567,7 +562,7 @@ export function App({
       if (!backendConns.has(key)) {
         // One normaliser per subscription, because it folds per-session state across events and two
         // directories' runs must never share that fold.
-        const normalise = createNormaliser(name)
+        const normalise = backend.createNormaliser()
         const conn = backend.events(
           { directory: worktree },
           {
@@ -586,7 +581,7 @@ export function App({
         backendConns.set(key, conn)
       }
       try {
-        const list = normaliseSessions(name, await backend.listSessions(worktree))
+        const list = backend.normaliseSessions(await backend.listSessions(worktree))
         if (cancelled) return
         for (const s of list) store.noteOrigin(worktree, s.id, name)
         // Never `retire: true`: that sweep is scoped to a project, not to a backend, so a claude
@@ -1286,6 +1281,19 @@ export function App({
   const sameSelection = (a: { projectKey: string; id: string } | null, b: { projectKey: string; id: string } | null) =>
     a?.id === b?.id && a?.projectKey === b?.projectKey
 
+  // The post-dispatch tail both dispatch paths share (H2): the immediate relist that makes the new
+  // row reflect the backend's own record now rather than on the next poll, and the offline-list
+  // cleanup a successful dispatch has just proven right.
+  const noteDispatchedProject = (worktree: string, list: any[]) => {
+    seededProjectKeys.current.add(worktree)
+    store.setSessions(worktree, list, seen)
+    setOfflineProjects((s) => {
+      const next = new Set(s)
+      next.delete(worktree)
+      return next
+    })
+  }
+
   // A dispatch onto a process-backed CLI. Deliberately a separate path rather than a generalisation
   // of the opencode one below: that path carries worktree isolation, shell jobs, a provisional title
   // written between createSession and promptAsync, and a listSessions refresh — all of it opencode's
@@ -1302,6 +1310,7 @@ export function App({
     if (!target) return flash('no projects discovered yet')
     if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
     const typed = input
+    let dispatched = false
     setInput('')
     // Snapshot what was selected when the dispatch left: the auto-select below must not clobber an
     // arrow-key move the user made while the network call was in flight.
@@ -1319,12 +1328,21 @@ export function App({
         // target CLI would be rejected argv rather than a useful default.
         model: dispatchModel?.id ?? undefined,
       })
+      // Past this point the session exists and is running: anything that fails from here is a
+      // refresh problem, not a dispatch problem — same rule as the opencode path below.
+      dispatched = true
       if (name !== DEFAULT_BACKEND) store.noteOrigin(target, ref.id, name)
       store.setProvisionalTitle(target, ref.id, text)
       // `backend` rides the membership so a restart knows which CLI this row belongs to before any
       // event has arrived — the same soft-migration shape as every other member field (absent means
       // opencode).
       updateRoster((prev: any) => withMember(prev, target, ref.id, { prompt: text.slice(0, 2000), backend: name }))
+      // Relist parity with the opencode path (H2): the same per-row origin-tagging the periodic
+      // listing does (streamBackend), then the shared tail. A CLI that hasn't written its record
+      // yet just lists without the new row, and the next poll catches up.
+      const list = backend.normaliseSessions(await backend.listSessions(target))
+      for (const s of list) store.noteOrigin(target, s.id, name)
+      noteDispatchedProject(target, list)
       if (thenAttach) attach({ id: ref.id, projectKey: target, backend: name })
       // No worktree isolation: creating one is opencode's `/experimental/worktree`, and there is no
       // equivalent to ask claude or copilot for. Said out loud in the notice rather than left for the
@@ -1340,6 +1358,7 @@ export function App({
         flash(`dispatched into ${basename(target) || target} on ${name} — it edits the checkout`, 5000)
       }
     } catch {
+      if (dispatched) return flash('session started, but the project list is stale')
       setInput((current) => (current === '' ? typed : current))
       flash(`${name} dispatch failed`)
     }
@@ -1421,13 +1440,7 @@ export function App({
       // refresh problem, not a dispatch problem — handing the prompt back would invite the user
       // to dispatch a second identical session.
       dispatched = true
-      seededProjectKeys.current.add(worktree)
-      store.setSessions(worktree, await client.listSessions(worktree), seen)
-      setOfflineProjects((s) => {
-        const next = new Set(s)
-        next.delete(worktree)
-        return next
-      })
+      noteDispatchedProject(worktree, await client.listSessions(worktree))
       // Say where it went. An `@name` that matches no repository stays in the prompt and the
       // dispatch falls back to another project, which is otherwise invisible until you notice the
       // row is in the wrong place.
@@ -1993,7 +2006,9 @@ export function App({
       onSubmit: async (title) => {
         setMode('roster')
         try {
-          await client.renameSession(target.id, title, target.projectKey)
+          // Through the adapter, not raw client (H2): rename mode is capability-gated on entry, so
+          // only a backend whose adapter can rename ever reaches this call.
+          await backendFor(target).rename(target.id, title, target.projectKey)
           store.apply(target.projectKey, { type: 'session.updated', properties: { info: { id: target.id, title } } })
           setOfflineProjects((s) => {
             const next = new Set(s)

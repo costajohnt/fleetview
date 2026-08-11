@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Backend } from '../../types.ts'
+import { copilotNormaliser, normaliseCopilotSessions } from '../../backend-normalise.ts'
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { foldEvents, initialRun, parseJsonlChunk, type CopilotStatus, type RunState } from './events.ts'
 import { listSessions, lockInfo, runningPid, sessionStateDir } from './sessions.ts'
@@ -334,6 +335,10 @@ export function createCopilotBackend({
     async delete() {
       throw new Error('copilot cannot delete a session')
     },
+    // The translation into the store's vocabulary lives in backend-normalise.ts with the rest of
+    // the vocabulary machinery; the contract is what puts it on this adapter (H3).
+    normaliseSessions: normaliseCopilotSessions,
+    createNormaliser: copilotNormaliser,
   }
 }
 
