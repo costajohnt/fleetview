@@ -518,3 +518,33 @@ test('a pre-existing run log is re-tightened to 0600 on the next run', async () 
   expect(statSync(log).mode & 0o777).toBe(0o600)
   expect(statSync(runDir).mode & 0o777).toBe(0o700)
 })
+
+// The cursors map gains an entry per session ever tailed, and reap/deletion is the only thing that
+// removes a session's files — so without pruning a long-lived subscription pins an offset, a decoder
+// and a partial-line string per session forever. The proof pruning happened is behavioral: the log
+// keeps its inode throughout, so only a dropped cursor explains a re-read from offset zero.
+test('a cursor whose session vanished is pruned, so the log is re-read from the start when it returns', async () => {
+  const pollMs = 20
+  const { b, runDir } = backend({ pollMs })
+  const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
+  const log = join(runDir, `${ref.id}.jsonl`)
+  const meta = join(runDir, `${ref.id}.json`)
+  const onEvent = vi.fn()
+  const sub = b.events({ directory: '/repo/alpha' }, { onEvent })
+  try {
+    appendFileSync(log, JSON.stringify({ type: 'system', subtype: 'init', session_id: ref.id }) + '\n')
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    // The meta is what makes the run visible to the poll; hiding it simulates a reaped run. The log
+    // itself stays put, so its inode and size never change — a surviving cursor would resume at the
+    // old offset and stay silent forever.
+    renameSync(meta, `${meta}.hidden`)
+    await new Promise((r) => setTimeout(r, pollMs * 5)) // several polls with the session invisible
+    renameSync(`${meta}.hidden`, meta)
+    // The same line again is only reachable from offset zero: a fresh cursor, which is the prune.
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', { type: 'system', subtype: 'init', session_id: ref.id })
+  } finally {
+    sub.stop()
+    await sub.done
+  }
+})
