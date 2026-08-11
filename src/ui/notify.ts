@@ -34,7 +34,9 @@ export type SpawnLike = (
 // or question. The `?` heuristic is a guess about prose, and a guess should not put a number in
 // the user's tab title or interrupt them; it earns a place in the `needs input` group and nothing
 // louder.
-export const titleFor = (sessions: readonly StatusCountable[]) => {
+// Generic for the same reason summarise is: the tab title counts statuses off whatever row shape
+// the caller holds, and must not reject one for carrying fields it doesn't read.
+export const titleFor = <T extends StatusCountable>(sessions: readonly T[]) => {
   const waiting = sessions.filter((s) => s.status === 'waiting' && Boolean(s.pendingRequest)).length
   return waiting > 0 ? `${waiting} awaiting input · fleetview` : 'fleetview'
 }

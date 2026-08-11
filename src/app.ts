@@ -7,7 +7,7 @@ import { graphemes, stripEscapeResidue } from './text-utils.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
-import { hasSession, type Roster as RosterType } from './roster-store.ts'
+import { hasSession, type Roster as RosterType, type RosterSession as RosterMember } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
 import { DispatchInput, inputRows, INPUT_BOX_ROWS } from './ui/dispatch-input.ts'
@@ -23,8 +23,13 @@ import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
 import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety } from './worktree.ts'
 import { fetchPullRequests, branchOf, hasOpenPr } from './pull-requests.ts'
 import { theme } from './ui/theme.ts'
+import { asNumber, asString, isRecord } from './types.ts'
+import type { AppAction, AttachSibling, AttachTarget, Backend, BackendCapabilities, ModelPair, MouseEvent as SgrMouseEvent, Project, PullRequest, SeedChain, ServerRef, StreamProject } from './types.ts'
+import type { SeenMap } from './seen-store.ts'
+import type { SessionStore } from './session-store.ts'
+import type { RosterClient, AgentInfo, CommandInfo, ProviderInfo } from './backends/opencode/client.ts'
+import type { RosterGroup, RosterSession } from './ui/view-types.ts'
 
-// TODO(types): opencode wire data (project rows, session rows) is dynamic; roster shape reused from roster-store.
 type RosterState = RosterType
 
 const VISIBLE_PER_PROJECT = 10
@@ -51,16 +56,16 @@ const STATE_GROUPS = [
   // status. `match` reads the decoration set below (s.pinned), not roster state directly, so the
   // group model stays pure. Unlike the three status groups it has no placeholder — an empty
   // pinned section is noise, agent view hides it too.
-  { key: 'pinned', label: 'pinned', match: (s: any) => Boolean(s.pinned) },
+  { key: 'pinned', label: 'pinned', match: (s: RosterSession) => Boolean(s.pinned) },
   // `hint` shows under an empty status section, agent view's "description under each" — the skeleton
   // is only worth its rows if it teaches a first-time user what the three sections mean.
-  { key: 'waiting', label: 'needs input', hint: 'a session is asking you something', match: (s: any) => s.status === 'waiting' },
-  { key: 'running', label: 'working', hint: 'a session is running right now', match: (s: any) => s.status === 'running' },
+  { key: 'waiting', label: 'needs input', hint: 'a session is asking you something', match: (s: RosterSession) => s.status === 'waiting' },
+  { key: 'running', label: 'working', hint: 'a session is running right now', match: (s: RosterSession) => s.status === 'running' },
   // #34: ghost rows (members whose session is gone server-side) land here too. They are finished in
   // every sense the user cares about, and `completed` is the section that already collects rows
   // nothing is going to happen to. `ghost` rather than a status test so FINISHED_STATUSES stays
   // exactly what session-store's `derive` can mint.
-  { key: 'completed', label: 'completed', hint: 'finished, failed, or stopped sessions land here', match: (s: any) => FINISHED_STATUSES.has(s.status) || Boolean(s.ghost) },
+  { key: 'completed', label: 'completed', hint: 'finished, failed, or stopped sessions land here', match: (s: RosterSession) => FINISHED_STATUSES.has(s.status) || Boolean(s.ghost) },
 ]
 
 // "Completed sessions that don't fit on screen fold into a `… N more` row. Failures and sessions
@@ -68,22 +73,36 @@ const STATE_GROUPS = [
 // only the first was implemented: a completed session with a live pull request was folded away
 // like any other success. Protected rows are sorted to the front of the group so the cap can only
 // ever eat unprotected ones, and counted here so the cap never cuts into them.
-const isProtectedFromFold = (s: any) => s.status === 'error' || hasOpenPr(s.prs)
+const isProtectedFromFold = (s: FoldRow) => s.status === 'error' || hasOpenPr(s.prs)
 // #49: the row the user is standing on is protected too, or the fold silently retargets the next
 // key at whatever ends up first on screen (`navRows` only sees drawn rows). `sel` is an identity
 // ({projectKey, id}), not a key: keys are namespaced by the live grouping and go stale exactly
 // when a row changes section, which is one of the moments this has to survive.
-export function foldCompleted(groups: any[], maxRows: number, sel?: any) {
+// What the fold needs off a row and a group, and nothing else: it is arithmetic over counts plus the
+// two predicates above, so it never reads a title, an age or a snippet. Deliberately looser than
+// RosterSession/RosterGroup — the property tests exercise it with bare `{status}` rows — and generic
+// in the group, so App's real groups pass straight through and come back out fit to hand to the
+// Roster rather than flattened to this weaker shape.
+type FoldRow = { id?: string; projectKey?: string; status?: string; prs?: PullRequest[] }
+type FoldGroup = { projectKey: string; repoName: string; sessions: FoldRow[]; empty?: boolean; hidden?: number }
+
+export function foldCompleted<G extends FoldGroup>(
+  groups: G[],
+  maxRows: number,
+  sel?: { projectKey: string; id: string } | null,
+  // `hidden` is added by the fold, so it is announced here rather than being required of a caller
+  // that has never folded anything.
+): Array<G & { hidden?: number }> {
   // Each group draws its header (1) plus its sessions; an empty always-shown group draws one
   // "no items" placeholder row in place of sessions. Counting those placeholders keeps the fold
   // honest now that needs-input/working are shown even when empty.
   const used =
-    groups.reduce((n: number, g: any) => n + 1 + g.sessions.length + (g.sessions.length === 0 && g.empty ? 1 : 0), 0) +
+    groups.reduce((n, g) => n + 1 + g.sessions.length + (g.sessions.length === 0 && g.empty ? 1 : 0), 0) +
     Math.max(0, groups.length - 1) // one spacer row between adjacent groups
-  const completed = groups.find((g: any) => g.projectKey === 'state:completed')
+  const completed = groups.find((g) => g.projectKey === 'state:completed')
   if (!completed || used <= maxRows) return groups
-  const isSelected = (s: any) => Boolean(sel) && s.id === sel.id && s.projectKey === sel.projectKey
-  const protectedCount = completed.sessions.filter((s: any) => isProtectedFromFold(s) || isSelected(s)).length
+  const isSelected = (s: FoldRow) => !!sel && s.id === sel.id && s.projectKey === sel.projectKey
+  const protectedCount = completed.sessions.filter((s) => isProtectedFromFold(s) || isSelected(s)).length
   // The fold costs a row of its own — the `… N more` line — so dropping k sessions only recovers
   // k-1 lines. Without the extra -1 the list still overflows by one and picks up a spurious
   // scroll indicator.
@@ -98,15 +117,18 @@ export function foldCompleted(groups: any[], maxRows: number, sel?: any) {
   const prefix = completed.sessions.slice(0, room)
   const selectedRow = sel && !prefix.some(isSelected) ? completed.sessions.find(isSelected) : undefined
   const kept = selectedRow ? [...prefix.slice(0, room - 1), selectedRow] : prefix
-  return groups.map((g: any) =>
-    g === completed ? { ...g, sessions: kept, hidden: g.sessions.length - kept.length } : g,
+  // Object.assign onto a fresh `{}` rather than a spread literal, for one reason: it produces
+  // `G & {…}`, so the folded group keeps the caller's own row type instead of being widened to
+  // FoldGroup and losing everything the Roster renders. Nothing is mutated either way.
+  return groups.map((g) =>
+    g === completed ? Object.assign({}, g, { sessions: kept, hidden: g.sessions.length - kept.length }) : g,
   )
 }
 
 // Pure roster-mutation helpers mirroring roster-store.ts's addSession/removeSession semantics —
 // duplicated rather than imported because those do file IO directly; App only persists via the
 // `persistRoster` callback and needs the updated object back to update local render state too.
-const withMember = (roster: any, worktree: any, id: any, extra: any = {}) =>
+const withMember = (roster: RosterState, worktree: string, id: string, extra: Record<string, unknown> = {}): RosterState =>
   hasSession(roster, worktree, id)
     ? roster
     : { ...roster, sessions: [...roster.sessions, { worktree, id, addedAt: Date.now(), ...extra }] }
@@ -117,46 +139,60 @@ export const SHELL_JOB_TTL_MS = 5 * 60_000
 
 // Pure: the shell-job members whose sessions have settled long enough ago to clean up. A session
 // still missing from the store (not yet seeded) is left alone rather than guessed at.
-export function expiredShellJobs(roster: any, sessionsById: any, now = Date.now()) {
-  return roster.sessions.filter((m: any) => {
+export function expiredShellJobs(
+  roster: { sessions: RosterMember[] },
+  // ReadonlyMap because this only ever asks: a mutable Map<string, RosterSession> is invariant in its
+  // value and would not fit a narrower declaration, while the read-only form takes any richer row.
+  sessionsById: ReadonlyMap<string, { status: string; updatedAt?: number }>,
+  now = Date.now(),
+) {
+  return roster.sessions.filter((m) => {
     if (!m.shell) return false
     const s = sessionsById.get(`${m.worktree}:${m.id}`)
     return s && FINISHED_STATUSES.has(s.status) && now - (s.updatedAt ?? 0) > SHELL_JOB_TTL_MS
   })
 }
 
-const withoutMember = (roster: any, worktree: any, id: any) => ({
+const withoutMember = (roster: RosterState, worktree: string, id: string): RosterState => ({
   ...roster,
-  sessions: roster.sessions.filter((s: any) => !(s.worktree === worktree && s.id === id)),
+  sessions: roster.sessions.filter((s) => !(s.worktree === worktree && s.id === id)),
 })
 
-// TODO(types): host/client wiring and injected impls are large, dynamic shapes; loose props.
+// The host wiring, plus the impls the test corpus injects in place of the real thing. `onAction`
+// returns `unknown` because what a host hands back depends on the action (a promise for `enter` and
+// `edit`, nothing for the rest) — the two call sites narrow it rather than the type guessing.
 type AppProps = {
-  server: any
-  client: any
-  connectEventsImpl?: any
-  ensureServerImpl?: any
+  server: ServerRef
+  client: RosterClient
+  connectEventsImpl?: typeof connectEvents
+  ensureServerImpl?: (server: ServerRef) => Promise<{ ok: boolean; server: ServerRef; reason?: string }>
   serverReady?: boolean
-  serverFailReason?: any
-  onAction: (action: any) => any
-  seen?: any
-  persistSeen?: (...args: any[]) => void
+  serverFailReason?: string
+  onAction: (action: AppAction) => unknown
+  seen?: SeenMap
+  persistSeen?: (snapshot: SeenMap, liveProjectKeys: string[]) => void
   roster?: RosterState
   // `reload` is optional so any caller can pass a bare callback; only makePersistRoster's carries
   // it, and without it the #44 external-member sync is simply off.
   persistRoster?: ((roster: RosterState) => void) & { reload?: () => RosterState | null }
-  initialModel?: any
-  initialAgent?: any
-  backends?: Record<string, any>
+  initialModel?: ModelPair | null
+  initialAgent?: string | null
+  backends?: Record<string, Backend>
   initialBackend?: string
   isolate?: boolean
   projectPollMs?: number
-  fetchPullRequestsImpl?: any
-  branchOfImpl?: any
+  fetchPullRequestsImpl?: (dir: string) => Promise<{ prs: PullRequest[]; reason: string | null }>
+  branchOfImpl?: (dir: string) => string | null
   cwd?: string
-  worktreeSafetyImpl?: any
+  worktreeSafetyImpl?: (dir: string, parentDir: string | null | undefined) => { removable: boolean; reason?: string | null }
   dirExistsImpl?: (dir: string) => boolean
 }
+// "The host answered with something it will settle later." `onAction` returns `unknown` because what
+// comes back depends on the action, and this is the one question App asks of it: an attach host and
+// an editor host both hand over a promise, and a caller that has neither (a test stub, an older
+// embedder) hands back nothing — which is exactly the branch that falls through to unmounting.
+const isThenable = (value: unknown): value is PromiseLike<unknown> => isRecord(value) && typeof value.then === 'function'
+
 // How long after a resume a bare Escape is treated as handoff residue rather than a quit.
 const RESUME_QUIET_MS = 50 // matches the pty host's stdin drain window
 
@@ -196,7 +232,7 @@ export function App({
   // Injected for the same reason: dispatch refuses a target directory that is gone (#22), and the
   // test corpus dispatches into paths that never existed on disk.
   dirExistsImpl = existsSync,
-}: AppProps): any {
+}: AppProps): React.ReactElement | null {
   const { exit } = useApp()
   const { stdout } = useStdout()
   // Terminal size has to come from the hook, not from `stdout.columns`/`stdout.rows` read during
@@ -220,18 +256,18 @@ export function App({
   // to be manually kept in step with store.noteOrigin — a desync (the map satisfied its dedup
   // guard, the store never learned) already happened once. Absent means opencode, which is what
   // makes an opencode-only roster carry no extra state at all.
-  const backendNameOf = (row: any) => store.get(row.projectKey, row.id)?.origin ?? DEFAULT_BACKEND
+  const backendNameOf = (row: AttachTarget) => store.get(row.projectKey, row.id)?.origin ?? DEFAULT_BACKEND
   // The adapter a row's keys and actions go through — opencode's included (H2). Its adapter verbs
   // are byte-for-byte the client calls the roster always made (backends/opencode/index.ts is a
   // mapping onto OpencodeClient and nothing more), so routing opencode rows through it changes no
   // call shape. Falls back to the default adapter when a row's backend can't be resolved: a missing
   // adapter must not make a row inert or silently hide keys that have always worked.
-  const backendFor = (row: any) => backendRegistry[backendNameOf(row)] ?? backendRegistry[DEFAULT_BACKEND]
-  const capabilitiesOf = (row: any) => backendFor(row)?.capabilities ?? OPENCODE_CAPABILITIES
+  const backendFor = (row: AttachTarget) => backendRegistry[backendNameOf(row)] ?? backendRegistry[DEFAULT_BACKEND]
+  const capabilitiesOf = (row: AttachTarget): BackendCapabilities => backendFor(row)?.capabilities ?? OPENCODE_CAPABILITIES
   // The two verbs ^x drives, through the row's adapter — the only thing that knows whether stopping
   // means an HTTP abort or signalling a detached CLI's process group.
-  const abortRow = (row: any) => backendFor(row).abort(row.id, row.projectKey)
-  const deleteRow = (row: any) => backendFor(row).delete(row.id, row.projectKey)
+  const abortRow = (row: AttachTarget) => backendFor(row).abort(row.id, row.projectKey)
+  const deleteRow = (row: AttachTarget) => backendFor(row).delete(row.id, row.projectKey)
   // Selection is a session identity, not a row number: stopping a session moves it from `working`
   // to `completed` mid-keystroke, and an index would silently retarget the second Ctrl+X at
   // whatever slid into that slot. The index is derived from this on every render.
@@ -264,7 +300,8 @@ export function App({
   // repaints when it lapses — this repaints once, so the row settles into its real section instead
   // of sitting in the old one until some unrelated event happens to render.
   const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [target, setTarget] = useState<any>(null) // {projectKey, id, title} captured when a dialog opens; store churn must not retarget it
+  // The row a dialog was opened on, captured at that moment; store churn must not retarget it.
+  const [target, setTarget] = useState<RosterSession | null>(null)
   // True while a child PTY owns the terminal. Every input hook goes inactive so Ink releases
   // stdin, and the render collapses to nothing so a background status change can't repaint over
   // the attached session.
@@ -280,25 +317,25 @@ export function App({
   // agent view's "Press Esc to undo the switch and return to the conversation". Any other
   // interaction clears it whole: the undo is immediate-after-detach only, so Esc stays the quit
   // key the rest of the time and there is no stale ref to attach weeks later.
-  const [backgrounded, setBackgrounded] = useState<any>(null) // {id, projectKey, notice: true}
+  const [backgrounded, setBackgrounded] = useState<{ id: string; projectKey: string; notice: boolean } | null>(null)
   // A selection request by identity, resolved against the live rows by the effect below.
-  const [pendingSelect, setPendingSelect] = useState<any>(null) // {id, projectKey}
+  const [pendingSelect, setPendingSelect] = useState<{ id: string; projectKey: string } | null>(null)
   const [helpPageIndex, setHelpPageIndex] = useState(0)
   const [offlineProjects, setOfflineProjects] = useState<Set<string>>(new Set())
   const [serverDown, setServerDown] = useState(false)
-  const [projects, setProjects] = useState<any[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
   // Pull requests, keyed the way they are looked up: branch to pull requests, plus the branch each
   // project directory is on. `reasons` maps repository directory to why THAT repository has no
   // data, shown in peek rather than as a notice — scoped per repo so one repo's failure (e.g. no
   // GitHub remote) never gets attributed to an unrelated repo that simply has no PRs.
-  const [pullRequests, setPullRequests] = useState<{ byBranch: Map<string, any>; branches: Map<string, any>; reasons: Map<string, any> }>({ byBranch: new Map(), branches: new Map(), reasons: new Map() })
-  const [agents, setAgents] = useState<any[]>([])
-  const [commands, setCommands] = useState<any[]>([])
+  const [pullRequests, setPullRequests] = useState<{ byBranch: Map<string, PullRequest[]>; branches: Map<string, string>; reasons: Map<string, string> }>({ byBranch: new Map(), branches: new Map(), reasons: new Map() })
+  const [agents, setAgents] = useState<AgentInfo[]>([])
+  const [commands, setCommands] = useState<CommandInfo[]>([])
   // null = whatever the server would pick. `/model <name>` overrides it for this run only, which
   // is exactly agent view's rule: "This override lasts for the rest of the current run and doesn't
   // write to your settings file."
-  const [dispatchModel, setDispatchModel] = useState<any>(initialModel)
-  const [providers, setProviders] = useState<any[]>([])
+  const [dispatchModel, setDispatchModel] = useState<ModelPair | null>(initialModel)
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
   const rerender = useCallback(() => force((n) => n + 1), [])
   const seededProjectKeys = useRef(new Set<string>()) // worktrees that successfully listSessions'd this process lifetime
   const knownWorktrees = useRef(new Set<string>()) // worktrees already handed to seedAndStream (new-vs-repeat gate for repoll)
@@ -309,11 +346,11 @@ export function App({
   const knownSandboxes = useRef(new Map<string, string>()) // every worktree ever listed in a project's `sandboxes` -> its repo (#22)
   // onEvent below is captured once by the mount-only discovery effect, so it can't read fresh
   // rosterState from a render closure — this ref is the escape hatch (F1).
-  const reconcileRef = useRef<any>(null) // set by the discovery effect; serializes seeds per worktree
+  const reconcileRef = useRef<SeedChain | null>(null) // set by the discovery effect; serializes seeds per worktree
   // Also set by the discovery effect. A worktree created during a dispatch is a brand-new project
   // that nothing is streaming yet, and waiting for the next poll would leave the row static for up
   // to the poll interval right when the user is watching it start.
-  const streamProjectRef = useRef<any>(null)
+  const streamProjectRef = useRef<StreamProject | null>(null)
   // Also set by the discovery effect: starts streaming a backend that wasn't active at launch, which
   // is what an `@backend` dispatch needs before its new row can update.
   const activateBackendRef = useRef<((name: string) => Promise<void>) | null>(null)
@@ -324,7 +361,7 @@ export function App({
     if (!serverReady) return
     let cancelled = false
     Promise.resolve(client.listAgents?.() ?? [])
-      .then((list: any) => !cancelled && setAgents((list ?? []).filter((a: any) => !INTERNAL_AGENTS.has(a.name))))
+      .then((list) => !cancelled && setAgents((list ?? []).filter((a) => !INTERNAL_AGENTS.has(a.name))))
       .catch(() => {})
     Promise.resolve(client.listCommands?.() ?? [])
       .then((list) => !cancelled && setCommands(list ?? []))
@@ -366,7 +403,7 @@ export function App({
     }
   }, [store, persistSeen])
 
-  const isMember = (worktree: any, id: any) => hasSession(rosterState, worktree, id)
+  const isMember = (worktree: string, id: string) => hasSession(rosterState, worktree, id)
 
   // Worktree isolation: every dispatched session lives in its own git worktree, which opencode
   // publishes as a project of its own AND lists in its repository's `sandboxes`. Rows are grouped by
@@ -376,7 +413,7 @@ export function App({
   // `sandboxes` while its stale project record lives on (mergeProjects never drops — that is what
   // keeps an OFFLINE project's rows), and a fresh-only map would promote that record to a repo (#22).
   const parents = rememberSandboxes(knownSandboxes.current, projects)
-  const repoOf = (projectKey: any) => displayProject(parents, projectKey)
+  const repoOf = (projectKey: string) => displayProject(parents, projectKey)
 
   // Groups come from the projects list (not the store) so a freshly-discovered,
   // zero-session project is still visible in browse.
@@ -384,37 +421,39 @@ export function App({
   // pull requests — the roster row, the state groups, peek and the `#N` filter all read
   // `session.prs` and none of them knows `gh` exists. `prs` is always an array so no consumer needs
   // a guard.
-  const prsFor = (projectKey: any) => {
+  const prsFor = (projectKey: string): PullRequest[] => {
     const branch = pullRequests.branches.get(projectKey)
     // Same composite key refreshPullRequests wrote: the repository that owns this directory plus
     // the branch it is on, so a matching branch name in another repository can never answer.
     return (branch && pullRequests.byBranch.get(`${repoOf(projectKey)} ${branch}`)) || []
   }
-  const memberOf = (projectKey: any, id: any) => rosterState.sessions.find((m) => m.worktree === projectKey && m.id === id)
+  const memberOf = (projectKey: string, id: string) => rosterState.sessions.find((m) => m.worktree === projectKey && m.id === id)
   // The same lookup off the ref rather than the render closure, for the optimistic-delete paths: by
   // the time one of those runs, earlier rows in the same loop have already changed the roster, and
   // the member it is about to remove has to be the one that is actually there.
-  const takeMember = (projectKey: any, id: any) => rosterRef.current.sessions.find((m: any) => m.worktree === projectKey && m.id === id)
-  const byProjectSessions = new Map<string, any[]>(
-    store.byProject().map((g: any) => [
+  const takeMember = (projectKey: string, id: string) => rosterRef.current.sessions.find((m) => m.worktree === projectKey && m.id === id)
+  const byProjectSessions = new Map<string, RosterSession[]>(
+    store.byProject().map((g): [string, RosterSession[]] => [
       g.projectKey,
-      g.sessions.map((s: any) => {
+      g.sessions.map((s) => {
         const m = memberOf(s.projectKey, s.id)
         // `backend` is only ever set for a row that isn't opencode's — absent is the default, so an
         // opencode-only roster carries no new field and nothing downstream changes shape.
-        return { ...s, prs: prsFor(s.projectKey), pinned: Boolean(m?.pinned), rank: m?.rank, ...(s.origin ? { backend: s.origin } : {}) }
+        // `rank` is a roster-member field off the JSON file, so it is narrowed like every other one.
+        return { ...s, prs: prsFor(s.projectKey), pinned: Boolean(m?.pinned), rank: asNumber(m?.rank), ...(s.origin ? { backend: s.origin } : {}) }
       }),
     ]),
   )
   // The same sessions, gathered under the repository that owns them rather than the worktree they
   // physically run in. Every group view reads this; only dispatch and the API calls use the real
   // per-session projectKey, which never changes.
-  const byRepoSessions = new Map<string, any[]>()
+  const byRepoSessions = new Map<string, RosterSession[]>()
   for (const [projectKey, list] of byProjectSessions) {
     const repo = repoOf(projectKey)
     byRepoSessions.set(repo, [...(byRepoSessions.get(repo) ?? []), ...list])
   }
-  for (const list of byRepoSessions.values()) list.sort((a: any, b: any) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || b.updatedAt - a.updatedAt)
+  for (const list of byRepoSessions.values())
+    list.sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
   // Every roster member's session — the whole fleet, before any filter, fold or view switch narrows
   // it to what is on screen. The notification snapshot and the two counts below read this and never
   // the rendered rows: a row leaving and re-entering the view is not a state change, but read off
@@ -422,7 +461,7 @@ export function App({
   // esc used to re-fire `agent_needs_input` for every already-blocked session — bell and the user's
   // FLEETVIEW_NOTIFY_CMD — and `^b` did the same. It also kept the header honest: the counts used to
   // fall to zero under a filter while the roster beside them still listed the sessions.
-  const allMembers = [...byProjectSessions.values()].flat().filter((s: any) => isMember(s.projectKey, s.id))
+  const allMembers = [...byProjectSessions.values()].flat().filter((s) => isMember(s.projectKey, s.id))
   // #34: a roster member whose session is gone server-side used to render no row at all — the state
   // groups partition `allMembers`, which by construction only holds members whose sessions are in
   // the store — so it was invisible, ↑/↓ could never land on it, ^x could never remove it, and it
@@ -450,13 +489,13 @@ export function App({
   // membership it is about to gain exists — a session dispatched seconds ago can never satisfy this
   // arm, however far off the next projects poll is. An externally-added member (#44) is unioned in
   // *before* that tick's listProjects, so the listing that judges it always ran after it was known.
-  const projectDirs = new Set(projects.map((p: any) => p.worktree))
+  const projectDirs = new Set(projects.map((p) => p.worktree))
   const vanishedProject = (worktree: string) =>
     projectsListed.current && !projectDirs.has(worktree) && !knownWorktrees.current.has(worktree)
   const ghostMembers = rosterState.sessions
-    .filter((m: any) => !offlineProjects.has(m.worktree) && (seededProjectKeys.current.has(m.worktree) || vanishedProject(m.worktree)))
-    .filter((m: any) => !(byProjectSessions.get(m.worktree) ?? []).some((s: any) => s.id === m.id))
-    .map((m: any) => ({
+    .filter((m) => !offlineProjects.has(m.worktree) && (seededProjectKeys.current.has(m.worktree) || vanishedProject(m.worktree)))
+    .filter((m) => !(byProjectSessions.get(m.worktree) ?? []).some((s) => s.id === m.id))
+    .map((m): RosterSession => ({
       id: m.id,
       projectKey: m.worktree,
       ghost: true,
@@ -473,7 +512,7 @@ export function App({
   // not over the backends fleetview could drive, so launching with `--backend claude` in a directory
   // that has no claude sessions yet still renders the opencode-only view unchanged.
   const showBackendTag =
-    new Set([...byProjectSessions.values()].flat().map((s: any) => s.backend ?? DEFAULT_BACKEND)).size > 1
+    new Set([...byProjectSessions.values()].flat().map((s) => s.backend ?? DEFAULT_BACKEND)).size > 1
   // Worktrees are never rows of their own in a project listing — their sessions are already shown
   // under the repository, and a second group named after a hashed cache path helps nobody.
   // opencode's synthetic `global` project (worktree `/`) is filtered out with them: it is nobody's
@@ -498,8 +537,8 @@ export function App({
   // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the joined worktrees, not the array identity
   // repoProjects, not projects: completing `@` to a worktree would dispatch into another session's
   // isolated copy, which is the one thing isolation exists to prevent.
-  const repos = useMemo<any[]>(() => repoChoices({ cwd, projects: repoProjects }), [cwd, projectKeys])
-  const vocab: any = {
+  const repos = useMemo<{ name: string; worktree: string }[]>(() => repoChoices({ cwd, projects: repoProjects }), [cwd, projectKeys])
+  const vocab = {
     agents: agents.map((a) => a.name),
     repos: repos.map((r) => r.name),
     commands: commands.map((c) => c.name),
@@ -512,8 +551,9 @@ export function App({
   // "Type in the dispatch input to filter instead of dispatching" — the list narrows as you type,
   // and Enter has nothing to dispatch.
   const activeFilter = parsed.kind === 'filter' ? parsed.filter : null
-  const agentOf = (s: any) => s.agent
-  const promptOf = (s: any): string | undefined => rosterState.sessions.find((m) => m.worktree === s.projectKey && m.id === s.id)?.prompt as string | undefined
+  const agentOf = (s: RosterSession) => s.agent
+  const promptOf = (s: RosterSession): string | undefined =>
+    asString(rosterState.sessions.find((m) => m.worktree === s.projectKey && m.id === s.id)?.prompt)
 
   // Shell jobs clean up after themselves ~5 minutes after finishing, agent view's rule — the
   // session is deleted (a job's output is ephemeral by contract; `fleetview logs` reads it before
@@ -528,14 +568,14 @@ export function App({
       cleaningJobs.current.add(key)
       ;(async () => {
         try {
-          updateRoster((prev: any) => withoutMember(prev, m.worktree, m.id))
+          updateRoster((prev) => withoutMember(prev, m.worktree, m.id))
           await client.deleteSession(m.id, m.worktree)
           store.apply(m.worktree, { type: 'session.deleted', properties: { info: { id: m.id } } })
         } catch {
           // Put it back: a failed delete must not orphan a running server-side session invisibly.
           // The whole member, not a `{ shell: true }` stand-in — same reason as deleteGroup's
           // rollback: a rebuilt member loses the row's pin, rank and prompt.
-          updateRoster((prev: any) => withMember(prev, m.worktree, m.id, m))
+          updateRoster((prev) => withMember(prev, m.worktree, m.id, m))
         } finally {
           cleaningJobs.current.delete(key)
         }
@@ -558,9 +598,9 @@ export function App({
     // row down the board. While the arm is live the row keeps the section and sort position it had
     // when armed; by the time the arm lapses the row is either deleted or no longer armed.
     const held = stopArm.current?.held && Date.now() - stopArm.current.at < 2000 ? stopArm.current : null
-    const isHeld = (s: any) => held?.key === `${s.projectKey}:${s.id}`
-    const groupFor = (s: any) => (isHeld(s) ? held!.held!.group : STATE_GROUPS.find((g) => g.match(s))?.key)
-    const sortTime = (s: any) => (isHeld(s) ? held!.held!.updatedAt : s.updatedAt)
+    const isHeld = (s: RosterSession) => held?.key === `${s.projectKey}:${s.id}`
+    const groupFor = (s: RosterSession) => (isHeld(s) ? held!.held!.group : STATE_GROUPS.find((g) => g.match(s))?.key)
+    const sortTime = (s: RosterSession) => (isHeld(s) ? held!.held!.updatedAt : s.updatedAt ?? 0)
     return STATE_GROUPS.map((g) => ({
       projectKey: `state:${g.key}`,
       repoName: g.label,
@@ -568,12 +608,12 @@ export function App({
       hint: g.hint, // shown under the section when it is empty
 
       sessions: members
-        .filter((s: any) => groupFor(s) === g.key)
+        .filter((s) => groupFor(s) === g.key)
         // A manual rank (Shift+↑/↓) wins outright — the user placed the row there. Unranked rows
         // keep the old order: fold-protected rows first inside `completed` (the fold cuts from the
         // end, and a failure or a live pull request must survive it), then recency.
         .sort(
-          (a: any, b: any) =>
+          (a, b) =>
             (a.rank ?? Infinity) - (b.rank ?? Infinity) ||
             (isProtectedFromFold(a) ? -1 : 0) - (isProtectedFromFold(b) ? -1 : 0) ||
             sortTime(b) - sortTime(a),
@@ -587,7 +627,7 @@ export function App({
         projectKey: p.worktree,
         repoName: basename(p.worktree) || p.worktree,
         sessions: applyFilter(
-          (byRepoSessions.get(p.worktree) ?? []).filter((s: any) => isMember(s.projectKey, s.id)),
+          (byRepoSessions.get(p.worktree) ?? []).filter((s) => isMember(s.projectKey, s.id)),
           activeFilter,
           agentOf,
           promptOf,
@@ -645,7 +685,7 @@ export function App({
   // What ↑/↓ actually walks: group headers and sessions together, in screen order. Built from the
   // same helper the roster draws with, so navigation can never point at a row that isn't there.
   const navRows = navigableRows(groups, collapsed)
-  const keyOf = (row: any) => `${row.projectKey}:${row.id}`
+  const keyOf = (row: RosterSession) => `${row.projectKey}:${row.id}`
   const keyedIndex = navRows.findIndex((r) => r.key === selectedKey)
   // The key went stale — either the selected session moved groups (its key is namespaced by the
   // group, so stopping a running session renames its row out from under the selection) or the row
@@ -655,7 +695,7 @@ export function App({
     keyedIndex >= 0
       ? keyedIndex
       : navRows.findIndex(
-          (r: any) =>
+          (r) =>
             r.type === 'session' &&
             r.session.id === selectedSessionRef.current?.id &&
             r.session.projectKey === selectedSessionRef.current?.projectKey,
@@ -689,7 +729,7 @@ export function App({
   // grouping (`state:*` by default, the worktree in project view).
   useEffect(() => {
     if (!pendingSelect) return
-    const match = navRows.find((r: any) => r.type === 'session' && r.session.id === pendingSelect.id && r.session.projectKey === pendingSelect.projectKey)
+    const match = navRows.find((r) => r.type === 'session' && r.session.id === pendingSelect.id && r.session.projectKey === pendingSelect.projectKey)
     if (match) {
       setSelectedKey(match.key)
       return setPendingSelect(null)
@@ -699,17 +739,17 @@ export function App({
     // means visibly selected. A session in no group at all is gone, and a visible-but-folded row
     // (the `… N more` cap) can't be landed on either way; both drop the request rather than pin
     // this effect forever.
-    const holder = groups.find((g: any) => (g.sessions ?? []).some((x: any) => x.id === pendingSelect.id && x.projectKey === pendingSelect.projectKey))
+    const holder = groups.find((g) => (g.sessions ?? []).some((x) => x.id === pendingSelect.id && x.projectKey === pendingSelect.projectKey))
     if (holder && collapsed.has(holder.projectKey)) return toggleCollapsed(holder.projectKey)
     setPendingSelect(null)
   }, [pendingSelect, navRows])
   const selectedHeader = navRow?.type === 'header' ? navRow.projectKey : null
-  const found = flat.findIndex((row: any) => keyOf(row) === selectedKey)
+  const found = flat.findIndex((row) => keyOf(row) === selectedKey)
   // Falls back to the top row when the selected session is gone (deleted, filtered out by a view
   // switch, or never set), which is also what makes the first ↑/↓ after startup work.
   const sel = found >= 0 ? found : 0
   const current = selectedHeader ? undefined : navRow?.type === 'session' ? navRow.session : flat[sel]
-  const memberKeySet = new Set(rosterState.sessions.map((s: any) => `${s.worktree}:${s.id}`))
+  const memberKeySet = new Set(rosterState.sessions.map((s) => `${s.worktree}:${s.id}`))
   // Keyed on rendered rows, not roster.sessions.length: a ghost-only roster (members whose
   // sessions no longer exist) must still show the hint rather than an inert blank screen (F1).
   // State grouping always draws its three-category skeleton (each with a "no items" placeholder),
@@ -787,7 +827,7 @@ export function App({
   // only has to stop reading the keyboard while somebody else owns the terminal.
   //
   // `siblings` is what Alt+1..9 switches between: the rows as currently ordered on screen.
-  const attach = (row: any) => {
+  const attach = (row: AttachTarget) => {
     // Read through a ref, not the render closure. `dispatch` captures the `attach` of the render
     // where the keypress happened, and in that render `attached` is still false — so the state
     // value can never see an attachment that began while the dispatch was in flight, which is the
@@ -808,13 +848,16 @@ export function App({
       // #34: ghost rows are dropped from the sibling list — Alt+1..9 hands the host a session to
       // resume, and a session that no longer exists is not one.
       siblings: flat
-        .filter((s: any) => !s.ghost)
-        .map((s: any) => ({ id: s.id, projectKey: s.projectKey, ...(s.backend ? { backend: s.backend } : {}) })),
+        .filter((s) => !s.ghost)
+        .map((s): AttachSibling => ({ id: s.id, projectKey: s.projectKey, ...(asString(s.backend) ? { backend: asString(s.backend) } : {}) })),
     })
-    if (done && typeof done.then === 'function') {
+    if (isThenable(done)) {
       attachedRef.current = true
       setAttached(true)
-      const back = (result?: any) => {
+      // `result` is the host's AttachOutcome, read through the same narrowing every other payload
+      // gets: the host is injectable, so what settles here is not App's to assume.
+      const back = (settled?: unknown) => {
+        const result = isRecord(settled) ? settled : undefined
         resumedAt.current = Date.now()
         attachedRef.current = false
         setAttached(false)
@@ -822,7 +865,7 @@ export function App({
         // select its row, and show the one-line notice above the list. The host reports which
         // session was current on detach — Alt+N may have switched away from `row`.
         if (result?.detached) {
-          const left = { id: result.sessionId ?? row.id, projectKey: result.worktree ?? row.projectKey, notice: true }
+          const left = { id: asString(result.sessionId) ?? row.id, projectKey: asString(result.worktree) ?? row.projectKey, notice: true }
           setBackgrounded(left)
           // Selection by identity, not by a precomputed key: row keys are namespaced by whatever
           // grouping is live (`state:waiting` in the default view, the worktree in project view),
@@ -832,7 +875,8 @@ export function App({
         }
         // An attach that failed without drawing anything is otherwise indistinguishable from a
         // keypress that didn't register.
-        if (result?.message) flash(result.message, 4000)
+        const message = asString(result?.message)
+        if (message) flash(message, 4000)
       }
       done.then(back, () => back())
       return
@@ -906,7 +950,7 @@ export function App({
     setServerDown,
     setProjects,
     setPullRequests,
-    onSessionDeleted: (directory: any, id: any) => updateRoster((prev: any) => withoutMember(prev, directory, id)),
+    onSessionDeleted: (directory, id) => updateRoster((prev) => withoutMember(prev, directory, id)),
   })
 
   // Extracted from the deleted two-stage Launcher. The prompt is the whole interaction now:
@@ -922,7 +966,7 @@ export function App({
   // Where a dispatch lands: the repository the user named, else whatever pickTarget decides. Shared
   // by both dispatch paths so an `@repo` token means the same thing on every backend.
   const dispatchTarget = (repo?: string) => {
-    const named = repo && repos.find((r: any) => r.name === repo)?.worktree
+    const named = repo && repos.find((r) => r.name === repo)?.worktree
     // The repository the user asked for. `pickTarget` sees only repoProjects, so a bare dispatch
     // can never land in someone else's worktree.
     return (
@@ -951,7 +995,7 @@ export function App({
     attach,
     expandPastes,
     dispatchTarget,
-    addMember: (worktree: any, id: any, extra?: any) => updateRoster((prev: any) => withMember(prev, worktree, id, extra)),
+    addMember: (worktree, id, extra) => updateRoster((prev) => withMember(prev, worktree, id, extra)),
     seededProjectKeys,
     setOfflineProjects,
     streamProjectRef,
@@ -989,7 +1033,7 @@ export function App({
         ;(async () => {
           try {
             const forked = await client.forkSession(row.id, row.projectKey)
-            updateRoster((prev: any) => withMember(prev, row.projectKey, forked.id, parsed.args ? { prompt: parsed.args.slice(0, 2000) } : {}))
+            updateRoster((prev) => withMember(prev, row.projectKey, forked.id, parsed.args ? { prompt: parsed.args.slice(0, 2000) } : {}))
             if (parsed.args) await client.promptAsync(forked.id, parsed.args, row.projectKey)
             store.setSessions(row.projectKey, await client.listSessions(row.projectKey), seen)
             flash(`forked → ${forked.id.slice(0, 12)}${parsed.args ? ' (prompt sent)' : ''}`)
@@ -1010,7 +1054,7 @@ export function App({
       const modelID = rest.join('/')
       // Leave the text alone so it can be corrected rather than retyped.
       if (!modelID) return flash('use /model <provider>/<model>, or /model default')
-      const provider = providers.find((p: any) => p.id === providerID)
+      const provider = providers.find((p) => p.id === providerID)
       // Only reject when the list actually loaded; an unreachable /config/providers must not stop
       // someone setting a model they know is fine.
       if (providers.length > 0 && !provider) return flash(`no such provider: ${providerID}`)
@@ -1035,7 +1079,7 @@ export function App({
   // "neither removes a worktree with unpushed commits", which is kept rather than silently taking
   // work with it. opencode's DELETE enforces none of this — it will remove a worktree holding
   // uncommitted changes, and its branch, without complaint — so the check has to happen here.
-  const removeWorktreeFor = async (projectKey: any, deletedId: any) => {
+  const removeWorktreeFor = async (projectKey: string, deletedId: string) => {
     if (!isSandbox(parents, projectKey)) return
     const repo = parents.get(projectKey)
     // Only when it was the last session in that worktree. Adopting a second session into one is
@@ -1045,7 +1089,7 @@ export function App({
     // down. `byProjectSessions` belongs to the render this keypress came from, so whether it has
     // already dropped the deleted row depends on whether React re-rendered during the await — and
     // a guard whose correctness turns on that is a guard waiting to break.
-    const remaining = (byProjectSessions.get(projectKey) ?? []).filter((s: any) => s.id !== deletedId).length
+    const remaining = (byProjectSessions.get(projectKey) ?? []).filter((s) => s.id !== deletedId).length
     if (remaining > 0) return
     const safety = worktreeSafetyImpl(projectKey, repo)
     if (!safety.removable) return flash(`kept the worktree — ${safety.reason}`, 5000)
@@ -1059,24 +1103,24 @@ export function App({
   }
 
   // "Enter on a group header collapses it." Persisted, so a group folded away stays folded.
-  const toggleCollapsed = (projectKey: any) =>
+  const toggleCollapsed = (projectKey: string) =>
     updateRoster((prev) => {
       const list = prev.collapsed ?? []
       return {
         ...prev,
-        collapsed: list.includes(projectKey) ? list.filter((k: any) => k !== projectKey) : [...list, projectKey],
+        collapsed: list.includes(projectKey) ? list.filter((k) => k !== projectKey) : [...list, projectKey],
       }
     })
 
   // "Ctrl+X on a group header deletes every session in the group (confirmation required)." The
   // confirmation is the same two-press arm the per-session form uses, keyed on the group — one
   // deliberate mechanism rather than a modal for one case and an arm for the other.
-  const deleteGroup = async (projectKey: any) => {
+  const deleteGroup = async (projectKey: string) => {
     // unfoldedGroups, not groups: the rendered groups are folded/sliced to the screen, so this used
     // to delete (and count) only the visible subset — folded completed rows and browse rows past the
     // cap survived, contradicting "every session in the group".
-    const group = unfoldedGroups.find((g: any) => g.projectKey === projectKey)
-    const rows: any[] = group?.sessions ?? []
+    const group = unfoldedGroups.find((g) => g.projectKey === projectKey)
+    const rows: RosterSession[] = group?.sessions ?? []
     if (rows.length === 0) return
     const armKey = `group:${projectKey}`
     const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < 2000
@@ -1092,7 +1136,7 @@ export function App({
       // #34: a ghost in the group is just a membership — drop it and move on. Reaching deleteRow
       // with it would fail and flag the whole project offline over a session that is already gone.
       if (row.ghost) {
-        updateRoster((prev: any) => withoutMember(prev, row.projectKey, row.id))
+        updateRoster((prev) => withoutMember(prev, row.projectKey, row.id))
         continue
       }
       // A backend that can't delete is skipped rather than throwing into the catch below, which
@@ -1106,26 +1150,26 @@ export function App({
       // forget it was a shell job (which is what drives the 5-minute auto-clean) and lose its
       // dispatch prompt (which the URL filter reads).
       const member = takeMember(row.projectKey, row.id)
-      updateRoster((prev: any) => withoutMember(prev, row.projectKey, row.id))
+      updateRoster((prev) => withoutMember(prev, row.projectKey, row.id))
       try {
         await deleteRow(row)
         store.apply(row.projectKey, { type: 'session.deleted', properties: { info: { id: row.id } } })
         await removeWorktreeFor(row.projectKey, row.id)
       } catch {
-        updateRoster((prev: any) => withMember(prev, row.projectKey, row.id, member))
+        updateRoster((prev) => withMember(prev, row.projectKey, row.id, member))
         setOfflineProjects((s) => new Set(s).add(row.projectKey))
         flash('delete failed')
       }
     }
   }
 
-  const stopOrDelete = async (row: any) => {
+  const stopOrDelete = async (row: RosterSession) => {
     // #34: nothing exists server-side, so there is nothing to abort, nothing to delete and no
     // worktree the session still owns — the only thing ^x can mean on a ghost is "drop the
     // membership". It takes effect on the first press rather than arming a confirmation: the
     // two-press gate exists to guard a destructive server call, and there is no server call.
     if (row.ghost) {
-      updateRoster((prev: any) => withoutMember(prev, row.projectKey, row.id))
+      updateRoster((prev) => withoutMember(prev, row.projectKey, row.id))
       return flash(`removed "${row.title}"`)
     }
     const armKey = `${row.projectKey}:${row.id}`
@@ -1138,7 +1182,7 @@ export function App({
       // opencode rows sharing the directory. The first ^x already stopped the run; that stays.
       if (!capabilitiesOf(row).delete) return flash(`${backendNameOf(row)} can't delete a session`, 4000)
       const member = takeMember(row.projectKey, row.id) // see deleteGroup: the rollback restores this object, not a bare one
-      updateRoster((prev: any) => withoutMember(prev, row.projectKey, row.id))
+      updateRoster((prev) => withoutMember(prev, row.projectKey, row.id))
       try {
         await deleteRow(row)
         store.apply(row.projectKey, { type: 'session.deleted', properties: { info: { id: row.id } } })
@@ -1151,7 +1195,7 @@ export function App({
       } catch {
         // restore membership so the row reappears — otherwise a failed delete is visually
         // indistinguishable from a successful one (F2).
-        updateRoster((prev: any) => withMember(prev, row.projectKey, row.id, member))
+        updateRoster((prev) => withMember(prev, row.projectKey, row.id, member))
         setOfflineProjects((s) => new Set(s).add(row.projectKey))
         flash('delete failed')
       }
@@ -1160,7 +1204,7 @@ export function App({
     const armedAt = Date.now()
     // Where the row is right now, before the abort marks it stopped — stateGroups holds it here
     // until the arm lapses so the confirming press targets a row that hasn't moved (#15).
-    stopArm.current = { key: armKey, at: armedAt, held: { group: STATE_GROUPS.find((g) => g.match(row))?.key, updatedAt: row.updatedAt } }
+    stopArm.current = { key: armKey, at: armedAt, held: { group: STATE_GROUPS.find((g) => g.match(row))?.key, updatedAt: row.updatedAt ?? 0 } }
     if (armTimer.current) clearTimeout(armTimer.current)
     armTimer.current = setTimeout(rerender, 2050) // just past the window, so the released row repaints
     // The arm is immediate — the two-press window must not wait on the network — but the notice
@@ -1200,7 +1244,7 @@ export function App({
   // attaches (Enter's empty-input verb), a click on a header toggles its collapse, and the wheel
   // moves the selection like arrows. Mapping y back to a line reuses the exact buildLines +
   // windowLines pair the Roster draws from, so a click can never land on a row that isn't there.
-  const handleMouse = (ev: any) => {
+  const handleMouse = (ev: SgrMouseEvent) => {
     if (ev.kind === 'wheel-up' || ev.kind === 'wheel-down') {
       if (!navRows.length) return
       const next = ev.kind === 'wheel-up' ? Math.max(0, navSel - 1) : Math.min(navRows.length - 1, navSel + 1)
@@ -1268,7 +1312,7 @@ export function App({
         if (ch === 't' && current) {
           return updateRoster((prev) => ({
             ...prev,
-            sessions: prev.sessions.map((m: any) =>
+            sessions: prev.sessions.map((m) =>
               m.worktree === current.projectKey && m.id === current.id ? { ...m, pinned: !m.pinned } : m,
             ),
           }))
@@ -1301,11 +1345,11 @@ export function App({
         // handover, exactly as it does for attach, so this only asks and applies the result.
         if (ch === 'g') {
           const done = onAction({ type: 'edit', text: input })
-          if (done && typeof done.then === 'function') {
+          if (isThenable(done)) {
             attachedRef.current = true
             setAttached(true)
             done.then(
-              (edited: any) => {
+              (edited) => {
                 resumedAt.current = Date.now()
                 attachedRef.current = false
                 setAttached(false)
@@ -1333,19 +1377,19 @@ export function App({
         // unfoldedGroups, not groups, for the same reason deleteGroup uses it: the rendered groups are
         // folded and sliced to the screen, so ranking off them writes ranks for the visible subset
         // only and silently promotes it above the rows that were folded away.
-        const group = unfoldedGroups.find((g: any) =>
-          g.sessions.some((s: any) => s.id === current.id && s.projectKey === current.projectKey),
+        const group = unfoldedGroups.find((g) =>
+          g.sessions.some((s) => s.id === current.id && s.projectKey === current.projectKey),
         )
         if (!group) return
-        const idx = group.sessions.findIndex((s: any) => s.id === current.id && s.projectKey === current.projectKey)
+        const idx = group.sessions.findIndex((s) => s.id === current.id && s.projectKey === current.projectKey)
         const target = key.upArrow ? idx - 1 : idx + 1
         if (target < 0 || target >= group.sessions.length) return
         const order = [...group.sessions]
         ;[order[idx], order[target]] = [order[target], order[idx]]
         return updateRoster((prev) => ({
           ...prev,
-          sessions: prev.sessions.map((m: any) => {
-            const at = order.findIndex((s: any) => s.projectKey === m.worktree && s.id === m.id)
+          sessions: prev.sessions.map((m) => {
+            const at = order.findIndex((s) => s.projectKey === m.worktree && s.id === m.id)
             return at >= 0 ? { ...m, rank: at } : m
           }),
         }))
@@ -1396,7 +1440,7 @@ export function App({
           // collapsed group or behind the `… N more` fold, and an Esc that promised an undo must
           // not quit the app because of how the list happened to be folded. Only a session that
           // is genuinely gone (stopped and removed) falls through to the normal quit.
-          const live = allMembers.find((s: any) => s.id === backgrounded.id && s.projectKey === backgrounded.projectKey)
+          const live = allMembers.find((s) => s.id === backgrounded.id && s.projectKey === backgrounded.projectKey)
           if (live) return attach(live)
         }
         // Quitting is the one irreversible thing Esc does — the quiet-window guard that protects
@@ -1486,7 +1530,7 @@ export function App({
 
   if (mode === 'rename' && target) {
     return React.createElement(RenameInput, {
-      initial: target.title,
+      initial: target.title ?? '',
       onCancel: () => {
         setMode('roster')
         setTarget(null)
@@ -1590,7 +1634,7 @@ export function App({
   )
 }
 
-function RenameInput({ initial, onSubmit, onCancel }: { initial: string; onSubmit: (title: string) => void; onCancel: () => void }): any {
+function RenameInput({ initial, onSubmit, onCancel }: { initial: string; onSubmit: (title: string) => void; onCancel: () => void }): React.ReactElement {
   const [text, setText] = useState(initial)
   useInput((input, key) => {
     if (key.escape || (key.ctrl && input === 'c')) return onCancel()

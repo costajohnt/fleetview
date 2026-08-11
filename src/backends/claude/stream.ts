@@ -1,6 +1,7 @@
 // Reading a `claude -p --output-format=stream-json` run. Pure: takes text, returns events and a
 // state, touches no disk and no clock, so the fixtures under test/fixtures can drive it directly.
 import { parseNdjsonChunk } from '../ndjson.ts'
+import { isRecord } from '../../types.ts'
 
 // Wire shapes are documented in docs/specs/2026-07-25-claude-backend-wire.md and typed the same way
 // the opencode payloads in types.ts are — only the fields this file reads are named, everything else
@@ -45,13 +46,13 @@ export const emptyTranscriptState = (): ClaudeRunState => ({ ...emptyRunState(),
 // The shared NDJSON line loop under the name this backend's consumers know it by (ndjson.ts).
 export const parseStreamChunk = parseNdjsonChunk
 
-const textOf = (event: any): string | undefined => {
-  const blocks = event?.message?.content
+const textOf = (event: Record<string, unknown>): string | undefined => {
+  const blocks = isRecord(event.message) ? event.message.content : undefined
   if (!Array.isArray(blocks)) return undefined
   // Last `text` block, not last block: a turn emits thinking and tool_use blocks through the same
   // field, and either one rendered as the session's visible output is wrong.
   let found: string | undefined
-  for (const b of blocks) if (b?.type === 'text' && typeof b.text === 'string' && b.text) found = b.text
+  for (const b of blocks) if (isRecord(b) && b.type === 'text' && typeof b.text === 'string' && b.text) found = b.text
   return found
 }
 
@@ -59,18 +60,19 @@ const textOf = (event: any): string | undefined => {
 // apply only what arrived since the last poll, and so a resume — which appends a second run's
 // events to the same log — is handled by the same code: its `init` resets the state to working.
 export function applyEvent(state: ClaudeRunState, event: unknown): ClaudeRunState {
-  const e = event as any
-  if (e?.type === 'system' && e.subtype === 'init') {
+  // A frame that isn't an object carries no fields to read; every branch below then misses.
+  const e: Record<string, unknown> = isRecord(event) ? event : {}
+  if (e.type === 'system' && e.subtype === 'init') {
     // A second init means a follow-up prompt resumed the session into the same log. Status, denials
     // and the error go back to square one; lastOutput stays, so the row doesn't blank out between
     // the resume starting and its first reply.
     return { ...state, status: 'working', sessionId: typeof e.session_id === 'string' ? e.session_id : state.sessionId, denials: [], error: undefined }
   }
-  if (e?.type === 'assistant') {
+  if (e.type === 'assistant') {
     const text = textOf(e)
     return text === undefined ? state : { ...state, lastOutput: text }
   }
-  if (e?.type === 'result') {
+  if (e.type === 'result') {
     // First result wins. A run that writes a valid `result` and *then* exits non-zero gets a
     // synthetic failure line appended by the backend's exit handler, and a second terminal line
     // must not overwrite what the run itself reported. Mirrors copilot's `if (run.exitCode !==

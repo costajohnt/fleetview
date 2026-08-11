@@ -25,8 +25,8 @@ export function parseSseChunk(buffer: string): { events: unknown[]; rest: string
 // being wrong (a quiet-but-live stream reconnecting) is one localhost round trip and a re-seed.
 const IDLE_MS = 120_000
 
-type ConnectTarget = { host: string; port: number; directory: string }
-type ConnectOptions = {
+export type ConnectTarget = { host: string; port: number; directory: string }
+export type ConnectOptions = {
   fetchImpl?: typeof fetch
   // Parsed SSE frame. Cast from the JSON below at the call site: the stream also carries event
   // types fleetview doesn't handle, which the session store's switch ignores. See OpencodeEvent.

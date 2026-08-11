@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { SESSION_ID_RE } from '../session-id.ts'
 import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
+import { isRecord } from '../../types.ts'
 
 // Only the fields the roster reads. The transcript records carry a great deal more (usage, parent
 // uuids, attachments) and none of it survives this function.
@@ -44,18 +45,20 @@ type Scanned = { cwd?: string; aiTitle?: string; lastPrompt?: string; firstPromp
 // Capped because a prompt is not a title — a pasted stack trace is a legitimate first prompt, and
 // this string reaches `ls` on raw stdout where nothing else truncates it.
 const FIRST_PROMPT_CAP = 200
-function promptText(rec: any): string {
+function promptText(rec: Record<string, unknown>): string {
   // isMeta records are claude's own boilerplate (the `<local-command-caveat>` preamble), not
   // something a person typed — 4 of those 78 open with one.
-  if (rec?.isMeta) return ''
-  const content = rec?.message?.content
+  if (rec.isMeta) return ''
+  const content = isRecord(rec.message) ? rec.message.content : undefined
   const text =
     typeof content === 'string'
       ? content
       : // A user record can also carry tool results, which have no text block and leave this empty
         // so the scan keeps looking at the next user record rather than titling a row with a tool id.
         Array.isArray(content)
-        ? content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join(' ')
+        ? content
+            .flatMap((b) => (isRecord(b) && b.type === 'text' && typeof b.text === 'string' ? [b.text] : []))
+            .join(' ')
         : ''
   return text.replace(/\s+/g, ' ').trim().slice(0, FIRST_PROMPT_CAP)
 }
@@ -94,23 +97,26 @@ function fold(entry: CacheEntry, text: string) {
     // once per line — the whole point of the tests above.
     const wantsFirstPrompt = entry.firstPrompt === undefined && line.includes('"user"')
     if (!wantsCwd && !wantsCreated && !wantsTitle && !wantsPrompt && !wantsFirstPrompt) continue
-    let rec: any
+    // A transcript line is whatever claude wrote; parsed, it is read through the same narrowing
+    // every other dynamic payload gets rather than being trusted to have the fields below.
+    let record: unknown
     try {
-      rec = JSON.parse(line)
+      record = JSON.parse(line)
     } catch {
       continue
     }
-    if (typeof rec?.cwd === 'string' && entry.cwd === undefined) entry.cwd = rec.cwd
+    const rec: Record<string, unknown> = isRecord(record) ? record : {}
+    if (typeof rec.cwd === 'string' && entry.cwd === undefined) entry.cwd = rec.cwd
     // Every transcript on this machine (33/33) carries an ISO timestamp on its first record. A
     // record that lacks one, or whose value doesn't parse, leaves createdAt unset and the caller
     // falls back to the mtime it always used.
-    if (entry.createdAt === undefined && typeof rec?.timestamp === 'string') {
+    if (entry.createdAt === undefined && typeof rec.timestamp === 'string') {
       const parsed = Date.parse(rec.timestamp)
       if (Number.isFinite(parsed)) entry.createdAt = parsed
     }
-    if (rec?.type === 'ai-title' && typeof rec.aiTitle === 'string') entry.aiTitle = rec.aiTitle
-    if (rec?.type === 'last-prompt' && typeof rec.lastPrompt === 'string') entry.lastPrompt = rec.lastPrompt
-    if (entry.firstPrompt === undefined && rec?.type === 'user') {
+    if (rec.type === 'ai-title' && typeof rec.aiTitle === 'string') entry.aiTitle = rec.aiTitle
+    if (rec.type === 'last-prompt' && typeof rec.lastPrompt === 'string') entry.lastPrompt = rec.lastPrompt
+    if (entry.firstPrompt === undefined && rec.type === 'user') {
       const first = promptText(rec)
       if (first) entry.firstPrompt = first // empty (a tool-result record) leaves it unset, so the next user record still counts
     }

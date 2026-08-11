@@ -6,8 +6,10 @@ import { render } from 'ink'
 // falls back to handing the terminal over the old way, which costs the detach chord and
 // quick-switch but not the tool. A hard import would instead make fleetview fail to start at all on a
 // machine where everything else about it is fine.
-// TODO(types): node-pty is an optional native module; its surface (spawn) is used dynamically.
-let pty: any = null
+// Typed off node-pty's own shipped declarations rather than left loose: the module may be absent at
+// runtime (an unbuildable native addon), which is what the null and the catch are for — not a lack
+// of types.
+let pty: typeof import('node-pty') | null = null
 try {
   pty = (await import('node-pty')).default
 } catch {
@@ -34,7 +36,75 @@ import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories }
 import { parseArgs, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, USAGE } from './cli-args.ts'
 import { stripControl } from './text-utils.ts'
 import type { ParsedArgs } from './cli-args.ts'
-import type { Backend, ServerRef } from './types.ts'
+import { isListedSession } from './types.ts'
+import type { AppAction, AttachOutcome, AttachSibling, Backend, ListedSession, ServerRef } from './types.ts'
+import type { SeenMap } from './seen-store.ts'
+import type { RosterSession as RosterMember } from './roster-store.ts'
+import type { RosterClient } from './backends/opencode/client.ts'
+import type { AttachEnd } from './pty-host.ts'
+
+// The three seams every command in this file is injected through, named once.
+//
+// `TerminalGate` is the render gate a child takes the terminal from: gated-stdout's Gate satisfies
+// it, and so does the three-method stub the attach tests hand over. `RenderHandle` is Ink's render
+// result, narrowed to the one method the reclaim path calls (and nullable, because the same tests
+// pass null). Both are structural on purpose — nothing here should require the real thing.
+export type TerminalGate = { open(): unknown; close(): unknown; write(text: string): unknown; dispose?: () => void }
+export type RenderHandle = { clear(): unknown } | null
+// What makeEnsureServer returns and every command takes: resolve a server, or say why not.
+export type EnsureServer = (server: ServerRef) => Promise<{ ok: boolean; server: ServerRef; reason?: string }>
+type SpawnServer = typeof spawnServer
+// The attach action as attachLoop takes it — AppAction's `enter` member without the tag, because the
+// tests drive the loop directly with just the identity.
+export type AttachRequest = { sessionId: string; worktree: string; backend?: string; siblings?: AttachSibling[] }
+
+// The dependency bags below are all written with method syntax rather than function-property syntax.
+// That makes TypeScript compare their parameters bivariantly, which is the whole point of an
+// injection seam: a test fake may legitimately declare narrower arguments (or return a partial
+// roster) than the real implementation it stands in for, without either side reaching for a cast.
+type RunBgDeps = {
+  ensureServer: EnsureServer
+  serverFile: string
+  loadServerImpl?(file: string): ServerRef | null
+  createClient?(url: string): Pick<RosterClient, 'createSession' | 'renameSession' | 'runShell' | 'promptAsync'>
+  realpath?(path: string): string
+  rosterFile?: string
+  // Loose in the roster shape for the same reason: `bg` only appends to `sessions`, and the fixtures
+  // hand over exactly that much.
+  loadRosterImpl?(file: string): { sessions: RosterMember[] }
+  saveRosterImpl?(file: string, roster: { sessions: RosterMember[] }): unknown
+  now?(): number
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
+
+type RunServerDeps = {
+  serverFile: string
+  loadServerImpl?(file: string): ServerRef | null
+  isServerHealthyImpl?(server: ServerRef): Promise<boolean>
+  probeServerImpl?(server: ServerRef): Promise<'healthy' | 'unauthorized' | 'unreachable'>
+  saveServerImpl?(file: string, server: ServerRef): unknown
+  identifyServer?(pid: number): { ok: boolean; reason?: string; command?: string }
+  processKill?(pid: number, signal?: string): unknown
+  pollMs?: number
+  log?(message: string): void
+  error?(message: string): void
+  env?: NodeJS.ProcessEnv
+  setExitCode?(code: number): void
+}
+
+type ListSessionsDeps = {
+  createClient?(url: string): RosterClient
+  loadSeenImpl?(file: string): SeenMap
+  // Called, not read: the state-dir env overrides are per-test, so the path is resolved at call time.
+  seenFile?(): string
+  loadRosterImpl?(file: string): { sessions: RosterMember[] }
+  rosterFile?(): string
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
 
 // Read live from package.json (same as the header banner) rather than a hardcoded literal, so
 // `fleetview --version` can't drift from the published version the way a stale '0.0.0' did.
@@ -43,7 +113,7 @@ const RECENT_MESSAGES = 10
 import { gatedStdout } from './gated-stdout.ts'
 import { MOUSE_OFF } from './ui/mouse.ts'
 
-const DEFAULT_SERVER = { host: '127.0.0.1', port: 4900, pid: null }
+const DEFAULT_SERVER: ServerRef = { host: '127.0.0.1', port: 4900, pid: null }
 
 // A saved password that whatever holds the port has just rejected has also been SEEN by that
 // listener (probeServer presents it on the 401 retry), so it is burned: dropped from the env, where
@@ -64,23 +134,22 @@ export function burnSavedPassword(
   saveServerImpl(serverFile, bare)
 }
 
-// TODO(types): `seen`/`snap` are wire-derived watermark maps; kept as loose string-keyed records.
 export function makePersistSeen({
   seen,
   saveSeen,
   seenFile,
 }: {
-  seen: Record<string, any>
-  saveSeen: (file: string, data: Record<string, any>) => unknown
+  seen: SeenMap
+  saveSeen(file: string, data: SeenMap): unknown
   seenFile: string
 }) {
   // merge onto the loop-iteration's read, never overwrite wholesale — a wholesale write
   // would drop done-flags/watermarks for projects whose listSessions failed this run (offline).
   // liveProjectKeys: projects that successfully listSessions'd this run — only their keys are
   // eligible for pruning, so an offline project's watermarks survive untouched.
-  return (snap: Record<string, any>, liveProjectKeys: string[] = []) => {
+  return (snap: SeenMap, liveProjectKeys: string[] = []) => {
     const live = new Set(liveProjectKeys)
-    const base: Record<string, any> = {}
+    const base: SeenMap = {}
     for (const [key, value] of Object.entries(seen)) {
       if (!key.startsWith('/')) continue // v1 repoId key (e.g. 'sandbox-...') — v2 keys are always abs worktree paths, drop unconditionally
       const projectKey = key.slice(0, key.lastIndexOf(':')) // session ids never contain ':'; worktrees may, so split on the last one
@@ -114,7 +183,7 @@ export function makeEnsureServer({
   isServerHealthy: (server: ServerRef) => Promise<boolean>
   isAuthEnforced?: (server: ServerRef) => Promise<boolean>
   probeServer?: (server: ServerRef) => Promise<'healthy' | 'unauthorized' | 'unreachable'>
-  spawnServer: (server: ServerRef, opts: any) => number | undefined
+  spawnServer: SpawnServer
   saveServer: (file: string, server: ServerRef) => unknown
   serverFile: string
   pollMs?: number
@@ -289,7 +358,6 @@ export function looksLikeOpencodeServer(pid: number, { spawnSyncImpl = spawnSync
 // into the roster) and none of it was reachable from a test while it sat inline behind a real server
 // and a real createSession. Dependencies arrive as an options object with real defaults, so main()
 // passes only what it already holds and tests pass fakes.
-// TODO(types): the options bag is a test-injection surface (real deps + fakes); typed loose on purpose.
 export async function runBg(
   args: ParsedArgs,
   {
@@ -310,7 +378,7 @@ export async function runBg(
     setExitCode = (code: number) => {
       process.exitCode = code
     },
-  }: any = {},
+  }: RunBgDeps,
 ) {
   // Dispatch without opening the roster — agent view's `claude --bg`. Runs in the current
   // directory (or --cwd), joins the roster so the next `fleetview` shows it, and prints the id.
@@ -337,8 +405,8 @@ export async function runBg(
   }
   const session = await client.createSession({ agent: args.agent, model }, dir)
   if (args.name) await client.renameSession(session.id, args.name, dir)
-  if (args.exec) await client.runShell(session.id, args.prompt, dir, args.agent ?? 'build')
-  else await client.promptAsync(session.id, args.prompt, dir)
+  if (args.exec) await client.runShell(session.id, args.prompt ?? '', dir, args.agent ?? 'build')
+  else await client.promptAsync(session.id, args.prompt ?? '', dir)
   const roster = loadRosterImpl(rosterFile)
   // Same membership shape App writes: shell flag drives the job auto-clean, prompt feeds the
   // any-URL filter.
@@ -351,7 +419,6 @@ export async function runBg(
 // `status` answers about the world as it is, and `stop` on a server that isn't running has nothing
 // to do — both the opposite of ensureServer's job, so the dependency it would spawn through simply
 // isn't in scope here.
-// TODO(types): options bag is a test-injection surface; typed loose on purpose.
 export async function runServer(
   args: ParsedArgs,
   {
@@ -372,7 +439,7 @@ export async function runServer(
     setExitCode = (code: number) => {
       process.exitCode = code
     },
-  }: any = {},
+  }: RunServerDeps,
 ) {
   const server = loadServerImpl(serverFile) ?? DEFAULT_SERVER
   // H1: the same adoption makeEnsureServer does, for the same reason — the probe below authenticates
@@ -434,16 +501,24 @@ export async function runServer(
 // and nobody retypes one in full. All of them, not the first hit: the old form walked projects
 // serially and returned whichever answered first, so an ambiguous prefix silently attached to (or
 // deleted) an arbitrary one of the matches. Exported for tests.
-// TODO(types): `client` and session rows are dynamic opencode wire data; loose by design.
-export async function matchSessions(client: any, projects: { worktree: string }[], id: string) {
+// Takes only the one method it calls, in method syntax, for the same reason RosterClient does: the
+// tests hand over a two-line fake and the real client satisfies it unchanged.
+export async function matchSessions(
+  client: { listSessions(directory: string): Promise<unknown> },
+  projects: { worktree: string }[],
+  id: string,
+) {
   // #33: a degenerate id matches nothing rather than everything. Enforced here, not only at the
   // caller, because prefix matching is what makes '' and 's' match every session on the server —
   // any future caller gets the guard for free. withSession says why before it gets this far.
   if (sessionIdProblem(id)) return []
   const lists = await Promise.all(projects.map((p) => client.listSessions(p.worktree).catch(() => [])))
-  const matches: { session: any; worktree: string }[] = []
+  const matches: { session: ListedSession; worktree: string }[] = []
   lists.forEach((sessions, i) => {
-    for (const session of sessions ?? []) {
+    // A listing is whatever the server sent, so both the array and each row go through a check
+    // before an id is read off them — the same treatment every other wire payload gets.
+    for (const session of Array.isArray(sessions) ? sessions : []) {
+      if (!isListedSession(session)) continue
       if (session.id === id || session.id.startsWith(id)) matches.push({ session, worktree: projects[i].worktree })
     }
   })
@@ -456,7 +531,7 @@ export async function matchSessions(client: any, projects: { worktree: string }[
 // the server, find the session across every project, and hand both to the caller. Exits with a
 // message rather than a stack when the id doesn't match anything — or matches more than one thing —
 // because these are things people type by hand from a listing.
-async function withSession(id: string, ensureServer: any, serverFile: string) {
+async function withSession(id: string, ensureServer: EnsureServer, serverFile: string) {
   // #33: said before anything is spawned or asked — a degenerate id is a usage mistake, and
   // starting a server to tell the user their shell variable was unset helps nobody.
   const problem = sessionIdProblem(id)
@@ -473,7 +548,7 @@ async function withSession(id: string, ensureServer: any, serverFile: string) {
   }
   const client = new OpencodeClient(`http://${r.server.host}:${r.server.port}`)
   const projects = allProjectDirectories(await client.listProjects())
-  const parents = sandboxParents(projects as any)
+  const parents = sandboxParents(projects)
   const matches = await matchSessions(client, projects, id)
   if (matches.length === 0) {
     console.error(`no session matching ${id}`)
@@ -499,7 +574,7 @@ async function withSession(id: string, ensureServer: any, serverFile: string) {
 // asserting on the printed rows is the only way to know they all ran.
 export async function listSessions(
   { all, json, cwd }: ParsedArgs,
-  ensureServer: any,
+  ensureServer: EnsureServer,
   serverFile: string,
   {
     createClient = (url: string) => new OpencodeClient(url),
@@ -512,7 +587,7 @@ export async function listSessions(
     setExitCode = (code: number) => {
       process.exitCode = code
     },
-  }: any = {},
+  }: ListSessionsDeps = {},
 ) {
   const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
   if (!r.ok) {
@@ -522,7 +597,7 @@ export async function listSessions(
   }
   const client = createClient(`http://${r.server.host}:${r.server.port}`)
   const projects = allProjectDirectories(await client.listProjects())
-  const parents = sandboxParents(projects as any)
+  const parents = sandboxParents(projects)
   const store = createStore()
   // Read once, not once per project: the file is the same on every iteration, so re-reading and
   // re-parsing it per project bought nothing and cost a stat + parse per project.
@@ -532,9 +607,9 @@ export async function listSessions(
   // opencode's rename never fires and the row reads "New session - <timestamp>"). Keyed the same
   // `worktree:id` way the roster store keys members. A corrupt roster is not a reason to fail a
   // listing — `ls` only wants nicer titles out of it.
-  let members = new Map<string, any>()
+  let members = new Map<string, RosterMember>()
   try {
-    members = new Map(loadRosterImpl(rosterFile()).sessions.map((m: any) => [`${m.worktree}:${m.id}`, m]))
+    members = new Map(loadRosterImpl(rosterFile()).sessions.map((m) => [`${m.worktree}:${m.id}`, m]))
   } catch {}
   // Concurrent, because these are independent HTTP calls against one server and `ls` is something
   // people wait on — serially it took the sum of every project's round trip.
@@ -555,11 +630,11 @@ export async function listSessions(
     projects.flatMap((p) => [
       client
         .listPermissions(p.worktree)
-        .then((x: any) => store.seedPermissions(p.worktree, x, mark))
+        .then((x) => store.seedPermissions(p.worktree, x, mark))
         .catch(() => {}),
       client
         .listQuestions(p.worktree)
-        .then((x: any) => store.seedQuestions(p.worktree, x, mark))
+        .then((x) => store.seedQuestions(p.worktree, x, mark))
         .catch(() => {}),
     ]),
   )
@@ -754,7 +829,7 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
 
 async function rosterLoop(
   args: ParsedArgs,
-  { rosterFile, ensureServer, serverFile, launch = {} }: { rosterFile: string; ensureServer: any; serverFile: string; launch?: Launch },
+  { rosterFile, ensureServer, serverFile, launch = {} }: { rosterFile: string; ensureServer: EnsureServer; serverFile: string; launch?: Launch },
 ) {
   for (;;) {
     const server = loadServer(serverFile) ?? DEFAULT_SERVER // re-read each iteration — a reconnect action means server.json now points at a new port
@@ -773,13 +848,14 @@ async function rosterLoop(
       mouse: process.stdout.isTTY && (process.env.FLEETVIEW_NO_MOUSE ?? process.env.ROOST_NO_MOUSE) !== '1',
       cursor: process.stdout.isTTY,
     })
-    // TODO(types): the resolved action is a dynamic UI event union; loose by design.
-    const action = await new Promise<any>((resolve) => {
+    // `settle`, not `resolve`: node:path's `resolve` is in scope and the `--cwd` line below needs it.
+    // Naming the executor's callback `resolve` shadowed it, so `--cwd` silently handed App
+    // `undefined` and settled this promise with the path instead of the action.
+    const action = await new Promise<AppAction>((settle) => {
       let attaching = false
-      let inFlight: Promise<any> | null = null
+      let inFlight: Promise<AttachOutcome | undefined> | null = null
       const instance = render(
-        // TODO(types): App is a React component from an untyped module; cast to satisfy createElement.
-        React.createElement(App as any, {
+        React.createElement(App, {
           server: r.server,
           client,
           ensureServerImpl: ensureServer,
@@ -808,13 +884,13 @@ async function rosterLoop(
           // Merge-on-write, not a wholesale rewrite: App's snapshot is this iteration's read, and
           // a `fleetview bg` append from another terminal must survive the next pin/collapse/clean.
           persistRoster: makePersistRoster({ roster, file: rosterFile }),
-          onAction: (a: any) => {
+          onAction: (a: AppAction) => {
             // "Ctrl+G opens the dispatch prompt in $VISUAL or $EDITOR." Same terminal handover as
             // attach — close the render gate, let the editor own the tty, reopen and repaint —
             // because an editor drawing over a live Ink frame corrupts both.
             if (a.type === 'edit') return editPrompt(a.text, out, instance)
             if (a.type !== 'enter') {
-              resolve(a)
+              settle(a)
               instance.unmount()
               return
             }
@@ -834,11 +910,15 @@ async function rosterLoop(
           },
         }),
         // Ctrl+C clears the dispatch input before it quits, so Ink must not intercept it.
-        // out is a gated stdout wrapper standing in for a WriteStream; cast for Ink's option type.
+        // The one unavoidable cast in this file, and it is a boundary fact rather than a shortcut:
+        // Ink types `stdout` as the concrete `NodeJS.WriteStream` class, while `out` is deliberately
+        // a structural stand-in for one (gated-stdout's Gate — write/columns/rows/isTTY/resize plus
+        // the open/close gate Ink knows nothing about). No structural type can satisfy a class, and
+        // widening the gate to a whole WriteStream would mean implementing tty methods nothing calls.
         { exitOnCtrlC: false, stdout: out as any },
       )
     })
-    ;(out as any).dispose() // drop this gate's stdout listener before the next iteration builds another
+    out.dispose?.() // drop this gate's stdout listener before the next iteration builds another
     if (action.type === 'quit') break
     if (action.type === 'reconnect') continue // server.json now points at the fallback port; next loop picks it up
   }
@@ -870,8 +950,7 @@ async function rosterLoop(
 // worth making for a screen clear.
 const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
 
-// TODO(types): `out` (gated stdout) and `instance` (Ink render handle) come from untyped modules.
-export function reclaimTerminal(out: any, instance: any) {
+export function reclaimTerminal(out: TerminalGate, instance: RenderHandle) {
   out.open()
   instance?.clear()
   out.write(RESET_INPUT_MODES)
@@ -881,8 +960,7 @@ export function reclaimTerminal(out: any, instance: any) {
 // Hands the prompt to $VISUAL/$EDITOR through a temp file and returns whatever comes back. Resolves
 // to undefined when there is no editor configured or it failed, which App reads as "leave the
 // prompt alone" — losing a half-written prompt to a missing $EDITOR would be a poor trade.
-// TODO(types): `out` (gated stdout) and `instance` (Ink render handle) come from untyped modules.
-export async function editPrompt(text: string, out: any, instance: any) {
+export async function editPrompt(text: string, out: TerminalGate, instance: RenderHandle) {
   const editor = process.env.VISUAL || process.env.EDITOR
   if (!editor) return undefined
   // A private 0o700 dir, not a predictable /tmp/fleetview-prompt-<pid>.txt. writeFileSync's mode only
@@ -915,9 +993,10 @@ export async function editPrompt(text: string, out: any, instance: any) {
 // An attach that dies instantly without drawing anything leaves the user staring at the roster
 // wondering whether the keypress registered. The usual cause is a session whose directory is gone —
 // a removed git worktree — which makes `opencode attach --dir` exit 1 silently.
-// TODO(types): `reason` is a PTY-host exit descriptor (dynamic shape); loose by design.
-function describeExit(reason: any, target: { worktree: string }) {
-  if (reason.message) return { message: reason.message }
+function describeExit(reason: AttachEnd, target: { worktree: string }) {
+  // Only the exit member carries a message — it is set by attachLoop's own catch for a child that
+  // never started — so the `type` test is what the untyped read was already relying on.
+  if (reason.type === 'exit' && reason.message) return { message: reason.message }
   // `ms` matters: a session attached for ten minutes that then exits non-zero is opencode's
   // business, not a failure to attach. Only an instant, silent death is worth reporting.
   if (reason.type === 'exit' && reason.drewNothing && reason.exitCode !== 0 && reason.ms < 2000) {
@@ -932,13 +1011,12 @@ function describeExit(reason: any, target: { worktree: string }) {
 // index of the session to move to, resolved against whatever fleetview last published.
 // The argv comes from the backend rather than being spelled out here: it is the one piece of the
 // attach path that is specific to what's on the other end (`opencode attach` vs `<tool> --resume`).
-// TODO(types): `action` is a dynamic attach/switch event; `out`/`instance` from untyped modules.
-export async function attachLoop(action: any, out: any, instance: any, backends: Record<string, Backend>) {
+export async function attachLoop(action: AttachRequest, out: TerminalGate, instance: RenderHandle, backends: Record<string, Backend>) {
   // Which adapter spells the argv. The row says which backend it belongs to; an older action (or an
   // opencode row, which carries nothing) falls back to opencode, so this can only ever add cases.
   // The cwd the pty host uses is the session's directory either way, which is what `claude --resume`
   // needs to find the session at all — copilot names it a second time with its own `-C`.
-  const backendFor = (target: any): Backend => backends[target?.backend ?? DEFAULT_BACKEND] ?? backends[DEFAULT_BACKEND]
+  const backendFor = (target: AttachRequest): Backend => backends[target.backend ?? DEFAULT_BACKEND] ?? backends[DEFAULT_BACKEND]
   // Without a working PTY there is no way to sit between the terminal and opencode, so fleetview hands
   // the terminal over wholesale and waits. Streams stop for the duration, exactly as they did
   // before the resident host existed; detaching means exiting opencode.
@@ -954,7 +1032,7 @@ export async function attachLoop(action: any, out: any, instance: any, backends:
   let target = action
   for (;;) {
     const [command, ...argv] = backendFor(target).attach({ id: target.sessionId, directory: target.worktree })
-    const reason: any = await attachPty({
+    const reason: AttachEnd = await attachPty({
       command,
       args: argv,
       cwd: target.worktree,

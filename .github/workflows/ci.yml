@@ -44,3 +44,9 @@ jobs:
       # Visual regression: previews are committed; a UI change must update them in the same PR,
       # which makes the change reviewable as a before/after diff.
       - run: npm run preview && git diff --exit-code docs/previews
+      # Same contract for the README/site screenshots. `npm run shots` (no --shoot) rewrites only
+      # the HTML from the same components, so this catches a UI change that never made it into the
+      # committed images — the case that shipped a help.html a release behind its own key list.
+      # The PNGs are not checked: they need a Chrome binary and are not byte-reproducible across
+      # renderers, so the HTML is the reviewable artifact and the images are regenerated with it.
+      - run: npm run shots && git diff --exit-code docs/images/*.html

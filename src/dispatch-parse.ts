@@ -172,12 +172,14 @@ export function suggestFor(
 
 // Applies a parsed filter to the rendered rows. `s:blocked` is agent view's alias for everything
 // waiting on you, which in fleetview's vocabulary is the `waiting` state.
-export function applyFilter(
-  sessions: Session[],
+// Generic in the row so a caller gets back exactly what it handed in: App filters decorated roster
+// rows and then renders them, and a `Session[]` return would strip every field the Roster reads.
+export function applyFilter<T extends Session>(
+  sessions: T[],
   filter: Filter | null | undefined,
-  agentOf: (s: Session) => string | undefined = () => undefined,
-  promptOf: (s: Session) => string | undefined = () => undefined,
-) {
+  agentOf: (s: T) => string | undefined = () => undefined,
+  promptOf: (s: T) => string | undefined = () => undefined,
+): T[] {
   if (!filter) return sessions
   if (filter.state !== undefined) {
     const want = filter.state === 'blocked' ? 'waiting' : filter.state

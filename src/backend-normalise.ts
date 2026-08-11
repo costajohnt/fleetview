@@ -11,7 +11,7 @@
 // state, so "what changed" only exists relative to what was reported last. One normaliser instance
 // belongs to one events() subscription (one backend, one directory).
 import { applyEvent as applyClaudeEvent, emptyRunState, emptyTranscriptState, type ClaudeRunState } from './backends/claude/stream.ts'
-import type { OpencodeEvent } from './types.ts'
+import { isRecord, type ListedSession, type OpencodeEvent } from './types.ts'
 
 // An opencode-shaped bus event, which is what session-store.apply switches on.
 // The store's own wire vocabulary, since #99 typed it: everything a normaliser emits must be one
@@ -36,14 +36,21 @@ export type StoreEvent = OpencodeEvent
 // peek showed the prompt. An empty title is the honest report of "this backend has not named it",
 // which is exactly what the store's placeholder test is looking for. What a never-dispatched
 // session shows instead is projects.ts's job: it falls back to the transcript's opening prompt.
-export const normaliseClaudeSessions = (rows: any[] | null | undefined): any[] =>
-  (rows ?? []).map((s: any) => ({ id: s.id, title: s.title ?? '', time: { created: s.createdAt ?? 0, updated: s.updatedAt ?? 0 } }))
+export const normaliseClaudeSessions = (rows: ListedSession[] | null | undefined): ListedSession[] =>
+  (rows ?? []).map((s) => ({
+    id: s.id,
+    title: typeof s.title === 'string' ? s.title : '',
+    time: {
+      created: typeof s.createdAt === 'number' ? s.createdAt : 0,
+      updated: typeof s.updatedAt === 'number' ? s.updatedAt : 0,
+    },
+  }))
 
 // Already carries id/title/time in milliseconds (sessions.ts converts them deliberately), so
 // this is a projection rather than a conversion — `running` is dropped because liveness reaches
 // the store through the event path, where it can be told apart from a finished run.
-export const normaliseCopilotSessions = (rows: any[] | null | undefined): any[] =>
-  (rows ?? []).map((s: any) => ({ id: s.id, title: s.title || s.id, time: s.time }))
+export const normaliseCopilotSessions = (rows: ListedSession[] | null | undefined): ListedSession[] =>
+  (rows ?? []).map((s) => ({ id: s.id, title: typeof s.title === 'string' && s.title ? s.title : s.id, time: s.time }))
 
 // The status half of a backend's state, in store events. Order matters and is load-bearing:
 //   - `session.status busy` is what sets hasRun/clears a previous error, so it leads.
@@ -97,7 +104,7 @@ function statusEvents(sessionID: string, status: string, error: string | undefin
 // What the run asked for and did not get. The payload shape is the CLI's own (`tool_name` on claude's
 // permission_denials), so only the field that names the tool is read.
 function denialLabel(denials: unknown[]): string {
-  const names = denials.map((d: any) => (typeof d?.tool_name === 'string' ? d.tool_name : null)).filter(Boolean)
+  const names = denials.map((d) => (isRecord(d) && typeof d.tool_name === 'string' ? d.tool_name : null)).filter(Boolean)
   if (names.length === 0) return 'the run was refused a tool it needed'
   return `${[...new Set(names)].join(', ')} — attach to approve`
 }
@@ -117,17 +124,18 @@ const outputEvents = (sessionID: string, text: string): StoreEvent[] => [
 export function claudeNormaliser(): (event: unknown) => StoreEvent[] {
   const states = new Map<string, ClaudeRunState>()
   return (event: unknown) => {
-    const e = event as any
+    // A frame that isn't an object carries no fields to read, and the id guard below drops it.
+    const e: Record<string, unknown> = isRecord(event) ? event : {}
     // A run's stream keys the id `session_id`; a discovered transcript keys it `sessionId` (both
     // verified against 2.1.220 — see the wire doc). Reading only `session_id` dropped every
     // transcript line at the guard below, so the whole discovery feature produced nothing.
-    const sessionID = (typeof e?.session_id === 'string' ? e.session_id : undefined) ?? (typeof e?.sessionId === 'string' ? e.sessionId : undefined)
+    const sessionID = (typeof e.session_id === 'string' ? e.session_id : undefined) ?? (typeof e.sessionId === 'string' ? e.sessionId : undefined)
     if (!sessionID) return [] // a line fleetview cannot attribute is a line it cannot act on
     const first = !states.has(sessionID)
     // A transcript carries no `result` record, so its status can never move off the seed — it must
     // start 'idle', or a hand-started session reads 'working' forever. The tail loop tags transcript
     // lines with `__source`; a run's lines are untagged and seed 'working' (its `init` keeps it there).
-    const before = states.get(sessionID) ?? (e?.__source === 'transcript' ? emptyTranscriptState() : emptyRunState())
+    const before = states.get(sessionID) ?? (e.__source === 'transcript' ? emptyTranscriptState() : emptyRunState())
     const after = applyClaudeEvent(before, event)
     states.set(sessionID, after)
     const out: StoreEvent[] = []
@@ -144,8 +152,8 @@ export function claudeNormaliser(): (event: unknown) => StoreEvent[] {
 export function copilotNormaliser(): (event: unknown) => StoreEvent[] {
   const last = new Map<string, { status: string; lastOutput: string }>()
   return (event: unknown) => {
-    const e = event as any
-    if (e?.type !== 'copilot.session' || typeof e.sessionId !== 'string') return []
+    const e: Record<string, unknown> = isRecord(event) ? event : {}
+    if (e.type !== 'copilot.session' || typeof e.sessionId !== 'string') return []
     const sessionID: string = e.sessionId
     const reported: string = typeof e.status === 'string' ? e.status : 'working'
     // Denied-tools parity with claude (M12): a copilot run refused a tool mid-run exits 0 and

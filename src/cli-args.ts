@@ -159,8 +159,28 @@ const STATE_WORDS: Record<string, string> = {
   idle: 'idle',
 }
 
-// TODO(types): `session` is a session-store row whose wire-derived fields are dynamic; loose by design.
-export function sessionJson(session: any, { repo, worktree }: { repo?: string; worktree?: string } = {}) {
+// What `sessionJson` reads off a row. Deliberately looser than session-store's `SessionRow`, which
+// is what production passes: only `id` and `status` are load-bearing (one names the session, the
+// other is the word this translates), and every other field is omitted from the output when it is
+// absent — so a caller holding a partial row gets a partial listing rather than a type error. The
+// index signature is what lets a full `SessionRow` (with `pendingRequest`, `origin`, …) flow in
+// without the caller stripping itself down first.
+export type ShellSession = {
+  id: string
+  status: string
+  title?: string
+  projectKey?: string
+  createdAt?: number
+  updatedAt?: number
+  agent?: string
+  ranForMs?: number | null
+  waitingSince?: number
+  waitingFor?: string
+  snippet?: string
+  [key: string]: unknown
+}
+
+export function sessionJson(session: ShellSession, { repo, worktree }: { repo?: string; worktree?: string } = {}) {
   return {
     id: session.id,
     name: session.title,
