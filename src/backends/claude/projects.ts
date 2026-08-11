@@ -1,9 +1,10 @@
 // Discovery: reading ~/.claude/projects/ so the roster can show claude sessions fleetview never
 // started, the way it shows opencode's. Claude Code owns this directory; nothing here writes to it.
-import { closeSync, openSync, readSync, readdirSync, statSync } from 'node:fs'
+import { readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { SESSION_ID_RE } from '../session-id.ts'
+import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
 
 // Only the fields the roster reads. The transcript records carry a great deal more (usage, parent
 // uuids, attachments) and none of it survives this function.
@@ -62,27 +63,23 @@ function promptText(rec: any): string {
 // What the last scan of a transcript found, plus where the read got to. Keyed by project folder and
 // then file name.
 //
-// The offset is the point of the whole entry. events() calls listTranscripts every 500ms, and the
+// The cursor is the point of the whole entry. events() calls listTranscripts every 500ms, and the
 // old shape re-read and re-split each transcript whole, gated on mtime+size — a gate that by
 // construction can never hit for the one file that matters, because an append moves both. Measured
 // at ~28ms of blocked event loop twice a second per directory with one active large session. Now
-// each poll reads only the bytes appended since the last one, exactly as events()'s own tail cursor
-// and copilot's readFrom do.
-//
-// The decoder is per file and kept across polls for the same reason those two keep one: a
-// positional read ends wherever the file did, which is happily mid-character, and decoding each
-// chunk on its own turns every multi-byte character straddling a poll boundary into U+FFFD.
-type CacheEntry = Scanned & { offset: number; rest: string; ino: number; decoder: InstanceType<typeof TextDecoder> }
+// each poll reads only the bytes appended since the last one, through the same tail cursor
+// (tail.ts) both process-backed backends read their logs with.
+type CacheEntry = Scanned & { cursor: TailCursor }
 const scanCache = new Map<string, Map<string, CacheEntry>>()
 
-const freshEntry = (): CacheEntry => ({ offset: 0, rest: '', ino: 0, decoder: new TextDecoder() })
+const freshEntry = (): CacheEntry => ({ cursor: newTailCursor() })
 
 // Folds the records in `text` onto `entry`. Each line is substring-tested before it is parsed — the
 // interesting records are a handful out of thousands, and JSON.parse on every line of every session
 // was the difference between a listing that is free and one that is felt.
 function fold(entry: CacheEntry, text: string) {
   const lines = text.split('\n')
-  entry.rest = lines.pop() ?? '' // partial trailing line: the next read completes it
+  entry.cursor.rest = lines.pop() ?? '' // partial trailing line: the next read completes it
   for (const line of lines) {
     // ai-title is rewritten as the session is re-titled, so the last one wins — including one that
     // arrives in a later chunk, which is why these merge over the cached values rather than
@@ -120,33 +117,17 @@ function fold(entry: CacheEntry, text: string) {
   }
 }
 
-// Reads whatever has been appended to `file` since `prev` last looked, and returns the merged entry.
-// A different inode is a different file: compaction that renames a rewritten transcript over the old
-// path lands at whatever size it likes, so size alone misses every rewrite that happens to be
-// equal-or-larger and the scan then folds mid-line garbage from a stale offset. ino 0 (some Windows
-// filesystems report it) is no signal at all, so it never triggers a reset. Same rule, same reasons,
-// as the copilot backend's readFrom.
+// Reads whatever has been appended to `file` since `prev` last looked, and returns the merged
+// entry. The shrink/inode-replace reset rule lives in tailFile now; on a reset the fields folded
+// out of the old file go with it, because they describe a file that no longer exists. The caller
+// already statted the file (it needed the mtime anyway), so the stat rides along.
 function scan(file: string, prev: CacheEntry | undefined, size: number, ino: number): CacheEntry {
   let entry = prev ?? freshEntry()
-  const replaced = entry.ino !== 0 && ino !== 0 && entry.ino !== ino
-  if (size < entry.offset || replaced) entry = freshEntry()
-  entry.ino = ino
-  if (size <= entry.offset) return entry // nothing appended; the cached fold is still the answer
-  let chunk: string
-  try {
-    const fd = openSync(file, 'r')
-    try {
-      const buf = Buffer.allocUnsafe(size - entry.offset)
-      const read = readSync(fd, buf, 0, buf.length, entry.offset)
-      chunk = entry.decoder.decode(buf.subarray(0, read), { stream: true })
-      entry.offset += read
-    } finally {
-      closeSync(fd)
-    }
-  } catch {
-    return entry // deleted or unreadable between readdir and here; keep what was already folded
-  }
-  fold(entry, entry.rest + chunk)
+  const r = tailFile(entry.cursor, file, { size, ino })
+  if (r === null) return entry // deleted or unreadable between readdir and here; keep what was already folded
+  if (r.reset) entry = { cursor: entry.cursor } // tailFile zeroed the cursor; the fold restarts with it
+  if (!r.text) return entry // nothing appended; the cached fold is still the answer
+  fold(entry, entry.cursor.rest + r.text)
   return entry
 }
 

@@ -16,17 +16,16 @@ import { titleFor, setTitle, bell, newlyNotable, hookTransitions, runNotifyHook 
 import { Help, helpLines, helpPage } from './ui/help.ts'
 import { Peek } from './ui/peek.ts'
 import { usePeek } from './use-peek.ts'
+import { useDiscovery } from './use-discovery.ts'
+import { useDispatch } from './use-dispatch.ts'
 import { pickTarget, repoChoices } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
-import { sandboxParents, rememberSandboxes, isRootProject, displayProject, isSandbox, shouldIsolate, worktreeName, worktreeSafety, allProjectDirectories } from './worktree.ts'
-import { fetchPullRequests, branchOf, byBranch, hasOpenPr } from './pull-requests.ts'
+import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety } from './worktree.ts'
+import { fetchPullRequests, branchOf, hasOpenPr } from './pull-requests.ts'
 import { theme } from './ui/theme.ts'
-import type { OpencodeEvent } from './types.ts'
 
 // TODO(types): opencode wire data (project rows, session rows) is dynamic; roster shape reused from roster-store.
 type RosterState = RosterType
-
-const sortProjects = (list: any[]) => [...list].sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
 
 const VISIBLE_PER_PROJECT = 10
 
@@ -130,12 +129,6 @@ const withoutMember = (roster: any, worktree: any, id: any) => ({
   ...roster,
   sessions: roster.sessions.filter((s: any) => !(s.worktree === worktree && s.id === id)),
 })
-
-// repoll keeps stale (vanished) projects in place — only union in what's fresh, never drop.
-const mergeProjects = (prev: any[], fresh: any[]) => {
-  const freshKeys = new Set(fresh.map((p) => p.worktree))
-  return sortProjects([...fresh, ...prev.filter((p) => !freshKeys.has(p.worktree))])
-}
 
 // TODO(types): host/client wiring and injected impls are large, dynamic shapes; loose props.
 type AppProps = {
@@ -314,7 +307,6 @@ export function App({
   // protection survives untouched.
   const projectsListed = useRef(false)
   const knownSandboxes = useRef(new Map<string, string>()) // every worktree ever listed in a project's `sandboxes` -> its repo (#22)
-  const conns = useRef(new Map<string, any>()) // worktree -> stream handle, for unmount cleanup
   // onEvent below is captured once by the mount-only discovery effect, so it can't read fresh
   // rosterState from a render closure — this ref is the escape hatch (F1).
   const reconcileRef = useRef<any>(null) // set by the discovery effect; serializes seeds per worktree
@@ -373,379 +365,6 @@ export function App({
       }
     }
   }, [store, persistSeen])
-
-  useEffect(() => {
-    let cancelled = false
-    let polling = false
-    let intervalId: ReturnType<typeof setInterval> | undefined
-
-    // Live-state reconciliation: GET /session/status + GET /permission + GET /question catch a
-    // session mid-run or a permission/question already pending at fleetview launch/reconnect that a
-    // fresh SSE stream wouldn't otherwise report until its next change. Best-effort — failures
-    // never block seeding.
-    // I2: statuses seed FIRST and are awaited before permissions+questions seed — session.status's
-    // idle-clear must land ahead of the fresh pending seed, not race it, or a handler-style
-    // clear could wipe an entry the authoritative reseed was about to (re)add. The __seq mark is
-    // captured BEFORE issuing the GETs (the very first line) and passed to both seeds — it lets
-    // seedPermissions/seedQuestions tell a pre-seed entry (safe to drop if the fresh list lacks it)
-    // from one that landed live while these GETs were still in flight (must survive the replace).
-    // That watermark is what makes it safe to connect the SSE stream before this seed lands (below).
-    // Reports each list separately. A single combined flag conflated three independent requests:
-    // a peek path that only cares whether `/question` succeeded would see failure because
-    // `/session/status` timed out, and blind-re-add a question the fresh list had correctly
-    // dropped — resurrecting a request the server has already accepted an answer for, which is
-    // exactly what the fallback exists to avoid.
-    // `additive: true` is the periodic pass's form of the pending seed. The default replace is
-    // *authoritative* — an entry missing from the response is dropped — which is right when
-    // reconnecting after missing events, but wrong to repeat on a timer: if `GET /permission` ever
-    // omitted a genuinely pending request, a rare reconnect-only drop would become a recurring one.
-    // So the timer used to seed statuses only. That left a real hole: a lost `session.status` frame
-    // self-heals within one poll, but a lost `permission.asked`/`question.asked` frame had no
-    // recovery path at all, and the row sat rendering "working" with a blocked run behind it and no
-    // token spend until the user restarted. Systematic rather than rare, because opencode's event
-    // stream is per-directory and a dispatched session runs in its own git worktree — statuses for
-    // those still refresh (the poll hits GET /session/status per worktree), permissions and
-    // questions had no equivalent. The additive mode only ADDS what the store is missing and never
-    // deletes, so the timer can run it without the omission risk, and the authoritative replace
-    // stays exactly where it was: mount, reconnect, and the peek reconcile paths.
-    const seedLiveState = async (worktree: any, { pending = true, additive = false, closeRuns = false, relist = false }: any = {}) => {
-      // Before anything else, because `setSessions` is the only thing that learns which sessions are
-      // subagents, and every seed below can otherwise mint a row for one. A subagent spawned since
-      // the last listing is unknown, so its first `session.status` creates a record; this is what
-      // closes that window on the poll interval instead of leaving it open until the next reconnect
-      // or dispatch. It also retires a session that has vanished from the listing — deleted from
-      // opencode's own TUI, or by a `session.deleted` the stream was down for — with one exception
-      // fleetview cannot close: a record it has never listed, which is indistinguishable from a
-      // session created since the last listing (the row a dispatch has this instant created).
-      if (relist) {
-        try {
-          const list = await client.listSessions(worktree)
-          if (cancelled) return { permissions: false, questions: false }
-          seededProjectKeys.current.add(worktree)
-          // The one caller that retires vanished sessions, because it is the one chainSeed
-          // serializes per worktree — so a stale listing can never land after a newer one and
-          // delete what the newer one just saw. Every other caller refreshes without retiring.
-          store.setSessions(worktree, list, seen, { retire: true })
-        } catch {
-          // A failed relist is not worth flagging the project offline for — the stream is the
-          // authority on that, and the next tick tries again.
-        }
-      }
-      const mark = store.seedMark()
-      const outcome = { permissions: true, questions: true }
-      await client
-        .sessionStatus(worktree)
-        .then((s: any) => store.seedStatuses(worktree, s, mark, { closeRuns }))
-        .catch(() => {})
-      if (!pending) return outcome
-      // M4: each GET fails independently. If sessionStatus above succeeds but one of these two
-      // fails, that half of the reseed silently no-ops — e.g. a session whose status seed just
-      // landed idle can still show "waiting" off a pendingPermissions/pendingQuestions entry that
-      // never got its authoritative reseed. Stale until the next reconnect's seedLiveState run;
-      // self-healing, accepted rather than adding retry/backoff for a best-effort catch-up path.
-      await Promise.all([
-        client
-          .listPermissions(worktree)
-          .then((p: any) => store.seedPermissions(worktree, p, mark, { additive }))
-          .catch(() => { outcome.permissions = false }),
-        client
-          .listQuestions(worktree)
-          .then((q: any) => store.seedQuestions(worktree, q, mark, { additive }))
-          .catch(() => { outcome.questions = false }),
-      ])
-      return outcome
-    }
-
-    // M2: per-worktree promise chain — mount/onOnline/repoll/reconcile all route seedLiveState
-    // calls through this, so two seeds for the same worktree never overlap outside the watermark
-    // protocol above. Also eliminates the startup double-fetch: mount's initial seed and the first
-    // onOnline resync now run sequentially instead of both firing their GETs concurrently.
-    const seedChains = new Map<string, Promise<any>>()
-    const chainSeed = (w: any, options?: any) => {
-      const failed = { permissions: false, questions: false }
-      const next = (seedChains.get(w) ?? Promise.resolve()).then(() => seedLiveState(w, options)).catch(() => failed)
-      seedChains.set(w, next)
-      return next
-    }
-    // Published so the peek reconcile paths use the same chain. They used to call seedMark() and
-    // seedPermissions/seedQuestions directly, which is exactly the overlap the chain prevents: a
-    // reconnect's older snapshot could land after a newer one and re-insert a permission the
-    // server had already accepted an answer for.
-    reconcileRef.current = chainSeed
-    streamProjectRef.current = (w: any) => seedAndStream(w)
-
-    const seedAndStream = async (worktree: any) => {
-      // M14: idempotency lives here, not at callers — the dispatch path and a poll tick can both
-      // reach this for the same worktree (the poll awaits gh calls before computing newOnes), and
-      // a second run's `conns.current.set` would orphan the first connection's stop() so it
-      // reconnects and double-delivers forever. knownWorktrees covers the in-flight window (it is
-      // added below and deleted on failure, so retries still work); conns covers established ones.
-      if (conns.current.has(worktree) || knownWorktrees.current.has(worktree)) return
-      knownWorktrees.current.add(worktree)
-      try {
-        const sessions = await client.listSessions(worktree)
-        if (cancelled) return
-        seededProjectKeys.current.add(worktree)
-        store.setSessions(worktree, sessions, seen)
-        const conn = connectEventsImpl(
-          { ...server, directory: worktree },
-          {
-            onEvent: (directory: any, e: OpencodeEvent) => {
-              store.apply(directory, e)
-              // Explicit delete evidence only — never prune members merely absent from a listing;
-              // offline projects must keep members (F1).
-              const id = e.type === 'session.deleted' ? e.properties?.info?.id : undefined
-              if (id && hasSession(rosterRef.current, directory, id)) {
-                updateRoster((prev: any) => withoutMember(prev, directory, id))
-              }
-            },
-            onOffline: (directory: any) => setOfflineProjects((s) => new Set(s).add(directory)),
-            onOnline: (directory: any) => {
-              setOfflineProjects((s) => {
-                const next = new Set(s)
-                next.delete(directory)
-                return next
-              })
-              // project's stream just came back: re-seed in case we missed events while offline.
-              // fire-and-forget — a racing failure re-flags it offline via other paths.
-              client
-                .listSessions(directory)
-                .then((list: any) => {
-                  seededProjectKeys.current.add(directory)
-                  store.setSessions(directory, list, seen)
-                  chainSeed(directory)
-                })
-                .catch(() => {})
-            },
-          },
-        )
-        if (cancelled) return conn.stop()
-        conns.current.set(worktree, conn)
-        // I2: fire-and-forget, not awaited — the stream is already connecting above, and the
-        // seq-watermark inside seedLiveState makes a seed that resolves after live events have
-        // already landed safe (event-fresh entries survive the replace instead of being deleted).
-        // M2: routed through chainSeed, not called directly — serializes against any other
-        // pending seed for this worktree (e.g. a fast onOnline flap right after mount).
-        chainSeed(worktree)
-      } catch {
-        if (!cancelled) {
-          setOfflineProjects((s) => new Set(s).add(worktree))
-          knownWorktrees.current.delete(worktree) // let the next repoll retry it fully, not skip it forever
-        }
-      }
-    }
-
-    // Backends other than opencode, streamed only once something has asked for them: the launch
-    // default (--backend / FLEETVIEW_BACKEND), a roster membership left by a previous run, or an
-    // `@backend` dispatch. A pure-opencode user never activates one, so nothing here ever runs for
-    // them — no extra polling, and no other tool's sessions in their roster.
-    const activeBackends = new Set<string>([DEFAULT_BACKEND, initialBackend])
-    for (const m of rosterRef.current.sessions as any[]) {
-      if (m.backend && m.backend !== DEFAULT_BACKEND) {
-        activeBackends.add(m.backend)
-        // Without this a restored row is untagged in the store, and so swept as opencode's by the
-        // three seeds the moment its project comes online.
-        store.noteOrigin(m.worktree, m.id, m.backend)
-      }
-    }
-    const backendConns = new Map<string, any>() // `${name}:${worktree}` → subscription, for unmount
-
-    // Connect (once) and re-list (every call) one backend in one directory. Listing every time is
-    // what makes discovery keep up: a process-backed backend has no event for "a session you have
-    // never seen exists", so the periodic listing is the only way one started outside fleetview —
-    // or by a previous fleetview run — ever appears.
-    const streamBackend = async (name: string, worktree: string) => {
-      if (name === DEFAULT_BACKEND) return // opencode has its own path above, unchanged
-      const backend = backendRegistry[name]
-      if (!backend) return
-      const key = `${name}:${worktree}`
-      if (!backendConns.has(key)) {
-        // One normaliser per subscription, because it folds per-session state across events and two
-        // directories' runs must never share that fold.
-        const normalise = backend.createNormaliser()
-        const conn = backend.events(
-          { directory: worktree },
-          {
-            onEvent: (directory: string, event: unknown) => {
-              for (const store_event of normalise(event)) {
-                // Not every union member carries sessionID (session.updated nests an info object),
-                // and the ones a normaliser emits all do — the loose read says so once.
-                const id = (store_event.properties as { sessionID?: string }).sessionID
-                if (id) store.noteOrigin(directory, id, name)
-                store.apply(directory, store_event)
-              }
-            },
-          },
-        )
-        if (cancelled) return conn.stop()
-        backendConns.set(key, conn)
-      }
-      try {
-        const list = backend.normaliseSessions(await backend.listSessions(worktree))
-        if (cancelled) return
-        for (const s of list) store.noteOrigin(worktree, s.id, name)
-        // Never `retire: true`: that sweep is scoped to a project, not to a backend, so a claude
-        // listing armed with it would delete the opencode rows in the same directory. Leaving these
-        // records unlisted is also what keeps opencode's own retiring listing from deleting them —
-        // it only sweeps records its own listings armed.
-        store.setSessions(worktree, list, seen)
-      } catch {
-        // A CLI that isn't installed, or a state directory that doesn't exist. Both are "no sessions
-        // here", and neither is worth flagging the project offline for.
-      }
-    }
-    // Published for the dispatch path: `@claude fix the tests` has to start streaming claude before
-    // the row it just created can ever update.
-    activateBackendRef.current = async (name: string) => {
-      activeBackends.add(name)
-      await Promise.all([...knownWorktrees.current].map((w) => streamBackend(name, w)))
-    }
-
-    const refreshPullRequests = async (fresh: any[]) => {
-      // One call per repository, never per worktree: a worktree shares its repository's remote, so
-      // asking it the same question again would double the subprocesses for identical answers.
-      const parentsNow = sandboxParents(fresh)
-      const repoDirs = fresh.filter((p) => !parentsNow.has(p.worktree)).map((p) => p.worktree)
-      const results = await Promise.all(repoDirs.map((dir: any) => fetchPullRequestsImpl(dir)))
-      if (cancelled) return
-      // Keyed by repository dir + branch, not bare branch: branch names are not unique across
-      // repositories (every repo dependabot touches has a `dependabot/github_actions/...` branch),
-      // and a bare-branch key let a session wear another repository's pull request label.
-      const merged = new Map()
-      repoDirs.forEach((dir: any, i: number) => {
-        for (const [branch, list] of byBranch(results[i].prs)) merged.set(`${dir} ${branch}`, list)
-      })
-      // Reasons are scoped per repository, not collapsed to one global string: `repoDirs` and
-      // `results` are index-aligned (one `gh` call per repo dir), so zip them into a map and keep
-      // only the repos that actually failed. This is what lets peek show a session its OWN repo's
-      // reason instead of a different repo's.
-      const reasons = new Map()
-      repoDirs.forEach((dir: any, i: number) => {
-        if (results[i].reason) reasons.set(dir, results[i].reason)
-      })
-      // Branches are read for every directory including worktrees, because a session's key is the
-      // branch of the directory it actually runs in, not of the repository that owns it.
-      const branches = new Map()
-      for (const p of fresh) {
-        const branch = branchOfImpl(p.worktree)
-        if (branch) branches.set(p.worktree, branch)
-      }
-      setPullRequests({ byBranch: merged, branches, reasons })
-    }
-
-    // #44: a `fleetview bg` dispatch from another terminal appends to roster.json and the running
-    // TUI never noticed — it read the file once at mount and holds membership in React state, so
-    // the session streamed fine in browse while its member row stayed invisible until restart.
-    // Re-read on the tick that already polls projects and union in what state lacks.
-    //
-    // Additions only. Removals are deliberately NOT synced: two instances would fight over deletes,
-    // and one instance's ^x would silently eat a membership the other is still using.
-    //
-    // Nothing already in state is ever rewritten from disk — a pin, rank, prompt or collapse this
-    // instance just made stays exactly as it is, and groupBy/collapsed are never read at all. And
-    // nothing is persisted here: these members are on disk already, and writing back would hand
-    // makePersistRoster's `prev` a foreign member to later mistake for one of its own.
-    const syncExternalMembers = () => {
-      const disk = persistRoster?.reload?.() // null when unchanged, unreadable, or not wired (tests)
-      if (!disk) return
-      const have = new Set(rosterRef.current.sessions.map((m: any) => `${m.worktree}:${m.id}`))
-      const added = disk.sessions.filter((m: any) => !have.has(`${m.worktree}:${m.id}`))
-      if (added.length === 0) return
-      const next = { ...rosterRef.current, sessions: [...rosterRef.current.sessions, ...added] }
-      // The ref leads, as it does everywhere else in this effect (F1): updateRoster writes through
-      // rosterRef.current, and a call site that fires before the state flush must see these members.
-      rosterRef.current = next
-      setRosterState(next)
-    }
-
-    const refreshProjects = async () => {
-      if (polling) return
-      polling = true
-      flushSavedReplies.current() // anything queued by a failed peek reply gets another go
-      // Before listProjects, not after: #43 ghosts a member whose worktree is in no project record,
-      // and the listing is only fair evidence if it ran AFTER the member became known. Reading the
-      // roster first makes that ordering unconditional.
-      syncExternalMembers()
-      try {
-        // Sandboxes included: a worktree is not reliably published as a project row of its own, and
-        // a session fleetview never streams is a row that never updates.
-        const fresh = allProjectDirectories(await client.listProjects())
-        if (cancelled) return
-        setServerDown(false)
-        projectsListed.current = true // #43: a completed round is the ghost arm's only evidence
-        setProjects((prev) => mergeProjects(prev, fresh))
-        // Pull requests refresh on the tick that already re-lists projects: no second timer and no
-        // TTL bookkeeping. A poll is unavoidable rather than a shortcut — the label's colour encodes
-        // CI state, and checks go green while the session sits idle, so no session event could ever
-        // turn a row green.
-        await refreshPullRequests(fresh)
-        const newOnes = fresh.filter((p) => !knownWorktrees.current.has(p.worktree))
-        await Promise.all(newOnes.map((p) => seedAndStream(p.worktree)))
-        // Discovery for the process-backed backends rides the same tick: the directories fleetview
-        // already shows are exactly the ones worth asking claude/copilot about, so a session started
-        // outside fleetview in one of them joins the roster on the next poll. No-op when no backend
-        // beyond opencode is active, which is the default.
-        for (const name of activeBackends) {
-          if (name === DEFAULT_BACKEND) continue
-          await Promise.all(fresh.map((p) => streamBackend(name, p.worktree)))
-        }
-        // Re-reconcile the projects already streaming. Without this the only reconciliation paths
-        // were first sight and a stream that dropped and came back — so a single lost
-        // `session.status` frame on a healthy connection left a row animating "working" forever,
-        // with no way back short of restarting fleetview. The seed is chained and watermarked, so a
-        // periodic pass is safe; it just makes the state self-healing on the poll interval.
-        for (const p of fresh) {
-          if (!newOnes.includes(p) && seededProjectKeys.current.has(p.worktree)) {
-            // A healthy poll: a session that has gone absent finished within the last interval, so
-            // its run span can be closed. The reconnect path deliberately does not pass this — the
-            // stream may have been down for an hour and the run may have ended at the start of it.
-            // `additive`, not the default replace: the pending lists are refreshed by adding what
-            // the server reports and the store lacks — a permission.asked/question.asked frame the
-            // stream dropped — and never by deleting. See seedLiveState for why the authoritative
-            // form must not run on a timer.
-            chainSeed(p.worktree, { additive: true, closeRuns: true, relist: true })
-          }
-        }
-      } catch {
-        // transient listProjects failure — try to recover the server itself before the next poll tick
-        try {
-          const r = await ensureServerImpl(server)
-          if (cancelled) return
-          if (!r.ok) {
-            setServerDown(true)
-          } else if (r.server.port === server.port) {
-            setServerDown(false) // same port came back healthy — streams self-recover
-          } else {
-            // ensureServer fell back to a different port and already persisted it to server.json —
-            // remount on it rather than performing live client/stream surgery here.
-            onAction({ type: 'reconnect' })
-            exit()
-          }
-        } catch {
-          if (!cancelled) setServerDown(true)
-        }
-      } finally {
-        polling = false
-      }
-    }
-
-    if (serverReady) {
-      ;(async () => {
-        await refreshProjects()
-        if (cancelled) return
-        intervalId = setInterval(refreshProjects, projectPollMs)
-      })()
-    }
-
-    return () => {
-      cancelled = true
-      if (intervalId) clearInterval(intervalId)
-      conns.current.forEach((c) => c.stop())
-      conns.current.clear()
-      backendConns.forEach((c) => c.stop())
-      backendConns.clear()
-    }
-  }, [])
 
   const isMember = (worktree: any, id: any) => hasSession(rosterState, worktree, id)
 
@@ -1253,6 +872,43 @@ export function App({
     attached,
   })
 
+  // Discovery, streaming and the project poll live in use-discovery.ts — see the header there.
+  // The refs declared above (`reconcileRef`, `streamProjectRef`, `activateBackendRef`) are the
+  // seam: the hook publishes its entry points through them, and the dispatch/peek paths call
+  // through the refs exactly as they always did. Called after usePeek because the poll flushes
+  // peek's saved-reply queue each tick.
+  useDiscovery({
+    serverReady,
+    client,
+    store,
+    seen,
+    server,
+    connectEventsImpl,
+    ensureServerImpl,
+    onAction,
+    exit,
+    projectPollMs,
+    initialBackend,
+    backendRegistry,
+    fetchPullRequestsImpl,
+    branchOfImpl,
+    persistRoster,
+    rosterRef,
+    setRosterState,
+    seededProjectKeys,
+    knownWorktrees,
+    projectsListed,
+    reconcileRef,
+    streamProjectRef,
+    activateBackendRef,
+    flushSavedReplies,
+    setOfflineProjects,
+    setServerDown,
+    setProjects,
+    setPullRequests,
+    onSessionDeleted: (directory: any, id: any) => updateRoster((prev: any) => withoutMember(prev, directory, id)),
+  })
+
   // Extracted from the deleted two-stage Launcher. The prompt is the whole interaction now:
   // "Type a prompt in the input at the bottom of agent view and press Enter to start a new
   // background session."
@@ -1275,205 +931,37 @@ export function App({
     )
   }
 
-  // Same session identity (or both empty). Guards the post-dispatch auto-select: only fires when
-  // the selection is still what it was when the dispatch left, so an arrow-key move made while the
-  // network call was in flight is not clobbered.
-  const sameSelection = (a: { projectKey: string; id: string } | null, b: { projectKey: string; id: string } | null) =>
-    a?.id === b?.id && a?.projectKey === b?.projectKey
-
-  // The post-dispatch tail both dispatch paths share (H2): the immediate relist that makes the new
-  // row reflect the backend's own record now rather than on the next poll, and the offline-list
-  // cleanup a successful dispatch has just proven right.
-  const noteDispatchedProject = (worktree: string, list: any[]) => {
-    seededProjectKeys.current.add(worktree)
-    store.setSessions(worktree, list, seen)
-    setOfflineProjects((s) => {
-      const next = new Set(s)
-      next.delete(worktree)
-      return next
-    })
-  }
-
-  // A dispatch onto a process-backed CLI. Deliberately a separate path rather than a generalisation
-  // of the opencode one below: that path carries worktree isolation, shell jobs, a provisional title
-  // written between createSession and promptAsync, and a listSessions refresh — all of it opencode's
-  // own machinery, and all of it covered by a test corpus that must keep passing unchanged. What is
-  // shared is what is genuinely shared (target resolution, roster membership, the notice).
-  const dispatchOnBackend = async (name: string, rawText: string, { thenAttach = false, agent, repo, shell = false }: any = {}) => {
-    const backend = backendRegistry[name]
-    if (!backend) return flash(`no ${name} backend`)
-    // `!` is opencode's shell-job route (POST /session/:id/shell); a process-backed CLI has no
-    // equivalent, and quietly sending the command as a prompt would run something else entirely.
-    if (shell) return flash(`! shell jobs run on opencode — ${name} has no shell surface`, 4000)
-    const text = expandPastes(rawText)
-    const target = dispatchTarget(repo)
-    if (!target) return flash('no projects discovered yet')
-    if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
-    const typed = input
-    let dispatched = false
-    setInput('')
-    // Snapshot what was selected when the dispatch left: the auto-select below must not clobber an
-    // arrow-key move the user made while the network call was in flight.
-    const selAtDispatch = selectedSessionRef.current
-    try {
-      // Streaming starts before the dispatch, not after: the run can finish inside the poll interval
-      // and a subscription attached afterwards would miss the whole of it.
-      await activateBackendRef.current?.(name)
-      const ref = await backend.dispatch({
-        prompt: text,
-        directory: target,
-        agent: agent ?? initialAgent ?? undefined,
-        // `--model` on these CLIs takes their own model name (`sonnet`, `gpt-5`), not opencode's
-        // provider/model pair, so only the model half travels. A provider that means nothing to the
-        // target CLI would be rejected argv rather than a useful default.
-        model: dispatchModel?.id ?? undefined,
-      })
-      // Past this point the session exists and is running: anything that fails from here is a
-      // refresh problem, not a dispatch problem — same rule as the opencode path below.
-      dispatched = true
-      if (name !== DEFAULT_BACKEND) store.noteOrigin(target, ref.id, name)
-      store.setProvisionalTitle(target, ref.id, text)
-      // `backend` rides the membership so a restart knows which CLI this row belongs to before any
-      // event has arrived — the same soft-migration shape as every other member field (absent means
-      // opencode).
-      updateRoster((prev: any) => withMember(prev, target, ref.id, { prompt: text.slice(0, 2000), backend: name }))
-      // Relist parity with the opencode path (H2): the same per-row origin-tagging the periodic
-      // listing does (streamBackend), then the shared tail. A CLI that hasn't written its record
-      // yet just lists without the new row, and the next poll catches up.
-      const list = backend.normaliseSessions(await backend.listSessions(target))
-      for (const s of list) store.noteOrigin(target, s.id, name)
-      noteDispatchedProject(target, list)
-      if (thenAttach) attach({ id: ref.id, projectKey: target, backend: name })
-      // No worktree isolation: creating one is opencode's `/experimental/worktree`, and there is no
-      // equivalent to ask claude or copilot for. Said out loud in the notice rather than left for the
-      // user to discover from a dirty checkout.
-      else {
-        // Land the selection on the row this dispatch just created, so Enter attaches to it.
-        // By identity (see the opencode path below) — the row may render a poll later. Skipped when
-        // the selection moved during the await: the user's own navigation wins.
-        if (sameSelection(selectedSessionRef.current, selAtDispatch)) {
-          selectedSessionRef.current = { projectKey: target, id: ref.id }
-          setSelectedKey(null)
-        }
-        flash(`dispatched into ${basename(target) || target} on ${name} — it edits the checkout`, 5000)
-      }
-    } catch {
-      if (dispatched) return flash('session started, but the project list is stale')
-      setInput((current) => (current === '' ? typed : current))
-      flash(`${name} dispatch failed`)
-    }
-  }
-
-  const dispatch = async (rawText: string, { thenAttach = false, agent, repo, shell = false, backend }: { thenAttach?: boolean; agent?: string; repo?: string; shell?: boolean; backend?: string } = {}) => {
-    // Everything below this line is the opencode path, untouched. A dispatch is only diverted when
-    // something actually named another backend — `@claude`, or a launch default — so the opencode
-    // behaviour this whole phase must not change is reached by exactly the code that reached it
-    // before.
-    const backendName = backend ?? initialBackend
-    if (backendName !== DEFAULT_BACKEND) return dispatchOnBackend(backendName, rawText, { thenAttach, agent, repo, shell })
-    const text = expandPastes(rawText)
-    // A `@agent` prefix on this dispatch wins; otherwise fall back to the launch --agent default.
-    // Coalesce to undefined (not null) when neither is set — createSession omits the field entirely.
-    const effectiveAgent = agent ?? initialAgent ?? undefined
-    const target = dispatchTarget(repo)
-    if (!target) return flash('no opencode projects discovered yet')
-    // A target can outlive the directory (#22): a project record survives the listing that dropped
-    // it, so a deleted session's worktree is still nameable, and dispatching into one is accepted
-    // silently — the server creates a session against a path that is gone. Refuse before anything is
-    // created, and before `setInput('')`, so the prompt is still in the input to retarget.
-    if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
-    const typed = input // put it back if the dispatch fails; retyping a lost prompt is miserable
-    let dispatched = false
-    setInput('')
-    // Snapshot for the auto-select below — an arrow-key move made while this dispatch is in
-    // flight must win over it.
-    const selAtDispatch = selectedSessionRef.current
-    // Where the session will actually run. Isolation happens before the session exists, so there is
-    // no window in which it could edit the shared working copy: agent view moves a background
-    // session into its own worktree "before editing files", and this is fleetview's version of that.
-    let worktree = target
-    let isolated = false
-    try {
-      // isolate=false (FLEETVIEW_NO_ISOLATE) skips the worktree entirely — the session edits the
-      // checkout directly, agent view's `bgIsolation: "none"`. Isolation stays the default.
-      if (isolate && shouldIsolate(target, projects, parents)) {
-        try {
-          // GET /experimental/worktree returns objects ({name, directory}), and worktreeName takes
-          // directory strings — passing the objects threw a TypeError into the silent catch below,
-          // so every dispatch after the repo's first worktree ran unisolated. `?? w.name` because a
-          // row without a directory still names a taken slot.
-          const existing = ((await client.listWorktrees(target)) ?? []).map((w: any) =>
-            typeof w === 'string' ? w : w?.directory ?? w?.name ?? '',
-          )
-          const created = await client.createWorktree(worktreeName(text, existing), target)
-          if (created?.directory) {
-            worktree = created.directory
-            isolated = true
-            // Stream it immediately rather than waiting for the poll to notice a new project —
-            // this is the row the user is about to watch start.
-            await streamProjectRef.current?.(worktree)
-          }
-        } catch {
-          // Isolation is a safety measure, not a precondition. A server too old for
-          // /experimental/worktree, or one that refuses, must not cost the user their dispatch —
-          // it runs in the repository itself, exactly as it did before isolation existed. Said in
-          // the dispatch confirmation rather than as its own notice, which the confirmation would
-          // overwrite a few milliseconds later — a warning nobody can read is not a warning.
-        }
-      }
-      const session = await client.createSession({ agent: effectiveAgent, model: dispatchModel }, worktree)
-      // opencode names the session itself once the first turn lands; until then the row would read
-      // "New session - <timestamp>", so show what was asked for.
-      store.setProvisionalTitle(worktree, session.id, shell ? `! ${text}` : text)
-      // membership added immediately after createSession succeeds, before promptAsync —
-      // dispatch counts as "backgrounded" even if the prompt itself later fails.
-      // The prompt rides the membership (capped — a pasted wall of text is not a lookup key) so
-      // a pasted URL can find this session later, agent view's any-URL filter.
-      updateRoster((prev: any) =>
-        withMember(prev, worktree, session.id, { ...(shell ? { shell: true } : {}), prompt: text.slice(0, 2000) }),
-      )
-      // Same launch --agent fallback as the prompt branch's effectiveAgent — a `fleetview --agent
-      // foo` run must not silently send `!` jobs as 'build' (the CLI's runBg --exec honors it).
-      if (shell) await client.runShell(session.id, text, worktree, agent ?? initialAgent ?? 'build')
-      else await client.promptAsync(session.id, text, worktree)
-      // Past this point the session exists and is running. Anything that fails from here is a
-      // refresh problem, not a dispatch problem — handing the prompt back would invite the user
-      // to dispatch a second identical session.
-      dispatched = true
-      noteDispatchedProject(worktree, await client.listSessions(worktree))
-      // Say where it went. An `@name` that matches no repository stays in the prompt and the
-      // dispatch falls back to another project, which is otherwise invisible until you notice the
-      // row is in the wrong place.
-      // Select the row this dispatch just created — the next Enter attaches to it instead of
-      // whatever happened to be under the cursor. By identity, not pendingSelect: the row may not
-      // render for another poll, and pendingSelect drops a request it can't resolve. The identity
-      // re-resolution keeps looking every render until the row appears. Skipped when the selection
-      // moved during the awaits above: the user's own navigation wins.
-      if (!thenAttach && sameSelection(selectedSessionRef.current, selAtDispatch)) {
-        selectedSessionRef.current = { projectKey: worktree, id: session.id }
-        setSelectedKey(null)
-      }
-      if (thenAttach) attach({ id: session.id, projectKey: worktree })
-      // Names the repository: the worktree path is a hashed cache directory that means nothing to
-      // the user, and the repository is what they actually chose. When isolation was expected and
-      // did not happen, the row is editing the shared checkout — worth knowing before a second
-      // dispatch lands in the same place.
-      else if (!isolated && shouldIsolate(target, projects, parents)) {
-        // A worktree was wanted but the row edits the checkout — either isolation is off
-        // (FLEETVIEW_NO_ISOLATE, a deliberate choice) or the server couldn't make one (a warning).
-        const why = isolate ? 'not isolated, it edits the checkout' : 'isolation off, it edits the checkout'
-        flash(`dispatched into ${basename(target) || target} — ${why}`, 5000)
-      } else flash(`dispatched into ${basename(target) || target}`)
-    } catch {
-      setOfflineProjects((s) => new Set(s).add(worktree))
-      if (dispatched) return flash('session started, but the project list is stale')
-      // Only restore into an input the user hasn't started refilling: a dispatch can be in flight
-      // for up to the client's 10s timeout, and overwriting a half-typed prompt with the failed
-      // one is worse than losing it.
-      setInput((current) => (current === '' ? typed : current))
-      flash('dispatch failed — project marked offline')
-    }
-  }
+  // The dispatch pair and its shared tail live in use-dispatch.ts — see the header there. The
+  // hook runs per render, so `dispatch` closes over this render's input/model/projects exactly as
+  // the inline functions did.
+  const { dispatch } = useDispatch({
+    client,
+    store,
+    seen,
+    backendRegistry,
+    initialAgent,
+    initialBackend,
+    dispatchModel,
+    isolate,
+    projects,
+    parents,
+    input,
+    setInput,
+    flash,
+    attach,
+    expandPastes,
+    dispatchTarget,
+    addMember: (worktree: any, id: any, extra?: any) => updateRoster((prev: any) => withMember(prev, worktree, id, extra)),
+    seededProjectKeys,
+    setOfflineProjects,
+    streamProjectRef,
+    activateBackendRef,
+    dirExistsImpl,
+    // Post-dispatch auto-select: the hook lands the selection on the row it just created (so
+    // Enter attaches to it), by identity because the row may render a poll later.
+    selectedSessionRef,
+    setSelectedKey,
+  })
 
   // Routes whatever is in the input. Everything except `dispatch` and `shell` either changes the
   // view or does nothing, so this is where agent view's overloaded input stops being overloaded.
