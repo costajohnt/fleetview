@@ -14,6 +14,45 @@
 
 export const DETACH = '\x1a' // Ctrl+Z
 
+// A chunk of stdin. A real tty delivers Buffers and the tests inject them too, but nothing here does
+// more than decode one, so the contract is the decode rather than the concrete class — which is also
+// what lets a plain string stand in without a branch.
+export type StdinChunk = { toString(encoding?: string): string }
+
+// What a chord means. Closed on purpose: `guarded` and the attach loop both switch on `type`, and a
+// third kind would have to be handled in both places rather than slipping through as a string tag.
+export type Chord = { type: 'detach' } | { type: 'switch'; index: number }
+
+// Why an attachment ended — the chords above, or the child leaving on its own. `message` is set only
+// by the caller's own catch (a spawn that never started), which is why it lives on the exit member.
+export type AttachEnd = Chord | { type: 'exit'; exitCode: number; drewNothing: boolean; ms: number; message?: string }
+
+// Whatever the injected timer factory handed back. The default is Node's Timeout and the tests hand
+// back plain numbers; nothing here does anything with one but pass it straight to clearTimer.
+export type TimerHandle = ReturnType<typeof setTimeout> | number
+
+// The tty surface this module actually touches, on each side. Structural rather than
+// NodeJS.ReadStream/WriteStream so the real streams and the tests' EventEmitter stand-ins both
+// satisfy it without either being cast into the other's shape.
+export type PtyStdin = {
+  isTTY?: boolean
+  setRawMode?: (raw: boolean) => unknown
+  resume?: () => unknown
+  on(event: 'data', listener: (chunk: StdinChunk) => void): unknown
+  off?(event: 'data', listener: (chunk: StdinChunk) => void): unknown
+}
+export type PtyStdout = {
+  columns?: number
+  rows?: number
+  write(data: string): unknown
+  on?(event: 'resize', listener: () => void): unknown
+  off?(event: 'resize', listener: () => void): unknown
+}
+
+// node-pty ships its own typings, so the injected spawn is the real thing rather than a stand-in —
+// which is also what pins the child members below (write/resize/kill/onData/onExit).
+export type PtySpawn = typeof import('node-pty').spawn
+
 // Restoring the terminal is not optional. Raw mode is a global property of the tty, so a fleetview
 // killed mid-attach — SIGTERM, a dropped SSH session, a closed terminal — leaves the user's shell
 // with no echo and no line editing until they blindly type `stty sane`. Nothing in the process
@@ -56,7 +95,10 @@ const ALT_DIGIT = /^\x1b([1-9])$/
 const BACK_ARROWS = ['\x1b[D', '\x1bOD']
 
 // Reads a chord out of a chunk of stdin. Returns null when the bytes are just input for the child.
-export function chordFor(chunk: any, { backArrow = (process.env.FLEETVIEW_BACK_ARROW ?? process.env.ROOST_BACK_ARROW) === '1' } = {}) { // TODO(types): chunk is a Buffer or string from stdin; typed loose since callers vary
+export function chordFor(
+  chunk: StdinChunk,
+  { backArrow = (process.env.FLEETVIEW_BACK_ARROW ?? process.env.ROOST_BACK_ARROW) === '1' } = {},
+): Chord | null {
   const text = chunk.toString('utf8')
   if (text === DETACH) return { type: 'detach' }
   if (backArrow && BACK_ARROWS.includes(text)) return { type: 'detach' }
@@ -92,15 +134,15 @@ export function makeChordReader({
   altSwitch = (process.env.FLEETVIEW_NO_ALT_SWITCH ?? process.env.ROOST_NO_ALT_SWITCH) !== '1',
   backArrow = (process.env.FLEETVIEW_BACK_ARROW ?? process.env.ROOST_BACK_ARROW) === '1',
 }: {
-  onChord: (chord: any) => void
+  onChord: (chord: Chord) => void
   onBytes: (text: string) => void
   windowMs?: number
-  setTimer?: (fn: () => void, ms: number) => any
-  clearTimer?: (handle: any) => void
+  setTimer?: (fn: () => void, ms: number) => TimerHandle
+  clearTimer?: (handle: TimerHandle) => void
   altSwitch?: boolean
   backArrow?: boolean
-}) { // TODO(types): chord shape ({type,index?}) is internal and matched by string tag; loose to avoid a union that adds no safety
-  let pendingEsc: any = null // timer handle while a lone ESC is held
+}) {
+  let pendingEsc: TimerHandle | null = null // timer handle while a lone ESC is held
 
   const flushEsc = () => {
     if (!pendingEsc) return
@@ -110,7 +152,7 @@ export function makeChordReader({
   }
 
   return {
-    feed(chunk: any) {
+    feed(chunk: StdinChunk) {
       const text = chunk.toString('utf8')
       if (pendingEsc) {
         clearTimer(pendingEsc)
@@ -191,17 +233,21 @@ export function attachPty({
   cwd?: string
   now?: () => number
   env?: NodeJS.ProcessEnv
-  stdin?: any
-  stdout?: any
-  spawn: any // TODO(types): node-pty spawn; @types/node-pty not installed, injected as any
+  // Only the handful of tty members this reaches for. Narrower than NodeJS.ReadStream/WriteStream on
+  // purpose: process.stdin/stdout satisfy it, and so does the EventEmitter stand-in the tests build,
+  // without either side pretending to be a whole stream.
+  stdin?: PtyStdin
+  stdout?: PtyStdout
+  // node-pty's own `spawn` — it ships typings, so this is the real signature rather than a stand-in.
+  spawn: PtySpawn
   onSuspend?: () => void
   onResume?: () => void
   busyDetachGuard?: boolean
   resumeDrainMs?: number
-  setTimer?: (fn: () => void, ms: number) => any
-  defer?: (fn: () => void) => any
-}) {
-  return new Promise((resolve) => {
+  setTimer?: (fn: () => void, ms: number) => unknown
+  defer?: (fn: () => void) => unknown
+}): Promise<AttachEnd> {
+  return new Promise<AttachEnd>((resolve) => {
     onSuspend() // stop fleetview drawing before the child writes a single byte
     const child = spawn(command, args, {
       name: env.TERM || 'xterm-256color',
@@ -212,7 +258,7 @@ export function attachPty({
     })
 
     let settled = false
-    const finish = (reason: any) => {
+    const finish = (reason: AttachEnd) => {
       if (settled) return
       settled = true
       cleanup()
@@ -222,7 +268,7 @@ export function attachPty({
 
     let drew = false
     let lastOutputAt: number | null = null // timestamp of the child's most recent output — "busy" evidence for the detach guard
-    const onData = (data: any) => {
+    const onData = (data: string) => {
       drew = true
       lastOutputAt = now()
       stdout.write(data)
@@ -238,7 +284,7 @@ export function attachPty({
     const BUSY_WINDOW_MS = 2000
     const ARM_WINDOW_MS = 3000
     let guardArmedAt: number | null = null
-    const guarded = (chord: any) => {
+    const guarded = (chord: Chord) => {
       if (busyDetachGuard) {
         const t = now()
         if (guardArmedAt !== null && t - guardArmedAt <= ARM_WINDOW_MS) return finish(chord)
@@ -253,7 +299,7 @@ export function attachPty({
       finish(chord)
     }
     const reader = makeChordReader({
-      onChord: (chord: any) => guarded(chord),
+      onChord: (chord) => guarded(chord),
       // cleanup() flushes any held Escape, and cleanup also runs on the exit path — where writing
       // to an already-dead pty would throw straight out of the onExit handler.
       onBytes: (text: string) => {
@@ -264,7 +310,7 @@ export function attachPty({
         }
       },
     })
-    const onInput = (chunk: any) => reader.feed(chunk)
+    const onInput = (chunk: StdinChunk) => reader.feed(chunk)
     const onResize = () => {
       try {
         child.resize(stdout.columns || 80, stdout.rows || 24)
@@ -292,7 +338,7 @@ export function attachPty({
     // The exit code matters: `opencode attach` exits 1 immediately and silently when its --dir no
     // longer exists, which happens the moment a git worktree behind a session is removed.
     const startedAt = now()
-    const disposeExit = child.onExit((e: any) =>
+    const disposeExit = child.onExit((e) =>
       finish({ type: 'exit', exitCode: e?.exitCode ?? 0, drewNothing: !drew, ms: now() - startedAt }),
     )
     // Ink releases stdin asynchronously once its input hooks go inactive, and that teardown lands

@@ -10,7 +10,9 @@
 process.env.FORCE_COLOR = '3'
 
 // Type-only, so it is erased and cannot import anything before the env above is set.
-import type { BackendEventHandlers, EventSubscription, OpencodeMessage } from '../src/types.ts'
+import type { EventSubscription, OpencodeEvent, OpencodeMessage } from '../src/types.ts'
+import type { ModelSelection } from '../src/backends/opencode/client.ts'
+import type { ConnectOptions } from '../src/backends/opencode/event-mux.ts'
 
 const React = (await import('react')).default
 const { render } = await import('ink')
@@ -49,7 +51,7 @@ const client = {
   // real: the app asks for a worktree, gets a directory back, and streams it as a new project.
   listWorktrees: async () => [],
   createWorktree: async (name: string, target: string) => ({ name, directory: `${target}/.worktrees/${name}` }),
-  createSession: async (_opts: { agent?: string; model?: unknown }, dir: string) => {
+  createSession: async (_opts: { agent?: string; model?: ModelSelection }, dir: string) => {
     const id = `s${rows.size + 1}`
     rows.set(id, { id, dir, title: 'New session', updated: Date.now(), messages: [] })
     return { id }
@@ -87,6 +89,10 @@ const client = {
   listQuestions: async () => [],
   abortSession: async () => ({}),
   respondPermission: async () => ({}),
+  // Never reached on camera — /fork and `!` shell jobs are not part of the script — but the roster's
+  // client contract names them, so the fixture answers for them rather than being a partial client.
+  forkSession: async (id: string) => ({ id }),
+  runShell: async () => ({}),
 }
 
 const at = (ms: number, fn: () => void) => setTimeout(fn, ms)
@@ -169,8 +175,8 @@ render(
   React.createElement(App, {
     server: { host: '127.0.0.1', port: 4096 },
     client,
-    connectEventsImpl: (target: { directory: string }, handlers: BackendEventHandlers): EventSubscription => {
-      sinks.set(target.directory, (event) => handlers.onEvent(target.directory, event))
+    connectEventsImpl: (target: { directory: string }, handlers: ConnectOptions): EventSubscription => {
+      sinks.set(target.directory, (event) => handlers.onEvent(target.directory, event as OpencodeEvent))
       return { done: new Promise(() => {}), stop: () => {} }
     },
     ensureServerImpl: async () => ({ ok: true, server: { host: '127.0.0.1', port: 4096 } }),
@@ -184,7 +190,7 @@ render(
     cwd: REPO,
     // The PR and branch lookups must not shell out to gh and git — the recording runs in a sandbox
     // with no repository and no network.
-    fetchPullRequestsImpl: async () => [],
+    fetchPullRequestsImpl: async () => ({ prs: [], reason: null }),
     branchOfImpl: () => 'main',
     // The fixture repo never exists on disk, and dispatch refuses a target directory that is gone
     // (#22) — the same injection test/app.test.ts uses.

@@ -3,7 +3,7 @@
 // and nothing more. Anything opencode can do that the contract doesn't name is still reached through
 // OpencodeClient directly.
 import type { Backend, OpencodeEvent, ServerRef } from '../../types.ts'
-import { OpencodeClient } from './client.ts'
+import type { RosterClient } from './client.ts'
 import { connectEvents } from './event-mux.ts'
 import { assertSessionId } from '../session-id.ts'
 
@@ -29,7 +29,7 @@ export function createOpencodeBackend({
   fetchImpl = globalThis.fetch,
 }: {
   server: ServerRef
-  client: OpencodeClient
+  client: RosterClient
   fetchImpl?: typeof fetch
 }): Backend {
   return {

@@ -1,4 +1,19 @@
-import type { Session, OpencodeMessage, Project, PermissionAsked, QuestionAsked, OpencodeSessionStatus, Worktree } from '../../types.ts'
+import type { Session, ListedSession, OpencodeMessage, Project, PermissionAsked, QuestionAsked, OpencodeSessionStatus, Worktree } from '../../types.ts'
+
+// The three catalogue endpoints, named for the one field each caller reads off them (an agent's or
+// command's name, a provider's id and its model map). Same convention as types.ts: only what
+// fleetview reads, permissive about the rest, because opencode may add fields between versions.
+// `#req` returns null for a 2xx with an empty body, which is why each of these is nullable.
+export type AgentInfo = { name: string; [key: string]: unknown }
+export type CommandInfo = { name: string; [key: string]: unknown }
+export type ProviderInfo = { id: string; models?: Record<string, unknown>; [key: string]: unknown }
+export type ProvidersResponse = { providers?: ProviderInfo[]; [key: string]: unknown }
+
+// What POST /session accepts as a model. Both forms are real: the roster's `/model` sets the
+// provider/model pair the header renders (cli-args' parseModel mints it), while the Backend
+// contract's `dispatch` carries the CLI-shaped single string. `null` is "the server's default",
+// which is what an unset dispatch model is.
+export type ModelSelection = string | { providerID: string; id: string } | null
 
 // opencode's server takes HTTP basic auth when OPENCODE_SERVER_PASSWORD is set — the same
 // variable `opencode attach -p` defaults to, so a spawned server, fleetview's own requests and the
@@ -13,6 +28,41 @@ export function authHeader(env: NodeJS.ProcessEnv = process.env): string | undef
   if (!password) return undefined
   const user = env.OPENCODE_SERVER_USERNAME || 'opencode'
   return `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`
+}
+
+// What the roster and its hooks actually call on a client, and the type App takes rather than the
+// class itself: a class with a private field can only ever be satisfied by an instance of it, which
+// would leave the fixture clients (scripts/demo.ts, the test corpus) with nowhere to stand.
+//
+// Three details are deliberate. Method syntax throughout, because TypeScript checks method
+// parameters bivariantly — that is what lets a fixture declare `answers: string[][]` where the real
+// client says `unknown`. Return types are the weakest thing every caller can live with (a listing is
+// `ListedSession[]`, since that is what session-store consumes; a create is just the id the roster
+// reads off it), so a fixture need not reproduce a whole wire payload. And the last four are
+// optional because they are opencode's own extras — the call sites already reach for them with `?.`
+// or inside a try, and a client without them degrades rather than breaks.
+export type RosterClient = {
+  listProjects(): Promise<Project[]>
+  listSessions(directory?: string): Promise<ListedSession[]>
+  sessionStatus(directory?: string): Promise<Record<string, OpencodeSessionStatus> | null>
+  listPermissions(directory?: string): Promise<PermissionAsked[]>
+  listQuestions(directory?: string): Promise<QuestionAsked[]>
+  listMessages(id: string, directory?: string): Promise<OpencodeMessage[]>
+  createSession(options?: { agent?: string; model?: ModelSelection }, directory?: string): Promise<{ id: string }>
+  forkSession(id: string, directory?: string): Promise<{ id: string }>
+  promptAsync(id: string, text: string, directory?: string): Promise<unknown>
+  runShell(id: string, command: string, directory?: string, agent?: string): Promise<unknown>
+  renameSession(id: string, title: string, directory?: string): Promise<unknown>
+  deleteSession(id: string, directory?: string): Promise<unknown>
+  abortSession(id: string, directory?: string): Promise<unknown>
+  respondPermission(requestID: string, reply: unknown, directory?: string): Promise<unknown>
+  respondQuestion(requestID: string, answers: unknown, directory?: string): Promise<unknown>
+  listWorktrees(directory?: string): Promise<Worktree[] | null>
+  createWorktree(name: string, directory?: string): Promise<{ name?: string; directory?: string } | null>
+  removeWorktree?(worktreeDirectory: string, directory?: string): Promise<unknown>
+  listAgents?(): Promise<AgentInfo[] | null>
+  listCommands?(): Promise<CommandInfo[] | null>
+  providers?(): Promise<ProvidersResponse | null>
 }
 
 export class OpencodeClient {
@@ -50,7 +100,7 @@ export class OpencodeClient {
   // word ok", while an identical session created with an explicit title kept it for 48s+.
   // Sending the raw prompt as the title, which fleetview used to do, is what suppressed the good name.
   // `agent` and `model` are accepted by POST /session and set what the session runs as.
-  createSession({ agent, model }: { agent?: string; model?: string } = {}, directory?: string) {
+  createSession({ agent, model }: { agent?: string; model?: ModelSelection } = {}, directory?: string) {
     return this.#req<Session>('POST', '/session', { ...(agent ? { agent } : {}), ...(model ? { model } : {}) }, directory)
   }
   // POST /session/:id/fork copies the conversation into a new session — agent view's /fork.
@@ -93,7 +143,7 @@ export class OpencodeClient {
     return this.#req('DELETE', '/experimental/worktree', { directory: worktreeDirectory }, directory)
   }
   sessionStatus(directory?: string) { return this.#req<Record<string, OpencodeSessionStatus>>('GET', '/session/status', undefined, directory) }
-  listAgents() { return this.#req('GET', '/agent') }
-  listCommands() { return this.#req('GET', '/command') }
-  providers() { return this.#req('GET', '/config/providers') }
+  listAgents() { return this.#req<AgentInfo[] | null>('GET', '/agent') }
+  listCommands() { return this.#req<CommandInfo[] | null>('GET', '/command') }
+  providers() { return this.#req<ProvidersResponse | null>('GET', '/config/providers') }
 }

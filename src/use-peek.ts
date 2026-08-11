@@ -5,6 +5,10 @@ import { parseMouseEvents } from './ui/mouse.ts'
 import { questionOptions, suggestedReply } from './ui/peek.ts'
 import { OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
+import type { AttachTarget, Backend, BackendCapabilities, OpencodeMessage, SeedChain } from './types.ts'
+import type { SessionStore } from './session-store.ts'
+import type { RosterClient } from './backends/opencode/client.ts'
+import type { RosterLine, RosterSession } from './ui/view-types.ts'
 
 // Peek's controller: the state, the message fetch, the reply/answer paths and the panel's own key
 // handling, lifted out of App so the roster closure stops carrying them. Everything App owns and
@@ -13,9 +17,6 @@ import { DEFAULT_BACKEND } from './backends/index.ts'
 // `navRows`/`selectedKey`/`setSelectedKey` are what ↑/↓ walk (selection-follow), `attach` is what
 // ⏎/→ do, `reconcileRef` is the shared per-worktree seed chain the failure paths reconcile through,
 // and `rerender` is how the savedReplies ref (deliberately not state) reaches the screen.
-// TODO(types): all inputs are App-owned dynamic collaborators (client, session store, nav rows,
-// reconcile chain); typed loose because their real shapes live in other modules and closing them
-// here would only duplicate/desync those definitions.
 export function usePeek({
   client,
   store,
@@ -29,49 +30,50 @@ export function usePeek({
   reconcileRef,
   serverReady,
   attached,
-  // Per-row backend wiring from App. `backendFor` returns null for opencode, which every path below
-  // reads as "do exactly what you did before"; `capabilitiesOf` is the only thing allowed to decide
-  // whether an answer key does anything.
-  backendFor = () => null,
+  // Per-row backend wiring from App. `backendFor` resolves a row's adapter — opencode's included
+  // (H2), so the paths below branch on the adapter's own name rather than on whether one exists;
+  // `capabilitiesOf` is the only thing allowed to decide whether an answer key does anything, and
+  // falls back to opencode's flags for a row whose backend cannot be resolved.
+  backendFor,
   capabilitiesOf = () => OPENCODE_CAPABILITIES,
 }: {
-  client: any
-  store: any
-  navRows: any[]
-  selectedKey: any
-  setSelectedKey: (key: any) => void
-  attach: (target: any) => void
+  client: RosterClient
+  store: SessionStore
+  navRows: RosterLine[]
+  selectedKey: string | null
+  setSelectedKey: (key: string | null) => void
+  attach: (target: AttachTarget) => void
   mode: string
   setMode: (mode: string) => void
   rerender: () => void
-  reconcileRef: { current?: ((projectKey: any) => Promise<any>) | null }
+  reconcileRef: { current?: SeedChain | null }
   serverReady: boolean
   attached: boolean
-  backendFor?: (row: any) => any
-  capabilitiesOf?: (row: any) => { questions: boolean; messages: boolean }
+  backendFor: (row: RosterSession) => Backend
+  capabilitiesOf?: (row: RosterSession) => BackendCapabilities
 }) {
   // "Undeliverable replies are saved and sent when the session's process starts again." Keyed by
   // `${projectKey}:${id}` so a saved reply follows its session and nothing else. Replies prefixed
   // with `!` are deliberately not saved — agent view doesn't either, because a shell command that
   // arrives much later is a different instruction than the one that was meant.
-  const savedReplies = useRef(new Map())
+  const savedReplies = useRef(new Map<string, string>())
   // M15: per-key send epoch. sendReply's success path deletes the saved key, which makes "user
   // sent a newer reply directly" indistinguishable from "nothing happened" — a failed flush's
   // catch would then re-queue the stale body and a later poll would deliver it AFTER the newer
   // reply (the "late reply is a different instruction" failure the comments above warn about).
   // Every successful send bumps the key's epoch; a flush only re-queues if the epoch it captured
   // is still current.
-  const replyEpochs = useRef(new Map())
+  const replyEpochs = useRef(new Map<string, number>())
   // peekTarget: same shape as target, captured when peek opens — unlike other dialog targets it
   // DOES follow explicit ↑/↓ while peek is open (selection-follow), but never passive store churn.
-  const [peekTarget, setPeekTarget] = useState<any>(null) // TODO(types): a session row from the store; dynamic wire shape
+  const [peekTarget, setPeekTarget] = useState<RosterSession | null>(null)
   // null = loading, 'error' = failed, 'unsupported' = this backend has no message API, array = loaded
-  const [peekMessages, setPeekMessages] = useState<any[] | 'error' | 'unsupported' | null>(null)
+  const [peekMessages, setPeekMessages] = useState<OpencodeMessage[] | 'error' | 'unsupported' | null>(null)
   // M6: { id, message } | null — scoped to the session id it was raised for, so a reply that
   // fails after the user has already navigated to a different peek target can't paint its error
   // onto the wrong session (the failure race is real: navigation clears this to null immediately,
   // but the async .catch() can still resolve afterward with a stale closure over the old target).
-  const [peekError, setPeekError] = useState<{ id: any; message: string } | null>(null)
+  const [peekError, setPeekError] = useState<{ id: string; message: string } | null>(null)
   const [peekReply, setPeekReply] = useState('') // the peek panel's own input, separate from dispatch
 
   // Fetch on open/selection-change; the cleanup's `cancelled` flag is the latest-wins guard —
@@ -91,13 +93,13 @@ export function usePeek({
     }
     client
       .listMessages(peekTarget.id, peekTarget.projectKey)
-      .then((msgs: any) => { if (!cancelled) setPeekMessages(msgs) })
+      .then((msgs) => { if (!cancelled) setPeekMessages(msgs) })
       .catch(() => { if (!cancelled) setPeekMessages('error') })
     return () => { cancelled = true }
   }, [mode, peekTarget])
 
   // Space on a roster row opens the panel on it.
-  const openPeek = (row: any) => {
+  const openPeek = (row: RosterSession) => {
     setPeekTarget(row)
     setPeekError(null)
     setMode('peek')
@@ -112,7 +114,7 @@ export function usePeek({
 
   // Sends a follow-up to the peeked session. A `!` prefix runs the rest as a shell command
   // instead: "Prefix a reply with `!` to send a Bash command instead."
-  const sendReply = async (text: string, row: any) => {
+  const sendReply = async (text: string, row: RosterSession) => {
     setPeekReply('')
     setPeekError(null)
     const bang = text.startsWith('!')
@@ -181,7 +183,7 @@ export function usePeek({
 
   // Picks option N of the oldest pending question. The reply body is one answer array per
   // question, each holding the chosen labels, so a single choice is [[label]].
-  const answerQuestion = async (index: number, row: any) => {
+  const answerQuestion = async (index: number, row: RosterSession) => {
     // Capability gate: there is no channel to deliver the answer on, so clearing the banner locally
     // would be a lie the next poll would immediately contradict.
     if (!capabilitiesOf(row).questions) {
@@ -198,7 +200,7 @@ export function usePeek({
     } catch {
       setPeekError({ id: row.id, message: "couldn't answer question" })
       const reconcile = reconcileRef.current?.(row.projectKey) ?? Promise.resolve({ questions: false })
-      reconcile.then((outcome: any) => {
+      reconcile.then((outcome) => {
         if (!outcome.questions) store.apply(row.projectKey, { type: 'question.asked', properties: request })
       })
     }
@@ -248,8 +250,10 @@ export function usePeek({
         // roster arrows and mouse set. Using `flat`/`keyOf` here compared two key vocabularies
         // (group-form selectedKey vs worktree-form keyOf), so the lookup never matched in state
         // grouping and every peek arrow jumped relative to row 0 instead of the peeked row.
-        const sessRows = navRows.filter((r: any) => r.type === 'session')
-        const cur = sessRows.findIndex((r: any) => r.key === selectedKey)
+        // flatMap rather than filter: it narrows the union to the session lines, so the `.session`
+        // read below is the same one the roster draws and not a hope about what came back.
+        const sessRows = navRows.flatMap((r) => (r.type === 'session' ? [r] : []))
+        const cur = sessRows.findIndex((r) => r.key === selectedKey)
         const base = cur >= 0 ? cur : 0
         const i = key.upArrow ? Math.max(0, base - 1) : Math.min(sessRows.length - 1, base + 1)
         const nr = sessRows[i]
@@ -304,7 +308,7 @@ export function usePeek({
             // request the user can't see is worse than one shown twice.
             const reconcile =
               reconcileRef.current?.(peekTarget.projectKey) ?? Promise.resolve({ permissions: false })
-            reconcile.then((outcome: any) => {
+            reconcile.then((outcome) => {
               // Only the permission list matters here; an unrelated endpoint failing must not put
               // an answered permission back on screen.
               if (!outcome.permissions) {

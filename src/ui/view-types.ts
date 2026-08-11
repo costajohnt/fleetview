@@ -32,7 +32,9 @@ export type RosterSession = {
   ranForMs?: number | null
   waitingSince?: number
   pendingRequest?: boolean
-  [key: string]: unknown
+  // #34: a roster membership whose session is gone server-side, synthesized so it has a visible exit.
+  // Nothing is behind it, which is what keeps attach, peek and delete off the network.
+  ghost?: boolean
 }
 
 // A group of rows under one header — a project in browse/project grouping, a state in the default.
@@ -68,7 +70,6 @@ export type KeySet = { has(key: string): boolean }
 export type StatusCountable = {
   status: string
   pendingRequest?: boolean
-  [key: string]: unknown
 }
 
 // A pending permission as peek banners it. Looser than the wire's PermissionAsked: the banner has

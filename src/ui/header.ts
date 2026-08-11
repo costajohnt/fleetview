@@ -17,8 +17,12 @@ const VERSION = createRequire(import.meta.url)('../../package.json').version
 // the roster's three always-shown groups. `awaiting input` counts only sessions blocked on a
 // server-reported request (same rule as the tab title, or the two numbers on screen contradict
 // each other), and `completed` collects the same statuses as the roster's completed group.
-export function summarise(sessions: readonly StatusCountable[]) {
-  const n = (pred: (s: StatusCountable) => boolean) => sessions.filter(pred).length
+// Generic over the row rather than taking `StatusCountable[]` flat: callers pass whole roster rows,
+// and a plain parameter type would make an object literal carrying anything else (a row with `prs`,
+// which is exactly what one test asserts is ignored here) fail the excess-property check for a
+// field this function is defined by not reading.
+export function summarise<T extends StatusCountable>(sessions: readonly T[]) {
+  const n = (pred: (s: T) => boolean) => sessions.filter(pred).length
   const awaiting = n((s) => s.status === 'waiting' && Boolean(s.pendingRequest))
   const working = n((s) => s.status === 'running')
   const failed = n((s) => s.status === 'error')

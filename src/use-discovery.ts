@@ -3,11 +3,20 @@ import { hasSession } from './roster-store.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
 import { sandboxParents, allProjectDirectories } from './worktree.ts'
 import { byBranch } from './pull-requests.ts'
-import type { OpencodeEvent } from './types.ts'
+import { asNumber, asString, isRecord } from './types.ts'
+import type { AppAction, Backend, EventSubscription, OpencodeEvent, Project, PullRequest, SeedChain, SeedOptions, SeedOutcome, ServerRef, StreamProject } from './types.ts'
+import type { SeenMap } from './seen-store.ts'
+import type { SessionStore } from './session-store.ts'
+import type { RosterClient } from './backends/opencode/client.ts'
+import type { Roster } from './roster-store.ts'
+import type { connectEvents } from './backends/opencode/event-mux.ts'
 
 // repoll keeps stale (vanished) projects in place — only union in what's fresh, never drop.
-const sortProjects = (list: any[]) => [...list].sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
-const mergeProjects = (prev: any[], fresh: any[]) => {
+// `time` is a project row's own wire field, so the sort reads it the way every other payload is
+// read: narrowed, and treated as "no timestamp" when it isn't the number it is meant to be.
+const projectUpdatedAt = (p: Project) => (isRecord(p.time) ? asNumber(p.time.updated) ?? 0 : 0)
+const sortProjects = (list: Project[]) => [...list].sort((a, b) => projectUpdatedAt(b) - projectUpdatedAt(a))
+const mergeProjects = (prev: Project[], fresh: Project[]) => {
   const freshKeys = new Set(fresh.map((p) => p.worktree))
   return sortProjects([...fresh, ...prev.filter((p) => !freshKeys.has(p.worktree))])
 }
@@ -54,36 +63,36 @@ export function useDiscovery({
   onSessionDeleted,
 }: {
   serverReady: boolean
-  client: any
-  store: any
-  seen?: any
-  server: any
-  connectEventsImpl: any
-  ensureServerImpl?: any
-  onAction: (action: any) => any
+  client: RosterClient
+  store: SessionStore
+  seen?: SeenMap
+  server: ServerRef
+  connectEventsImpl: typeof connectEvents
+  ensureServerImpl?: (server: ServerRef) => Promise<{ ok: boolean; server: ServerRef; reason?: string }>
+  onAction: (action: AppAction) => unknown
   exit: () => void
   projectPollMs: number
   initialBackend: string
-  backendRegistry: Record<string, any>
-  fetchPullRequestsImpl: any
-  branchOfImpl: any
-  persistRoster?: ((roster: any) => void) & { reload?: () => any }
-  rosterRef: { current: any }
-  setRosterState: (roster: any) => void
+  backendRegistry: Record<string, Backend>
+  fetchPullRequestsImpl: (dir: string) => Promise<{ prs: PullRequest[]; reason: string | null }>
+  branchOfImpl: (dir: string) => string | null
+  persistRoster?: ((roster: Roster) => void) & { reload?: () => Roster | null }
+  rosterRef: { current: Roster }
+  setRosterState: (roster: Roster) => void
   seededProjectKeys: { current: Set<string> }
   knownWorktrees: { current: Set<string> }
   projectsListed: { current: boolean }
-  reconcileRef: { current: any }
-  streamProjectRef: { current: any }
+  reconcileRef: { current: SeedChain | null }
+  streamProjectRef: { current: StreamProject | null }
   activateBackendRef: { current: ((name: string) => Promise<void>) | null }
   flushSavedReplies: { current: () => void }
   setOfflineProjects: (updater: (s: Set<string>) => Set<string>) => void
   setServerDown: (down: boolean) => void
-  setProjects: (updater: (prev: any[]) => any[]) => void
-  setPullRequests: (prs: { byBranch: Map<string, any>; branches: Map<string, any>; reasons: Map<string, any> }) => void
-  onSessionDeleted: (directory: any, id: any) => void
+  setProjects: (updater: (prev: Project[]) => Project[]) => void
+  setPullRequests: (prs: { byBranch: Map<string, PullRequest[]>; branches: Map<string, string>; reasons: Map<string, string> }) => void
+  onSessionDeleted: (directory: string, id: string) => void
 }) {
-  const conns = useRef(new Map<string, any>()) // worktree -> stream handle, for unmount cleanup
+  const conns = useRef(new Map<string, EventSubscription>()) // worktree -> stream handle, for unmount cleanup
   useEffect(() => {
     let cancelled = false
     let polling = false
@@ -118,7 +127,7 @@ export function useDiscovery({
     // questions had no equivalent. The additive mode only ADDS what the store is missing and never
     // deletes, so the timer can run it without the omission risk, and the authoritative replace
     // stays exactly where it was: mount, reconnect, and the peek reconcile paths.
-    const seedLiveState = async (worktree: any, { pending = true, additive = false, closeRuns = false, relist = false }: any = {}) => {
+    const seedLiveState = async (worktree: string, { pending = true, additive = false, closeRuns = false, relist = false }: SeedOptions = {}): Promise<SeedOutcome> => {
       // Before anything else, because `setSessions` is the only thing that learns which sessions are
       // subagents, and every seed below can otherwise mint a row for one. A subagent spawned since
       // the last listing is unknown, so its first `session.status` creates a record; this is what
@@ -145,7 +154,7 @@ export function useDiscovery({
       const outcome = { permissions: true, questions: true }
       await client
         .sessionStatus(worktree)
-        .then((s: any) => store.seedStatuses(worktree, s, mark, { closeRuns }))
+        .then((s) => store.seedStatuses(worktree, s, mark, { closeRuns }))
         .catch(() => {})
       if (!pending) return outcome
       // M4: each GET fails independently. If sessionStatus above succeeds but one of these two
@@ -156,11 +165,11 @@ export function useDiscovery({
       await Promise.all([
         client
           .listPermissions(worktree)
-          .then((p: any) => store.seedPermissions(worktree, p, mark, { additive }))
+          .then((p) => store.seedPermissions(worktree, p, mark, { additive }))
           .catch(() => { outcome.permissions = false }),
         client
           .listQuestions(worktree)
-          .then((q: any) => store.seedQuestions(worktree, q, mark, { additive }))
+          .then((q) => store.seedQuestions(worktree, q, mark, { additive }))
           .catch(() => { outcome.questions = false }),
       ])
       return outcome
@@ -170,8 +179,8 @@ export function useDiscovery({
     // calls through this, so two seeds for the same worktree never overlap outside the watermark
     // protocol above. Also eliminates the startup double-fetch: mount's initial seed and the first
     // onOnline resync now run sequentially instead of both firing their GETs concurrently.
-    const seedChains = new Map<string, Promise<any>>()
-    const chainSeed = (w: any, options?: any) => {
+    const seedChains = new Map<string, Promise<SeedOutcome>>()
+    const chainSeed: SeedChain = (w, options) => {
       const failed = { permissions: false, questions: false }
       const next = (seedChains.get(w) ?? Promise.resolve()).then(() => seedLiveState(w, options)).catch(() => failed)
       seedChains.set(w, next)
@@ -182,9 +191,9 @@ export function useDiscovery({
     // reconnect's older snapshot could land after a newer one and re-insert a permission the
     // server had already accepted an answer for.
     reconcileRef.current = chainSeed
-    streamProjectRef.current = (w: any) => seedAndStream(w)
+    streamProjectRef.current = (w) => seedAndStream(w)
 
-    const seedAndStream = async (worktree: any) => {
+    const seedAndStream = async (worktree: string) => {
       // M14: idempotency lives here, not at callers — the dispatch path and a poll tick can both
       // reach this for the same worktree (the poll awaits gh calls before computing newOnes), and
       // a second run's `conns.current.set` would orphan the first connection's stop() so it
@@ -200,7 +209,7 @@ export function useDiscovery({
         const conn = connectEventsImpl(
           { ...server, directory: worktree },
           {
-            onEvent: (directory: any, e: OpencodeEvent) => {
+            onEvent: (directory, e: OpencodeEvent) => {
               store.apply(directory, e)
               // Explicit delete evidence only — never prune members merely absent from a listing;
               // offline projects must keep members (F1).
@@ -209,8 +218,8 @@ export function useDiscovery({
                 onSessionDeleted(directory, id)
               }
             },
-            onOffline: (directory: any) => setOfflineProjects((s) => new Set(s).add(directory)),
-            onOnline: (directory: any) => {
+            onOffline: (directory) => setOfflineProjects((s) => new Set(s).add(directory)),
+            onOnline: (directory) => {
               setOfflineProjects((s) => {
                 const next = new Set(s)
                 next.delete(directory)
@@ -220,7 +229,7 @@ export function useDiscovery({
               // fire-and-forget — a racing failure re-flags it offline via other paths.
               client
                 .listSessions(directory)
-                .then((list: any) => {
+                .then((list) => {
                   seededProjectKeys.current.add(directory)
                   store.setSessions(directory, list, seen)
                   chainSeed(directory)
@@ -250,15 +259,18 @@ export function useDiscovery({
     // `@backend` dispatch. A pure-opencode user never activates one, so nothing here ever runs for
     // them — no extra polling, and no other tool's sessions in their roster.
     const activeBackends = new Set<string>([DEFAULT_BACKEND, initialBackend])
-    for (const m of rosterRef.current.sessions as any[]) {
-      if (m.backend && m.backend !== DEFAULT_BACKEND) {
-        activeBackends.add(m.backend)
+    for (const m of rosterRef.current.sessions) {
+      // `backend` is a member field the roster file carries, so it is read like every other one:
+      // narrowed first. Absent (or anything but a name) means opencode, which is the default.
+      const memberBackend = asString(m.backend)
+      if (memberBackend && memberBackend !== DEFAULT_BACKEND) {
+        activeBackends.add(memberBackend)
         // Without this a restored row is untagged in the store, and so swept as opencode's by the
         // three seeds the moment its project comes online.
-        store.noteOrigin(m.worktree, m.id, m.backend)
+        store.noteOrigin(m.worktree, m.id, memberBackend)
       }
     }
-    const backendConns = new Map<string, any>() // `${name}:${worktree}` → subscription, for unmount
+    const backendConns = new Map<string, EventSubscription>() // `${name}:${worktree}` → subscription, for unmount
 
     // Connect (once) and re-list (every call) one backend in one directory. Listing every time is
     // what makes discovery keep up: a process-backed backend has no event for "a session you have
@@ -311,31 +323,32 @@ export function useDiscovery({
       await Promise.all([...knownWorktrees.current].map((w) => streamBackend(name, w)))
     }
 
-    const refreshPullRequests = async (fresh: any[]) => {
+    const refreshPullRequests = async (fresh: Project[]) => {
       // One call per repository, never per worktree: a worktree shares its repository's remote, so
       // asking it the same question again would double the subprocesses for identical answers.
       const parentsNow = sandboxParents(fresh)
       const repoDirs = fresh.filter((p) => !parentsNow.has(p.worktree)).map((p) => p.worktree)
-      const results = await Promise.all(repoDirs.map((dir: any) => fetchPullRequestsImpl(dir)))
+      const results = await Promise.all(repoDirs.map((dir) => fetchPullRequestsImpl(dir)))
       if (cancelled) return
       // Keyed by repository dir + branch, not bare branch: branch names are not unique across
       // repositories (every repo dependabot touches has a `dependabot/github_actions/...` branch),
       // and a bare-branch key let a session wear another repository's pull request label.
-      const merged = new Map()
-      repoDirs.forEach((dir: any, i: number) => {
+      const merged = new Map<string, PullRequest[]>()
+      repoDirs.forEach((dir, i) => {
         for (const [branch, list] of byBranch(results[i].prs)) merged.set(`${dir} ${branch}`, list)
       })
       // Reasons are scoped per repository, not collapsed to one global string: `repoDirs` and
       // `results` are index-aligned (one `gh` call per repo dir), so zip them into a map and keep
       // only the repos that actually failed. This is what lets peek show a session its OWN repo's
       // reason instead of a different repo's.
-      const reasons = new Map()
-      repoDirs.forEach((dir: any, i: number) => {
-        if (results[i].reason) reasons.set(dir, results[i].reason)
+      const reasons = new Map<string, string>()
+      repoDirs.forEach((dir, i) => {
+        const reason = results[i].reason
+        if (reason) reasons.set(dir, reason)
       })
       // Branches are read for every directory including worktrees, because a session's key is the
       // branch of the directory it actually runs in, not of the repository that owns it.
-      const branches = new Map()
+      const branches = new Map<string, string>()
       for (const p of fresh) {
         const branch = branchOfImpl(p.worktree)
         if (branch) branches.set(p.worktree, branch)
@@ -358,8 +371,8 @@ export function useDiscovery({
     const syncExternalMembers = () => {
       const disk = persistRoster?.reload?.() // null when unchanged, unreadable, or not wired (tests)
       if (!disk) return
-      const have = new Set(rosterRef.current.sessions.map((m: any) => `${m.worktree}:${m.id}`))
-      const added = disk.sessions.filter((m: any) => !have.has(`${m.worktree}:${m.id}`))
+      const have = new Set(rosterRef.current.sessions.map((m) => `${m.worktree}:${m.id}`))
+      const added = disk.sessions.filter((m) => !have.has(`${m.worktree}:${m.id}`))
       if (added.length === 0) return
       const next = { ...rosterRef.current, sessions: [...rosterRef.current.sessions, ...added] }
       // The ref leads, as it does everywhere else in this effect (F1): updateRoster writes through
@@ -419,9 +432,11 @@ export function useDiscovery({
       } catch {
         // transient listProjects failure — try to recover the server itself before the next poll tick
         try {
-          const r = await ensureServerImpl(server)
+          // A caller that wired no recovery (a test harness) has nothing to try — the server stays
+          // flagged down, which is exactly where calling a missing impl already landed.
+          const r = ensureServerImpl ? await ensureServerImpl(server) : null
           if (cancelled) return
-          if (!r.ok) {
+          if (!r?.ok) {
             setServerDown(true)
           } else if (r.server.port === server.port) {
             setServerDown(false) // same port came back healthy — streams self-recover

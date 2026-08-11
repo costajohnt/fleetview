@@ -3,6 +3,19 @@
 // actually reads, and stay permissive (index signatures / optional) rather than claiming a closed
 // shape. Anything looser than this lives inline with a // TODO(types) note where it is used.
 
+// The one narrowing gate every read of a dynamic payload goes through. `unknown` is the honest type
+// for a value the server chose the shape of, and this is what turns one into something a field can
+// be named on — the convention the header above describes, in one place rather than re-typed at each
+// read site. Arrays satisfy it too, which is what the callers that reach for `.length` rely on.
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
+
+// The two field-level companions to `isRecord`: "this key is there and it is the right kind, or it
+// is not there at all". Shared rather than re-declared per module, because every reader of a dynamic
+// payload in this codebase asks exactly these two questions.
+export const asString = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
+export const asNumber = (value: unknown): number | undefined => (typeof value === 'number' ? value : undefined)
+
 // A project row from GET /project. `sandboxes` are the worktree directories opencode made for it.
 export type Project = {
   id?: string
@@ -20,6 +33,19 @@ export type Project = {
 // fleetview actually reads are named; opencode can add more between versions, so
 // reads stay defensive rather than claiming a closed shape.
 // ---------------------------------------------------------------------------
+
+// One row of a backend's session listing, as session-store's `setSessions` consumes it — the
+// vocabulary a normaliser hands over, not a wire shape. Deliberately weaker than `Session` below:
+// opencode's listing rows ARE Sessions and flow straight in, but a normalised claude/copilot row
+// carries no `directory` (there is no server that scoped it), so requiring one would make every
+// process backend lie. Only `id` is named — it is the one field a row cannot be a row without;
+// everything else the store reads is narrowed off the index signature at the point it is read,
+// which is the same treatment every other payload in this file gets.
+export type ListedSession = { id: string; [key: string]: unknown }
+
+// The gate between a raw listing and the rows above: a payload the server chose the shape of, and a
+// row that cannot even name itself is not a session anyone could act on.
+export const isListedSession = (row: unknown): row is ListedSession => isRecord(row) && typeof row.id === 'string'
 
 // GET /session item (schema: Session). Required per spec: id, slug, projectID,
 // directory, title, version, time — fleetview reads the subset below.
@@ -120,6 +146,51 @@ export type PullRequest = {
 
 export type PrStatus = 'merged' | 'closed' | 'draft' | 'failing' | 'pending' | 'passing'
 
+// The provider/model pair `--model` and `/model` set, as cli-args' parseModel mints it. Both halves
+// are required here — a half-parsed pair is rejected at the flag, and what survives is complete.
+export type ModelPair = { providerID: string; id: string }
+
+// What `attach` needs off a row: the identity to hand the host, plus the two fields the ghost guard
+// reads before it hands anything over. Deliberately not a whole roster row — the dispatch paths
+// attach to a session created moments ago, which has no status, snippet or age yet.
+export type AttachTarget = { id: string; projectKey: string; backend?: string; ghost?: boolean; title?: string }
+
+// What the roster asks its host to do. App never touches a terminal itself — it raises one of these
+// and the host (cli.ts's rosterLoop, or a test's stub) answers — so this union is the whole contract
+// between the two, and the reason `onAction` is one function rather than four props.
+export type AttachSibling = { id: string; projectKey: string; backend?: string }
+export type AppAction =
+  // Attach to a session in this terminal. `siblings` is what Alt+1..9 switches between, in the
+  // order they are drawn.
+  | { type: 'enter'; sessionId: string; worktree: string; backend?: string; siblings: AttachSibling[] }
+  // Open the dispatch prompt in $VISUAL/$EDITOR and hand back whatever was saved.
+  | { type: 'edit'; text: string }
+  | { type: 'quit' }
+  // The server moved to another port; the host remounts on it rather than doing live surgery.
+  | { type: 'reconnect' }
+
+// What the host reports back when an attachment ends. Every field is optional because every one of
+// them is news the host may not have: a plain exit reports nothing, a detach names the session that
+// was left running, and a failure to launch carries only a message.
+export type AttachOutcome = {
+  detached?: boolean
+  sessionId?: string
+  worktree?: string
+  backend?: string
+  message?: string
+}
+
+// The per-worktree live-state seed use-discovery publishes back through App's refs, and which the
+// peek failure paths reconcile through. Named here rather than in the hook because App holds the ref
+// and use-peek calls it — three modules, so the shape belongs to none of them.
+export type SeedOptions = { pending?: boolean; additive?: boolean; closeRuns?: boolean; relist?: boolean }
+// Reported per list, not as one flag: a peek path that only cares whether `/question` succeeded must
+// not read a `/session/status` timeout as its own failure.
+export type SeedOutcome = { permissions: boolean; questions: boolean }
+export type SeedChain = (worktree: string, options?: SeedOptions) => Promise<SeedOutcome>
+// Starts streaming a worktree that nothing was watching yet — the project a dispatch just created.
+export type StreamProject = (worktree: string) => Promise<void>
+
 // A parsed SGR mouse event (see ui/mouse.ts).
 export type MouseEvent = {
   button: number
@@ -185,16 +256,21 @@ export type EventSubscription = {
 // Deliberately narrow: only what every backend family can plausibly do. opencode's extra surface
 // (worktrees, permissions, shell, providers, agent/command lists) stays on OpencodeClient, because
 // promoting it here would mean inventing a no-op for it on three CLIs that have no equivalent.
-// Return types stay `any` for the same reason the wire types above do — each backend's payloads are
-// its own shape, and the roster reads them through per-backend normalisation, not through this type.
+// Return types stay deliberately weak, for the same reason the wire types above stay permissive —
+// each backend's payloads are its own shape, and the roster reads them through per-backend
+// normalisation, not through this type. The four verbs whose result nothing reads say exactly that
+// by returning `unknown`. The one result that IS read is a listing, and it returns `ListedSession[]`
+// rather than `unknown`: every adapter already knows its own rows, `normaliseSessions` is the seam
+// where they become the store's vocabulary, and opencode's normaliser is identity — it hands back
+// the very array it was given, which a laundering pass through `unknown` could not do.
 export type Backend = {
   readonly name: string
   readonly capabilities: BackendCapabilities
-  listSessions(directory: string): Promise<any>
+  listSessions(directory: string): Promise<ListedSession[]>
   // create-then-prompt as one call: no backend exposes a session that exists but was never asked
   // anything, and splitting it would leave every caller repeating the two-step.
   dispatch(input: { prompt: string; directory: string; agent?: string; model?: string }): Promise<SessionRef>
-  prompt(id: string, text: string, directory: string): Promise<any>
+  prompt(id: string, text: string, directory: string): Promise<unknown>
   // Long-lived subscription, not a one-shot read: `stop` is what unmounting has to call, and `done`
   // is how a caller waits for the reader to actually finish. Backends without a real event stream
   // satisfy this by polling and calling onEvent themselves.
@@ -202,14 +278,14 @@ export type Backend = {
   // argv, command included — `opencode attach …` and `claude --resume …` don't share a program, so
   // handing back only the arguments would leave the caller deciding what to run.
   attach(session: SessionRef): string[]
-  abort(id: string, directory: string): Promise<any>
-  rename(id: string, title: string, directory: string): Promise<any>
-  delete(id: string, directory: string): Promise<any>
+  abort(id: string, directory: string): Promise<unknown>
+  rename(id: string, title: string, directory: string): Promise<unknown>
+  delete(id: string, directory: string): Promise<unknown>
   // Normalisation is part of the contract (H3), not a string-keyed chain beside it: each adapter
   // states how its listings and events become the store's vocabulary (backend-normalise.ts is the
   // vocabulary's home and documents the rules). opencode's are identity — its payloads ARE the
   // vocabulary — and a new backend cannot silently pass its wire format through unnormalised.
-  normaliseSessions(rows: any[] | null | undefined): any[]
+  normaliseSessions(rows: ListedSession[] | null | undefined): ListedSession[]
   // A fresh normaliser per events() subscription: it folds per-session state across events, and two
   // directories' runs must never share that fold.
   createNormaliser(): (event: unknown) => OpencodeEvent[]

@@ -135,7 +135,7 @@ const git = (dir: string, args: string[], run = execFileSync) =>
 // unpushed by the literal reading, which would strand a worktree per session forever in a local-only
 // repository — measuring against the parent instead asks the question that actually matters, which
 // is whether deleting this branch would lose work that exists nowhere else.
-export function worktreeSafety(dir: string, parentDir: string | null, run = execFileSync) {
+export function worktreeSafety(dir: string, parentDir: string | null | undefined, run = execFileSync) {
   try {
     const dirty = git(dir, ['status', '--porcelain'], run).length > 0
     let base

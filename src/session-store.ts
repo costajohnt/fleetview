@@ -1,5 +1,16 @@
 import { truncateGraphemes, stripControl } from './text-utils.ts'
-import type { OpencodeEvent, OpencodeSessionStatus, PermissionAsked, QuestionAsked, PendingMeta, Session } from './types.ts'
+import { asNumber, asString, isRecord } from './types.ts'
+import type { ListedSession, OpencodeEvent, OpencodeMessage, OpencodeSessionStatus, Part, PermissionAsked, QuestionAsked, PendingMeta } from './types.ts'
+import type { SeenMap } from './seen-store.ts'
+
+// The listing's `time` stamps, pulled off a `ListedSession`'s index signature under a type check
+// apiece. Every backend's rows arrive here (opencode's Sessions, a normalised claude/copilot row),
+// so "the field is there and it is the right kind" is a question that has to be asked rather than
+// assumed — and asking it once here is what lets the reducer below stay unchanged.
+const timeOf = (s: ListedSession) => ({
+  created: isRecord(s.time) ? asNumber(s.time.created) : undefined,
+  updated: isRecord(s.time) ? asNumber(s.time.updated) : undefined,
+})
 
 // A pending request as the store keeps it: the wire payload plus the monotonic stamps fleetview
 // adds on the way in (always set at insert time, hence required here — see apply/seed* below).
@@ -140,7 +151,7 @@ const snippet = (text: string) => (text ? truncateGraphemes(stripControl(text.sl
 // (a `! cmd` job never takes a model turn, so opencode's rename never fires). The roster member kept
 // what was dispatched, so use it. A real server title always wins, and `! ` is prefixed for a shell
 // member the same way the roster row prefixes it — the member stores the bare command.
-export function memberTitle(title: string, member?: { prompt?: unknown; shell?: unknown } | null): string {
+export function memberTitle(title: string, member?: { prompt?: unknown; shell?: unknown; [key: string]: unknown } | null): string {
   if (!isPlaceholderTitle(title)) return title
   const prompt = typeof member?.prompt === 'string' ? member.prompt : ''
   // snippet, not the raw prompt: members carry up to 2000 characters and this is one line of `ls`.
@@ -155,13 +166,15 @@ export function memberTitle(title: string, member?: { prompt?: unknown; shell?: 
 // into a dump of every tool it called.
 // stripControl for the same reason the title/snippet strip: this reaches raw stdout via `logs` and
 // goes through Ink (which passes DCS and OSC 8 through) in peek.
-export function messageBody(m: any, joiner = ' '): string {
-  const parts = (m?.parts ?? []) as any[]
+export function messageBody(m: OpencodeMessage | null | undefined, joiner = ' '): string {
+  const parts: Part[] = m?.parts ?? []
   const text = parts.filter((p) => p?.type === 'text').map((p) => p?.text ?? '').join(joiner)
   if (text.trim()) return stripControl(text)
   const output = parts
     .filter((p) => p?.type === 'tool')
-    .map((p) => (typeof p?.state?.output === 'string' ? p.state.output : ''))
+    // `state` is the tool part's own payload, so it is read the same way every other wire object is:
+    // narrowed first, then the one field named.
+    .map((p) => (isRecord(p.state) && typeof p.state.output === 'string' ? p.state.output : ''))
     .filter(Boolean)
     .join('\n')
   return stripControl(output)
@@ -178,15 +191,26 @@ export function messageBody(m: any, joiner = ' '): string {
 // same request the peek banner does, and the store is the module that owns these payloads —
 // pendingFor/pendingQuestionsFor hand out exactly this shape. ui importing core is the right
 // direction; core importing ui would drag React and Ink into `fleetview ls`.
-export const permissionLabel = (p: any) => stripControl(p.permission ? `${p.permission}${p.patterns?.length ? ` ${p.patterns.join(', ')}` : ''}` : p.id)
+// Takes the three fields it reads rather than a whole payload: the store hands over a wire
+// PermissionAsked, peek hands over its looser PeekPermission (every field optional, because a banner
+// must render whatever arrived), and naming the intersection is what lets both call it unchanged.
+export const permissionLabel = (p: { id?: string; permission?: string; patterns?: string[] }): string =>
+  stripControl(p.permission ? `${p.permission}${p.patterns?.length ? ` ${p.patterns.join(', ')}` : ''}` : p.id ?? '')
 
 // Verified against opencode 1.18.4's OpenAPI: question.asked is {id, sessionID, questions:
 // [{question, header, options: [{label, description}], multiple, custom}], tool?}. Earlier code
 // guessed `text`/`label` for the prompt; the field is `question`. Only the first sub-question of
 // the oldest request is shown, and its options are what the number keys pick.
-export const questionLabel = (q: any) => {
+// Same intersection treatment as permissionLabel: the store's QuestionAsked and peek's PeekQuestion
+// both satisfy it. `tool` stays `unknown` because that is what the wire type says it is, so the
+// fallback chain narrows it to a string before printing it rather than stringifying whatever came.
+export const questionLabel = (q: {
+  id?: string
+  tool?: unknown
+  questions?: ReadonlyArray<{ question?: string; header?: string }>
+}): string => {
   const first = q.questions?.[0]
-  return stripControl(first?.question ?? first?.header ?? q.tool ?? q.id)
+  return stripControl(first?.question ?? first?.header ?? asString(q.tool) ?? q.id ?? '')
 }
 
 // #24: the human sentence behind a failure. Two payloads carry the same union — `session.error`'s
@@ -199,10 +223,10 @@ export const questionLabel = (q: any) => {
 // describe the same failure, and one label means they can never describe it differently.
 export const errorLabel = (err: unknown): string | null => {
   if (typeof err === 'string') return stripControl(err) || null
-  if (!err || typeof err !== 'object') return null
-  const e = err as any
-  const message = typeof e.data?.message === 'string' ? e.data.message : typeof e.message === 'string' ? e.message : null
-  const name = typeof e.name === 'string' ? e.name : null
+  if (!isRecord(err)) return null
+  const data = isRecord(err.data) ? err.data : undefined
+  const message = typeof data?.message === 'string' ? data.message : typeof err.message === 'string' ? err.message : null
+  const name = typeof err.name === 'string' ? err.name : null
   const text = name && message ? `${name}: ${message}` : message ?? name
   return text ? stripControl(text) : null
 }
@@ -255,6 +279,12 @@ const errorSnippet = (r: SessionRecord): string | null => {
   const label = errorLabel(r.lastError)
   return label ? snippet(label) : null
 }
+
+// The store as its collaborators hold it. Derived from the factory rather than hand-written, so the
+// hooks App hands it to (use-discovery, use-dispatch, use-peek) can never drift from what this file
+// actually returns — the alternative was a parallel interface, and a parallel interface is a second
+// place to forget a method.
+export type SessionStore = ReturnType<typeof createStore>
 
 export function createStore() {
   const sessions = new Map<string, SessionRecord>() // `${projectKey}:${id}` → record
@@ -436,9 +466,10 @@ export function createStore() {
     // `retire` opts a listing into being authoritative about what no longer exists: only then is a
     // record marked `listed`, and only then are vanished records swept. It is off by default because
     // `setSessions` has five callers and only one of them is serialized. See the sweep below.
-    // `seen` is the persisted seen.json watermark map (fleetview's own shape, kept loose — out of
-    // scope for wire typing); `list` is the opencode GET /session payload.
-    setSessions(projectKey: string, list: Session[], seen: Record<string, any> | undefined, { retire = false }: { retire?: boolean } = {}) {
+    // `seen` is the persisted seen.json watermark map (seen-store owns that shape); `list` is a
+    // backend's session listing, already through its normaliser — opencode's rows arrive as they came
+    // off GET /session, a process backend's as whatever backend-normalise made of them.
+    setSessions(projectKey: string, list: ListedSession[], seen: SeenMap | undefined, { retire = false }: { retire?: boolean } = {}) {
       for (const s of list) {
         // "Subagents and teammates a session spawns aren't listed as separate rows." opencode
         // models those as child sessions with a parentID, and GET /session returns them alongside
@@ -451,7 +482,8 @@ export function createStore() {
         }
         const k = key(projectKey, s.id)
         const prev = sessions.get(k)
-        const updatedAt = s.time?.updated ?? prev?.updatedAt ?? 0
+        const time = timeOf(s)
+        const updatedAt = time.updated ?? prev?.updatedAt ?? 0
         const persisted = seen?.[k]
         // Ran-while-away inference: persisted activity (flag or newer timestamp) means done, even
         // if this store instance has never seen the session before (post-restart). Known limit: any
@@ -464,7 +496,7 @@ export function createStore() {
         // after the error — a turn run from opencode's own TUI, or one fleetview missed while its
         // stream was down — retires it, instead of showing red forever for a session that
         // succeeded. Without this nothing but an observed `busy` ever cleared it.
-        const incoming = s.time?.updated
+        const incoming = time.updated
         const anchorUnknown = prev?.errorAtServerUpdated === ERROR_ANCHOR_UNKNOWN
         // One step of patience: the first refresh after an error establishes the baseline (which
         // includes the error's own bump, however it was ordered), and only a bump beyond that
@@ -486,8 +518,8 @@ export function createStore() {
         sessions.set(k, {
           projectKey,
           id: s.id,
-          title: s.title ?? s.id,
-          agent: s.agent ?? prev?.agent,
+          title: asString(s.title) ?? s.id,
+          agent: asString(s.agent) ?? prev?.agent,
           provisionalTitle: prev?.provisionalTitle ?? '',
           lastStatus: prev?.lastStatus ?? 'idle',
           hasRun,
@@ -516,8 +548,8 @@ export function createStore() {
           // without waiting for a fresh error frame to set the anchor.
           errorAtServerUpdated:
             anchorUnknown && incoming !== undefined ? incoming : prev?.errorAtServerUpdated ?? (restoredError ? updatedAt : 0),
-          serverUpdatedAt: s.time?.updated ?? prev?.serverUpdatedAt ?? 0,
-          createdAt: s.time?.created ?? prev?.createdAt ?? 0,
+          serverUpdatedAt: time.updated ?? prev?.serverUpdatedAt ?? 0,
+          createdAt: time.created ?? prev?.createdAt ?? 0,
           // Only a retiring listing confers this. A refresh listing (dispatch, /fork) must not, or it
           // would arm the very record the sweep below must not touch — see there.
           listed: retire || (prev?.listed ?? false),
@@ -794,7 +826,7 @@ export function createStore() {
     },
 
     snapshot() {
-      const out: Record<string, any> = {}
+      const out: SeenMap = {}
       // `stopped` rides along because the server can't tell us: an aborted session comes back as
       // plain idle, so without persisting it a restart re-renders every stopped session as
       // "completed" — a result the user never got.

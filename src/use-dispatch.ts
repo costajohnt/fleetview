@@ -2,14 +2,22 @@ import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
 import { DEFAULT_BACKEND } from './backends/index.ts'
 import { shouldIsolate, worktreeName } from './worktree.ts'
+import type { AttachTarget, Backend, ListedSession, ModelPair, Project, StreamProject, Worktree } from './types.ts'
+import type { SeenMap } from './seen-store.ts'
+import type { SessionStore } from './session-store.ts'
+import type { RosterClient } from './backends/opencode/client.ts'
 
 // The dispatch pair, lifted out of App the same way usePeek and useDiscovery were: the opencode
 // path (worktree isolation, shell jobs, provisional titles), the process-backed-CLI path, and the
 // post-dispatch tail they share. Everything App owns and this needs is passed in explicitly; the
 // hook is re-invoked per render, so each returned `dispatch` closes over that render's values
 // exactly as the inline functions did.
-// TODO(types): all inputs are App-owned dynamic collaborators (client, session store, backend
-// registry, roster callbacks); typed loose because their real shapes live in other modules.
+//
+// What a dispatch may be told about itself, from the parsed input: an `@agent`, an `@repo`, a `!`
+// shell job, an `@backend`, and whether to attach straight after. Both paths take the same bag so a
+// token means the same thing whichever CLI it lands on.
+export type DispatchOptions = { thenAttach?: boolean; agent?: string; repo?: string; shell?: boolean; backend?: string }
+
 export function useDispatch({
   client,
   store,
@@ -44,26 +52,26 @@ export function useDispatch({
   setSelectedKey,
   dirExistsImpl = existsSync,
 }: {
-  client: any
-  store: any
-  seen?: any
-  backendRegistry: Record<string, any>
-  initialAgent?: any
+  client: RosterClient
+  store: SessionStore
+  seen?: SeenMap
+  backendRegistry: Record<string, Backend>
+  initialAgent?: string | null
   initialBackend: string
-  dispatchModel: any
+  dispatchModel: ModelPair | null
   isolate: boolean
-  projects: any[]
+  projects: Project[]
   parents: Map<string, string>
   input: string
   setInput: (value: string | ((current: string) => string)) => void
   flash: (message: string, ms?: number) => void
-  attach: (row: any) => void
+  attach: (row: AttachTarget) => void
   expandPastes: (text: string) => string
   dispatchTarget: (repo?: string) => string | undefined
-  addMember: (worktree: any, id: any, extra?: any) => void
+  addMember: (worktree: string, id: string, extra?: Record<string, unknown>) => void
   seededProjectKeys: { current: Set<string> }
   setOfflineProjects: (updater: (s: Set<string>) => Set<string>) => void
-  streamProjectRef: { current: any }
+  streamProjectRef: { current: StreamProject | null }
   activateBackendRef: { current: ((name: string) => Promise<void>) | null }
   selectedSessionRef: { current: { projectKey: string; id: string } | null }
   setSelectedKey: (key: string | null) => void
@@ -77,7 +85,7 @@ export function useDispatch({
   // The post-dispatch tail both dispatch paths share (H2): the immediate relist that makes the new
   // row reflect the backend's own record now rather than on the next poll, and the offline-list
   // cleanup a successful dispatch has just proven right.
-  const noteDispatchedProject = (worktree: string, list: any[]) => {
+  const noteDispatchedProject = (worktree: string, list: ListedSession[]) => {
     seededProjectKeys.current.add(worktree)
     store.setSessions(worktree, list, seen)
     setOfflineProjects((s) => {
@@ -92,7 +100,7 @@ export function useDispatch({
   // written between createSession and promptAsync, and a listSessions refresh — all of it opencode's
   // own machinery, and all of it covered by a test corpus that must keep passing unchanged. What is
   // shared is what is genuinely shared (target resolution, roster membership, the notice).
-  const dispatchOnBackend = async (name: string, rawText: string, { thenAttach = false, agent, repo, shell = false }: any = {}) => {
+  const dispatchOnBackend = async (name: string, rawText: string, { thenAttach = false, agent, repo, shell = false }: DispatchOptions = {}) => {
     const backend = backendRegistry[name]
     if (!backend) return flash(`no ${name} backend`)
     // `!` is opencode's shell-job route (POST /session/:id/shell); a process-backed CLI has no
@@ -156,7 +164,7 @@ export function useDispatch({
     }
   }
 
-  const dispatch = async (rawText: string, { thenAttach = false, agent, repo, shell = false, backend }: { thenAttach?: boolean; agent?: string; repo?: string; shell?: boolean; backend?: string } = {}) => {
+  const dispatch = async (rawText: string, { thenAttach = false, agent, repo, shell = false, backend }: DispatchOptions = {}) => {
     // Everything below this line is the opencode path, untouched. A dispatch is only diverted when
     // something actually named another backend — `@claude`, or a launch default — so the opencode
     // behaviour this whole phase must not change is reached by exactly the code that reached it
@@ -194,7 +202,7 @@ export function useDispatch({
           // directory strings — passing the objects threw a TypeError into the silent catch below,
           // so every dispatch after the repo's first worktree ran unisolated. `?? w.name` because a
           // row without a directory still names a taken slot.
-          const existing = ((await client.listWorktrees(target)) ?? []).map((w: any) =>
+          const existing = ((await client.listWorktrees(target)) ?? []).map((w: Worktree | string | null | undefined) =>
             typeof w === 'string' ? w : w?.directory ?? w?.name ?? '',
           )
           const created = await client.createWorktree(worktreeName(text, existing), target)

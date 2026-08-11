@@ -4,12 +4,15 @@
 // interesting logic is "what does this run's state look like now", and that has to be testable
 // against a recorded fixture rather than a spawned process.
 import { parseNdjsonChunk } from '../ndjson.ts'
+import { isRecord } from '../../types.ts'
 
 // Only the fields fleetview reads are named. Copilot adds event types between versions, and an
 // exhaustive union would turn every new one into a type error over a line this code ignores anyway.
 export type CopilotEvent = {
   type?: string
-  data?: any // TODO(types): per-event payloads, shapes differ by `type` and are not pinned by the CLI
+  // The per-event payload. `unknown` rather than a union: the shapes differ by `type`, the CLI
+  // pins none of them, and the two reads below narrow what they need out of it.
+  data?: unknown
   ephemeral?: boolean
   sessionId?: string
   exitCode?: number
@@ -76,14 +79,15 @@ export function applyEvent(run: RunState, event: CopilotEvent): RunState {
   if (event.type === 'user.message') return { ...run, status: 'working', deniedTools: 0, exitCode: null, aborted: false }
 
   if (event.type === 'assistant.message') {
-    const content = event.data?.content
+    const content = isRecord(event.data) ? event.data.content : undefined
     // Empty on a pure tool call — the message carries `toolRequests` and no prose. Keeping it would
     // blank out the last real thing the session said every time it picked up a tool.
     if (typeof content !== 'string' || !content) return run
     return { ...run, lastOutput: content }
   }
 
-  if (event.type === 'tool.execution_complete' && event.data?.error?.code === 'denied') {
+  const toolError = isRecord(event.data) ? event.data.error : undefined
+  if (event.type === 'tool.execution_complete' && isRecord(toolError) && toolError.code === 'denied') {
     return { ...run, deniedTools: run.deniedTools + 1 }
   }
 
