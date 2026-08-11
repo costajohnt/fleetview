@@ -3,6 +3,7 @@ import { useInput } from 'ink'
 import { graphemes } from './text-utils.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
 import { questionOptions, suggestedReply } from './ui/peek.ts'
+import { OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 
 // Peek's controller: the state, the message fetch, the reply/answer paths and the panel's own key
 // handling, lifted out of App so the roster closure stops carrying them. Everything App owns and
@@ -31,7 +32,7 @@ export function usePeek({
   // reads as "do exactly what you did before"; `capabilitiesOf` is the only thing allowed to decide
   // whether an answer key does anything.
   backendFor = () => null,
-  capabilitiesOf = () => ({ questions: true }),
+  capabilitiesOf = () => OPENCODE_CAPABILITIES,
 }: {
   client: any
   store: any
@@ -46,13 +47,20 @@ export function usePeek({
   serverReady: boolean
   attached: boolean
   backendFor?: (row: any) => any
-  capabilitiesOf?: (row: any) => { questions: boolean }
+  capabilitiesOf?: (row: any) => { questions: boolean; messages: boolean }
 }) {
   // "Undeliverable replies are saved and sent when the session's process starts again." Keyed by
   // `${projectKey}:${id}` so a saved reply follows its session and nothing else. Replies prefixed
   // with `!` are deliberately not saved — agent view doesn't either, because a shell command that
   // arrives much later is a different instruction than the one that was meant.
   const savedReplies = useRef(new Map())
+  // M15: per-key send epoch. sendReply's success path deletes the saved key, which makes "user
+  // sent a newer reply directly" indistinguishable from "nothing happened" — a failed flush's
+  // catch would then re-queue the stale body and a later poll would deliver it AFTER the newer
+  // reply (the "late reply is a different instruction" failure the comments above warn about).
+  // Every successful send bumps the key's epoch; a flush only re-queues if the epoch it captured
+  // is still current.
+  const replyEpochs = useRef(new Map())
   // peekTarget: same shape as target, captured when peek opens — unlike other dialog targets it
   // DOES follow explicit ↑/↓ while peek is open (selection-follow), but never passive store churn.
   const [peekTarget, setPeekTarget] = useState<any>(null) // TODO(types): a session row from the store; dynamic wire shape
@@ -71,11 +79,12 @@ export function usePeek({
     if (mode !== 'peek' || !peekTarget) return
     let cancelled = false
     setPeekMessages(null)
-    // `listMessages` is opencode's GET /session/:id/message. A process-backed session's transcript
-    // is a file on disk in the CLI's own format and there is no read API in the Backend contract, so
-    // asking the opencode server about an id it has never heard of would render a fetch failure for
-    // a session that is perfectly healthy. Say what is actually true instead.
-    if (backendFor(peekTarget)) {
+    // `listMessages` is opencode's GET /session/:id/message. A backend without `messages` keeps its
+    // transcript in a file on disk in the CLI's own format, so asking the opencode server about an
+    // id it has never heard of would render a fetch failure for a session that is perfectly
+    // healthy. Say what is actually true instead. A capability, not `backendFor(...) !== null`
+    // (M13): the contract exists so nothing identity-tests adapters.
+    if (!capabilitiesOf(peekTarget).messages) {
       setPeekMessages('unsupported')
       return
     }
@@ -119,6 +128,7 @@ export function usePeek({
       // resume of the same session — so replies work here even where answering a permission cannot.
       else if (backend) await backend.prompt(row.id, body, row.projectKey)
       else await client.promptAsync(row.id, body, row.projectKey)
+      replyEpochs.current.set(key, (replyEpochs.current.get(key) ?? 0) + 1) // M15: supersedes any in-flight flush
       savedReplies.current.delete(key)
     } catch {
       if (bang) {
@@ -147,14 +157,19 @@ export function usePeek({
       const projectKey = key.slice(0, at)
       const id = key.slice(at + 1)
       savedReplies.current.delete(key)
+      const epoch = replyEpochs.current.get(key) ?? 0 // M15: captured before the send
       client
         .promptAsync(id, body, projectKey)
         .then(() => rerender())
         .catch(() => {
-          // Compare-and-swap: only re-queue when the slot is still empty. The user can type a new
-          // reply for this session while the send is in flight, and an unconditional re-add would
-          // overwrite it with the stale body — so the next tick would send what they replaced.
-          if (!savedReplies.current.has(key)) savedReplies.current.set(key, body)
+          // Compare-and-swap: only re-queue when the slot is still empty AND no send for this key
+          // succeeded since the flush started (M15). The user can type a new reply while this send
+          // is in flight — an unconditional re-add would overwrite it with the stale body — and a
+          // direct sendReply success leaves the slot empty, so without the epoch check a failed
+          // flush would resurrect a reply the user already superseded.
+          if (!savedReplies.current.has(key) && (replyEpochs.current.get(key) ?? 0) === epoch) {
+            savedReplies.current.set(key, body)
+          }
           rerender()
         })
     }

@@ -1,6 +1,7 @@
 // Reading a `claude -p --output-format=stream-json` run. Pure: takes text, returns events and a
 // state, touches no disk and no clock, so the fixtures under test/fixtures can drive it directly.
-//
+import { parseNdjsonChunk } from '../ndjson.ts'
+
 // Wire shapes are documented in docs/specs/2026-07-25-claude-backend-wire.md and typed the same way
 // the opencode payloads in types.ts are — only the fields this file reads are named, everything else
 // rides along. The stream carries more than the documented event types (this machine's SessionStart
@@ -23,8 +24,6 @@ export type ClaudeRunState = {
   denials: unknown[]
   // Set only on a failed run. `result.errors` when the CLI gave one, else the final text.
   error: string | undefined
-  costUsd: number | undefined
-  durationMs: number | undefined
 }
 
 export const emptyRunState = (): ClaudeRunState => ({
@@ -33,8 +32,6 @@ export const emptyRunState = (): ClaudeRunState => ({
   sessionId: undefined,
   denials: [],
   error: undefined,
-  costUsd: undefined,
-  durationMs: undefined,
 })
 
 // The seed for a session read out of a Claude Code transcript. Same reducer, different starting
@@ -45,25 +42,8 @@ export const emptyRunState = (): ClaudeRunState => ({
 // module inventing a result event.
 export const emptyTranscriptState = (): ClaudeRunState => ({ ...emptyRunState(), status: 'idle' })
 
-// NDJSON, so the split is by line rather than by SSE's blank-line frame — but the same
-// buffer-the-tail contract as parseSseChunk, because a tailed file is read mid-line just as often as
-// a socket is.
-export function parseStreamChunk(buffer: string): { events: unknown[]; rest: string } {
-  const events: unknown[] = []
-  const lines = buffer.split('\n')
-  const rest = lines.pop() ?? '' // partial line stays buffered
-  for (const line of lines) {
-    if (!line.trim()) continue
-    try {
-      events.push(JSON.parse(line))
-    } catch {
-      // Not JSON. The log is the child's stdout *and* stderr on one fd, so a spawn failure or a
-      // node warning lands here as plain text; keeping it in the file is worth more than refusing
-      // to parse the rest of the run.
-    }
-  }
-  return { events, rest }
-}
+// The shared NDJSON line loop under the name this backend's consumers know it by (ndjson.ts).
+export const parseStreamChunk = parseNdjsonChunk
 
 const textOf = (event: any): string | undefined => {
   const blocks = event?.message?.content
@@ -112,8 +92,6 @@ export function applyEvent(state: ClaudeRunState, event: unknown): ClaudeRunStat
       sessionId: typeof e.session_id === 'string' ? e.session_id : state.sessionId,
       denials,
       error: failed ? (errors.join('; ') || result || 'claude run failed') : undefined,
-      costUsd: typeof e.total_cost_usd === 'number' ? e.total_cost_usd : state.costUsd,
-      durationMs: typeof e.duration_ms === 'number' ? e.duration_ms : state.durationMs,
     }
   }
   return state

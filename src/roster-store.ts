@@ -1,17 +1,9 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync, existsSync, statSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
+import { readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+import { atomicWrite } from './paths.ts'
+import { configDir } from './registry.ts'
 
-// Prefer the fleetview dir, but keep reading an existing pre-rename ~/.config/roost until the
-// user (or a future migration) moves it — a rename must not orphan anyone's roster or server.
-const baseDir = () => {
-  const fresh = join(homedir(), '.config', 'fleetview')
-  const legacy = join(homedir(), '.config', 'roost')
-  return existsSync(fresh) || !existsSync(legacy) ? fresh : legacy
-}
-
-export const defaultRosterFile = () =>
-  join((process.env.FLEETVIEW_CONFIG_DIR ?? process.env.ROOST_CONFIG_DIR) ?? baseDir(), 'roster.json')
+export const defaultRosterFile = () => join(configDir(), 'roster.json')
 
 export type RosterSession = { worktree: string; id: string; [key: string]: unknown }
 export type Roster = { groupBy: 'state' | 'project'; sessions: RosterSession[]; collapsed: string[]; [key: string]: unknown }
@@ -47,16 +39,7 @@ export function loadRoster(file: string): Roster {
 }
 
 export function saveRoster(file: string, roster: Roster) {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  // mkdir's `mode` only applies when it creates the dir, so one that already exists keeps whatever
-  // perms it had. Re-tighten on every save; best-effort, since a dir we can't chmod is no reason to
-  // fail the write.
-  try {
-    chmodSync(dirname(file), 0o700)
-  } catch {}
-  const tmp = `${file}.${process.pid}.tmp` // per-pid: two fleetview instances must not share a tmp inode
-  writeFileSync(tmp, JSON.stringify(roster, null, 2), { mode: 0o600 })
-  renameSync(tmp, file)
+  atomicWrite(file, JSON.stringify(roster, null, 2))
 }
 
 export function hasSession(roster: Roster, worktree: string, id: string) {
@@ -130,10 +113,13 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
       seen.add(k)
       sessions.push(m)
     }
-    prev = snap
     // groupBy and collapsed are one terminal's view state, not per-member facts, so there is
     // nothing to merge: last writer wins, exactly as before this merge existed.
     saveRoster(file, { ...snap, sessions })
+    // Only after the write lands: committing `prev = snap` before a failed save would remember an
+    // in-flight removal as done while it never reached disk, and the next successful persist
+    // would merge the row back from disk — resurrecting what the user deleted.
+    prev = snap
     lastStamp = stamp()
   }
   persist.reload = () => {

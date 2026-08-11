@@ -5,15 +5,18 @@
 import type { Backend, ServerRef } from '../../types.ts'
 import { OpencodeClient } from './client.ts'
 import { connectEvents } from './event-mux.ts'
+import { assertSessionId } from '../session-id.ts'
 
 // opencode is the server-backed family, so every flag is true — which is exactly why the flags could
 // not be inferred from it. It is the parity baseline the process-backed backends are measured
-// against, not the default.
-const CAPABILITIES = {
+// against, not the default. Exported because it doubles as the fallback capability set where a
+// row's backend cannot be resolved (app.ts, use-peek.ts).
+export const OPENCODE_CAPABILITIES = {
   fork: true, // POST /session/:id/fork
   rename: true, // PATCH /session/:id
   delete: true, // DELETE /session/:id
   questions: true, // GET /question + /permission, answerable from the roster
+  messages: true, // GET /session/:id/message, what peek renders
 } as const
 
 // The client is passed in rather than built here: fleetview already holds one per server for the
@@ -31,7 +34,7 @@ export function createOpencodeBackend({
 }): Backend {
   return {
     name: 'opencode',
-    capabilities: CAPABILITIES,
+    capabilities: OPENCODE_CAPABILITIES,
     listSessions: (directory) => client.listSessions(directory),
     async dispatch({ prompt, directory, agent, model }) {
       const session = await client.createSession({ agent, model }, directory)
@@ -49,7 +52,9 @@ export function createOpencodeBackend({
       'attach',
       `http://${server.host}:${server.port}`,
       '-s',
-      id,
+      // Server-supplied, and the server may be an adopted foreign one — asserted because it becomes
+      // argv, same as the process backends (session-id.ts).
+      assertSessionId(id),
       // --dir is the worktree, not the repository: attach exits 1 immediately and silently if it
       // points at a directory that no longer exists (see describeExit in cli.ts).
       '--dir',

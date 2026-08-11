@@ -61,7 +61,7 @@ test('attach argv is the opencode attach command, pointed at the session and its
 // opencode is the parity baseline, so all five are true — the flags exist to describe the backends
 // that can't do these things, and this pins the baseline they're compared against.
 test('opencode declares the full capability set', () => {
-  expect(backend().capabilities).toEqual({ fork: true, rename: true, delete: true, questions: true })
+  expect(backend().capabilities).toEqual({ fork: true, rename: true, delete: true, questions: true, messages: true })
   expect(backend().name).toBe('opencode')
 })
 
@@ -74,4 +74,11 @@ test('events opens the directory-scoped stream on the backend server, and stop()
   sub.stop()
   await sub.done
   expect(fetchImpl).toHaveBeenCalledWith('http://127.0.0.1:4900/event?directory=%2Fx%2Falpha', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+})
+
+// The id is server-supplied and the server may be an adopted foreign one; it becomes argv on
+// attach, so a malformed one is refused with a throw rather than handed to a spawn.
+test('attach refuses a session id with flag syntax or control bytes', () => {
+  expect(() => backend().attach({ id: '--banner', directory: '/x/alpha' })).toThrow(/malformed session id/)
+  expect(() => backend().attach({ id: `ok${String.fromCharCode(27)}[2Jbad`, directory: '/x/alpha' })).toThrow(/malformed session id/)
 })

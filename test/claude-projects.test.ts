@@ -217,3 +217,17 @@ test('a transcript that is not JSON at all is skipped, not fatal', () => {
   transcript(h, '/repo/alpha', 'aaaa-1111', [record('/repo/alpha', 'aaaa-1111')])
   expect(listTranscripts('/repo/alpha', { home: h }).map((s) => s.id)).toEqual(['aaaa-1111'])
 })
+
+// The filename minus .jsonl is the session id, and the id later reaches child argv
+// (`claude --resume <id>`) and raw stdout in `ls` — so a name a dispatched session could have
+// planted (flag syntax, a control byte) is not a session and is never read at all.
+test('a file whose name is not a well-formed session id is not listed', () => {
+  const h = home()
+  const directory = '/repo/alpha'
+  const esc = String.fromCharCode(27)
+  transcript(h, directory, 'good-id', [record(directory, 'good-id')])
+  transcript(h, directory, '--fork-session', [record(directory, '--fork-session')])
+  transcript(h, directory, `evil${esc}]0;pwned`, [record(directory, 'evil')])
+  transcript(h, directory, 'dot.dot', [record(directory, 'dot.dot')])
+  expect(listTranscripts(directory, { home: h }).map((t) => t.id)).toEqual(['good-id'])
+})

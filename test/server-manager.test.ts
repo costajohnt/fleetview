@@ -1,7 +1,9 @@
 import { test, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from '../src/backends/opencode/server-manager.ts'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
+import { mkdtempSync, existsSync, closeSync } from 'node:fs'
+import { join } from 'node:path'
 
 // What a real `opencode serve` answers GET /project with — verified against opencode 1.18.5, which
 // reports its global project even with a completely fresh config dir. `[]` is deliberately NOT this:
@@ -218,6 +220,30 @@ test('spawnServer does not crash when the child emits an async error event (e.g.
   expect(() => child.emit('error', new Error('ENOENT'))).not.toThrow()
 })
 
+// mode on mkdir/open only applies when they create, so a pre-existing (or pre-loosened) server.log
+// kept its perms while receiving prompts, paths and anything the server prints — every open
+// re-tightens the file and its dir now (openPrivateAppend).
+test('spawnServer re-tightens a pre-existing world-readable log to 0600', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, chmodSync, statSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = join(mkdtempSync(join(tmpdir(), 'fleetview-logs-')), 'logs')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'server.log'), 'old contents\n', { mode: 0o644 })
+  chmodSync(dir, 0o755)
+  const previous = process.env.FLEETVIEW_LOG_DIR
+  process.env.FLEETVIEW_LOG_DIR = dir
+  try {
+    const child = { pid: 42, on: () => {}, unref: () => {} }
+    spawnServer({ host: '127.0.0.1', port: 4900 }, { spawnImpl: (() => child) as any })
+    expect(statSync(join(dir, 'server.log')).mode & 0o777).toBe(0o600)
+    expect(statSync(dir).mode & 0o777).toBe(0o700)
+  } finally {
+    if (previous === undefined) delete process.env.FLEETVIEW_LOG_DIR
+    else process.env.FLEETVIEW_LOG_DIR = previous
+  }
+})
+
 // A server that never comes healthy is spawned up to 11 times per ensureServer run, and
 // ensureServer re-runs on every failed poll — so an unclosed parent fd accumulates without bound.
 test('spawnServer closes the log descriptor it opened, and leaves a caller-supplied one alone', () => {
@@ -228,4 +254,23 @@ test('spawnServer closes the log descriptor it opened, and leaves a caller-suppl
     { spawnImpl: () => child, logFd: 7, closeSyncImpl: (fd: any) => closed.push(fd) } as any,
   )
   expect(closed).toEqual([]) // fd 7 belongs to the caller
+
+  // The self-open arm — the actual fd-leak regression: with no logFd supplied, spawnServer opens
+  // the log itself and must close that descriptor. A real open in a temp dir, so the fd asserted
+  // closed is a genuinely opened one, not a stub's invention.
+  const dir = mkdtempSync(join(tmpdir(), 'fleetview-log-'))
+  const previousLogDir = process.env.FLEETVIEW_LOG_DIR
+  process.env.FLEETVIEW_LOG_DIR = dir
+  try {
+    spawnServer(
+      { host: '127.0.0.1', port: 4900 },
+      { spawnImpl: () => child, closeSyncImpl: (fd: any) => { closed.push(fd); closeSync(fd) } } as any,
+    )
+  } finally {
+    if (previousLogDir === undefined) delete process.env.FLEETVIEW_LOG_DIR
+    else process.env.FLEETVIEW_LOG_DIR = previousLogDir
+  }
+  expect(closed).toHaveLength(1)
+  expect(closed[0]).toBeTypeOf('number')
+  expect(existsSync(join(dir, 'server.log'))).toBe(true) // the fd it closed was the log it opened
 })

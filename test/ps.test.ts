@@ -2,7 +2,7 @@ import { test, expect } from 'vitest'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { psInfo } from '../src/backends/ps.ts'
+import { psInfo, sameRun } from '../src/backends/ps.ts'
 
 // The one place the real `ps` invocation runs in the suite: every backend abort test injects a fake
 // psImpl, so without this the lstart parse and the format string would ship with zero runnable
@@ -48,4 +48,14 @@ test('psInfo reports a dead pid as null, not unavailable', () => {
   // rejects it loudly (to the stderr psInfo drops), Linux ps just finds nothing — both exit
   // non-zero, which is the "no such process" answer.
   expect(psInfo(2 ** 22 + 7)).toBeNull()
+})
+
+// The abort guard both process-backed backends share: only argv naming the session is accepted as
+// identity; unverifiable ('unavailable') passes, finished (null) and mismatched argv refuse.
+test('sameRun accepts only a live process whose argv carries the id, or an unverifiable ps', () => {
+  expect(sameRun({ startedAt: 0, command: 'claude --resume abc-123 -p' }, 'abc-123')).toBe(true)
+  expect(sameRun({ startedAt: 0, command: 'claude --resume other-id -p' }, 'abc-123')).toBe(false)
+  expect(sameRun({ startedAt: 0, command: '' }, 'abc-123')).toBe(false) // ps answered but shows no argv
+  expect(sameRun(null, 'abc-123')).toBe(false) // the run already finished
+  expect(sameRun('unavailable', 'abc-123')).toBe(true) // unverifiable is not verified-stale
 })

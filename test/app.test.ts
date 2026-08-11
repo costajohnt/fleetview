@@ -101,7 +101,11 @@ const pressUntil = async (stdin: any, key: string, fn: () => any, timeoutMs = 30
   }
 }
 
-const waitFor = async (fn: () => any, timeoutMs = 3000, stepMs = 10) => {
+// 15s default, not 3s: the ceiling only bounds failure-detection latency — the condition is polled
+// and a passing wait returns as soon as it holds. 3s was repeatedly not enough on a loaded macOS CI
+// runner with 40 test files competing for the event loop (the reseed tests carried per-call 15000
+// overrides for exactly this; the default then flaked on their EARLIER waits instead).
+const waitFor = async (fn: () => any, timeoutMs = 15000, stepMs = 10) => {
   const start = Date.now()
   for (;;) {
     if (fn()) return
@@ -893,6 +897,21 @@ test('s toggles main groupBy between state and project, persists, and switches r
   stdin.write('\x13')
   await tick()
   expect(deps.persistRoster).toHaveBeenLastCalledWith(expect.objectContaining({ groupBy: 'state' }))
+})
+
+// A roster save that throws (full disk, unwritable config dir) used to propagate through
+// updateRoster into the Ink input handler and crash the TUI over a disk hiccup.
+test('a failing roster save flashes instead of crashing the input handler', async () => {
+  const deps = makeDeps()
+  deps.persistRoster = vi.fn(() => {
+    throw new Error('disk full')
+  })
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('\x13') // ^s → updateRoster → persist throws
+  await waitFor(() => lastFrame().includes("couldn't save roster"))
+  // the in-memory toggle still happened and the app is still alive
+  expect(lastFrame().split('\n').some((l) => l.trim().replace(/^❯ /, '').startsWith('alpha'))).toBe(true)
 })
 
 test('empty roster in state grouping shows the three-category skeleton with placeholders', async () => {
@@ -1907,6 +1926,19 @@ test('! dispatches a shell job instead of prompting a model', async () => {
   expect(deps.client.promptAsync).not.toHaveBeenCalled()
 })
 
+// The `!` branch used to pass `agent ?? 'build'` while the prompt branch fell back to the launch
+// --agent default, so a `fleetview --agent reviewer` run silently sent shell jobs as build.
+test('! dispatch falls back to the launch --agent default like the prompt branch', async () => {
+  const deps = withVocab(makeDeps())
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), initialAgent: 'reviewer' }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('!npm test')
+  await waitFor(() => lastFrame().includes('!npm test█'))
+  stdin.write('\r')
+  await waitFor(() => deps.client.runShell.mock.calls.length > 0)
+  expect(deps.client.runShell).toHaveBeenCalledWith('s9', 'npm test', '/x/alpha', 'reviewer')
+})
+
 test('typing a filter narrows the list instead of dispatching', async () => {
   const deps = makeDeps()
   deps.roster = {
@@ -2578,6 +2610,23 @@ test('a repository that already has worktrees still isolates, and avoids the tak
   expect(lastFrame()).not.toContain('not isolated')
 })
 
+// M14: the dispatch path (streamProjectRef after createWorktree) and the discovery poll can both
+// hand the same worktree to seedAndStream. Without the in-function guard the second run's
+// conns.set orphaned the first connection's stop(), which then reconnected and double-delivered
+// events until process exit. Here discovery streams the worktree first; the dispatch must reuse it.
+test('a worktree already streamed is not seeded a second time by the dispatch path', async () => {
+  const { deps, wt } = isolatingDeps()
+  const wtConns = () => deps.connectEventsImpl.mock.calls.filter((c: any[]) => c[0].directory === wt).length
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  await waitFor(() => wtConns() === 1) // discovery already opened the worktree's event stream
+  stdin.write('fix the thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => deps.client.promptAsync.mock.calls.length > 0)
+  expect(wtConns()).toBe(1) // one live stream, not a second one with an unreachable stop()
+})
+
 test('isolate=false dispatches into the checkout, no worktree, and says so (#88)', async () => {
   const { deps } = isolatingDeps()
   const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn(), isolate: false }))
@@ -3022,7 +3071,7 @@ test('the header count survives a filter that hides the blocked session', async 
 // Every test here builds an explicit registry — App's default is opencode alone, which is what keeps
 // every test above describing a single-backend roster.
 
-const ALL_CAPS = { fork: true, rename: true, delete: true, questions: true }
+const ALL_CAPS = { fork: true, rename: true, delete: true, questions: true, messages: true }
 
 // A stand-in adapter. `handlers` is captured so a test can push an event the way the real poller
 // would, without a process, a log file or a timer.
@@ -3030,7 +3079,7 @@ function fakeBackend(name: string, capabilities: any = {}, sessions: any[] = [])
   const captured: any = { handlers: null, stop: vi.fn() }
   return {
     name,
-    capabilities: { fork: false, rename: false, delete: false, questions: false, ...capabilities },
+    capabilities: { fork: false, rename: false, delete: false, questions: false, messages: false, ...capabilities },
     captured,
     listSessions: vi.fn(async () => sessions),
     dispatch: vi.fn(async ({ directory }: any) => ({ id: `${name}-9`, directory })),
@@ -3159,7 +3208,7 @@ test('claude sessions discovered in a shown directory join the roster with live 
 })
 
 // The restart path: the only thing saying c1 is claude's is the persisted membership. If that seed
-// skips noteBackend, the store never learns the row's origin and opencode's periodic
+// skips store.noteOrigin, the store never learns the row's origin and opencode's periodic
 // seedStatuses(closeRuns) sweep — which never lists c1 — marks the running row idle.
 test('a claude row restored from the roster survives the opencode status sweep', async () => {
   const deps = makeDeps()
@@ -3213,6 +3262,26 @@ test('an opencode-only roster renders no backend tag at all', async () => {
   )
   await waitFor(() => lastFrame().includes('fix tests'))
   expect(lastFrame().split('\n').find((l) => l.includes('fix tests'))).not.toContain('opencode')
+})
+
+// M13: the peek gate is capabilities.messages, not "is there an adapter" — what it renders for a
+// backend without a wire transcript, and that it never asks the opencode server about a foreign id.
+test('peeking a row whose backend has no message API says so instead of fetching', async () => {
+  const deps = makeDeps()
+  const claude = fakeBackend('claude', {}, [claudeRow('c1', 'claude work')])
+  const { stdin, lastFrame } = render(
+    React.createElement(App, {
+      ...deps,
+      onAction: vi.fn(),
+      backends: { opencode: opencodeStub(), claude },
+      initialBackend: 'claude',
+      roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1, backend: 'claude' }] },
+    }),
+  )
+  await waitFor(() => lastFrame().includes('claude work'))
+  stdin.write(' ') // open peek on the claude row
+  await waitFor(() => lastFrame().includes('no transcript over the wire'))
+  expect(deps.client.listMessages).not.toHaveBeenCalled()
 })
 
 test('^r on a row whose backend cannot rename says so instead of opening the dialog', async () => {

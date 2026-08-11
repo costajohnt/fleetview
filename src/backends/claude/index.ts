@@ -5,14 +5,16 @@
 // verified against claude 2.1.220.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
-import { configDir, childEnv } from '../../registry.ts'
+import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
-import { PID_MATCH_SLACK_MS, psInfo, type PidInfo } from '../ps.ts'
+import { psInfo, sameRun, type PidInfo } from '../ps.ts'
+import { reapRunLogs } from '../run-logs.ts'
+import { assertSessionId } from '../session-id.ts'
 
 // Every flag is a "fleetview can't", stated rather than inherited. `fork` is the one worth naming:
 // `claude --resume --fork-session` does exactly what the flag means, but the Backend contract has no
@@ -22,19 +24,13 @@ const CAPABILITIES = {
   rename: false, // no CLI surface for renaming a stored session (-n only names one at start)
   delete: false, // would mean unlinking a transcript out of ~/.claude/projects, which is Claude Code state
   questions: false, // a headless run can't be answered mid-flight; denials are reported after the fact
+  messages: false, // the transcript is a file in ~/.claude/projects, not a wire API peek can fetch
 } as const
 
 // How long between reads of a run log. There is no stream to block on, so this is the whole of the
 // backend's latency, and it is a local file stat: 500ms costs nothing and keeps a row within half a
 // second of the truth.
 const POLL_MS = 500
-
-// How long a finished run's captured stream is kept. The run dir gains one log and one meta per
-// dispatch and nothing ever removed them, so a heavy user's events() poll ended up doing a readdir
-// over every session they had ever dispatched, twice a second, forever. Thirty days is long enough
-// that the log is still there for anything the roster is plausibly still showing, and the transcript
-// under ~/.claude/projects — which fleetview does not own and does not touch — outlives it anyway.
-const KEEP_RUNS_MS = 30 * 24 * 60 * 60 * 1000
 
 // What fleetview records for a session it dispatched, next to the log. The pid is the only handle
 // abort() has, and the directory is what lets events() find this run's log from a directory alone.
@@ -80,34 +76,10 @@ export function createClaudeBackend({
     }
   }
 
-  // 0o700/0o600 like every other file fleetview writes: the log holds the prompt, the paths and
-  // whatever the session printed, so it must not be world-readable. mode on mkdir/open only applies
-  // when they create — same documented limitation as registry.ts.
-  const ensureRunDir = () => mkdirSync(runDir, { recursive: true, mode: 0o700 })
-
-  // Drop runs whose last activity is older than the retention window. Hung off dispatch rather than
-  // given its own timer: there is no long-lived process here to schedule against, and the run dir
-  // only grows when something is dispatched, so that is exactly when it is worth a look. Best
-  // effort throughout — a run that cannot be removed is not a reason to fail the dispatch.
+  // The pair is keyed off the log (run-logs.ts): a reaped run's meta and cache entry go with it.
   function reap() {
-    let names: string[]
-    try {
-      names = readdirSync(runDir)
-    } catch {
-      return
-    }
-    const cutoff = now() - KEEP_RUNS_MS
-    for (const name of names) {
-      if (!name.endsWith('.jsonl')) continue // pair is keyed off the log; the meta goes with it
-      const id = name.slice(0, -'.jsonl'.length)
-      try {
-        // mtime, not meta.startedAt: a session resumed last week is live work whatever the day its
-        // first prompt was sent, and deleting its log would blank the row it still feeds.
-        if (statSync(logPath(id)).mtimeMs >= cutoff) continue
-      } catch {
-        continue
-      }
-      for (const file of [logPath(id), metaPath(id)]) rmSync(file, { force: true })
+    for (const id of reapRunLogs(runDir, now())) {
+      rmSync(metaPath(id), { force: true })
       metaCache.delete(id)
     }
   }
@@ -116,8 +88,10 @@ export function createClaudeBackend({
   // and no handle kept. `claude` is not a daemon — it runs, writes and exits — so nothing waits on
   // it, and the log is the only record that it happened.
   function run(argv: string[], id: string, directory: string) {
-    ensureRunDir()
-    const fd = openSync(logPath(id), 'a', 0o600)
+    // 0o700/0o600 like every other file fleetview writes: the log holds the prompt, the paths and
+    // whatever the session printed, so it must not be world-readable (openPrivateAppend re-tightens
+    // a pre-existing dir and file, and refuses a symlinked log).
+    const fd = openPrivateAppend(runDir, logPath(id))
     // env without the opencode server password, and without this process's Claude Code session
     // markers: a dispatched agent runs attacker-influenced prompts, and that credential would hand
     // it ungated shell on the server; the markers make the child think it is a nested run of
@@ -329,8 +303,10 @@ export function createClaudeBackend({
     },
 
     // cwd is the caller's job (cli.ts already passes `cwd: target.worktree` to the pty host), and it
-    // has to be the session's directory or --resume won't find the session at all.
-    attach: ({ id }: SessionRef) => ['claude', '--resume', id],
+    // has to be the session's directory or --resume won't find the session at all. The id is
+    // re-asserted here because it becomes argv: discovery already refuses malformed ids, but this is
+    // the last line before a spawn and a thrown name beats a spawned flag (session-id.ts).
+    attach: ({ id }: SessionRef) => ['claude', '--resume', assertSessionId(id)],
 
     // Negative signal, so the whole process group goes: `detached: true` made the child a group
     // leader, and killing the pid alone would leave its tool subprocesses (a running test suite, a
@@ -339,27 +315,12 @@ export function createClaudeBackend({
       const meta = readMeta(id)
       if (!meta?.pid) return { aborted: false }
       // The meta outlives the run by up to KEEP_RUNS_MS, so this pid can be weeks stale and the OS
-      // may have handed it to an unrelated process — which the group signal below would kill. A live
-      // pid is only trusted when it still looks like this run: its argv carries this session's id
-      // (every run is spawned with --session-id or --resume <id>), or failing that it is a claude
-      // (or the node running one) born when the meta says the run started — a recycled pid is off
-      // by hours. A ps that cannot answer ('unavailable') falls through to the signal: unverifiable
-      // is not verified-stale, and refusing would make every abort on such a host a silent no-op.
+      // may have handed it to an unrelated process — which the group signal below would kill. A
+      // live pid is only trusted when it still looks like this run (sameRun in ps.ts).
       // Known trade: the old unconditional kill(-pid) also swept a group whose leader had already
       // exited but whose tool children lived on; the guard gives that up, and such children fall to
       // the run's own teardown instead.
-      const info = psImpl(meta.pid)
-      if (info === null) return { aborted: false } // the run already finished
-      if (info !== 'unavailable') {
-        // The time check is one-sided on purpose: a recycled pid can only have started *after* the
-        // meta was written, and a clock stepped backwards must not strand a live run unabortable.
-        const sameRun =
-          info.command.includes(id) ||
-          ((info.command.includes('claude') || info.command.startsWith('node')) &&
-            Number.isFinite(meta.startedAt) &&
-            info.startedAt - meta.startedAt <= PID_MATCH_SLACK_MS)
-        if (!sameRun) return { aborted: false }
-      }
+      if (!sameRun(psImpl(meta.pid), id)) return { aborted: false }
       try {
         killImpl(-meta.pid, 'SIGTERM')
         return { aborted: true }

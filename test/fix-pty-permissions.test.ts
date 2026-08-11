@@ -53,8 +53,11 @@ test('an unwritable install tree warns instead of failing the install', async ()
   vi.doMock('node:fs', () => ({
     existsSync: () => true,
     readdirSync: () => ['darwin-arm64'],
-    lstatSync: () => ({ isFile: () => true }),
-    chmodSync: () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }) },
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 0 },
+    openSync: () => 7,
+    fstatSync: () => ({ isFile: () => true }),
+    closeSync: () => {},
+    fchmodSync: () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }) },
   }))
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
   // finally, not a trailing splice: an assertion that throws would otherwise leak the fixture root
