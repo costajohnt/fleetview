@@ -3,6 +3,7 @@
 // file reading in index.ts, for the same reason parseSseChunk sits apart from connectEvents: the
 // interesting logic is "what does this run's state look like now", and that has to be testable
 // against a recorded fixture rather than a spawned process.
+import { parseNdjsonChunk } from '../ndjson.ts'
 
 // Only the fields fleetview reads are named. Copilot adds event types between versions, and an
 // exhaustive union would turn every new one into a type error over a line this code ignores anyway.
@@ -15,26 +16,8 @@ export type CopilotEvent = {
   [key: string]: unknown
 }
 
-// JSONL, not SSE: one complete JSON object per line, no blank-line framing. A partial trailing line
-// stays buffered — a chunk boundary lands mid-object often enough that dropping it would lose
-// roughly one event per read on a busy run.
-export function parseJsonlChunk(buffer: string): { events: CopilotEvent[]; rest: string } {
-  const events: CopilotEvent[] = []
-  const lines = buffer.split('\n')
-  const rest = lines.pop() ?? ''
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    try {
-      events.push(JSON.parse(trimmed))
-    } catch {
-      // Not a JSON line. Copilot writes plain-text errors to stderr (`error: cannot change working
-      // directory to …`), and stderr shares the log fd, so this is a real case rather than defensive
-      // padding. The run is still readable; the failure shows up as a missing `result`.
-    }
-  }
-  return { events, rest }
-}
+// The shared NDJSON line loop (ndjson.ts) under the name this backend's consumers know it by.
+export const parseJsonlChunk = (buffer: string) => parseNdjsonChunk<CopilotEvent>(buffer)
 
 // `working` until the run says otherwise. There is no `needs input` here: a headless copilot run
 // cannot ask — a tool it lacks permission for fails with `code: "denied"` and the model carries on
