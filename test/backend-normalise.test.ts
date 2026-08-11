@@ -1,9 +1,22 @@
 import { test, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createNormaliser, normaliseSessions } from '../src/backend-normalise.ts'
 import { createStore } from '../src/session-store.ts'
 import { BACKEND_NAMES, DEFAULT_BACKEND, defaultBackendName, isBackendName } from '../src/backends/index.ts'
+import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
+import { createClaudeBackend } from '../src/backends/claude/index.ts'
+import { createCopilotBackend } from '../src/backends/copilot/index.ts'
+
+// The normalisers live on each adapter now (Backend contract, #83), so the fixtures reach them the
+// way the roster does: through the adapter. Neither the server nor the client is ever touched by a
+// normaliser, so stubs are enough to build opencode's.
+const adapters: Record<string, any> = {
+  opencode: createOpencodeBackend({ server: { host: '127.0.0.1', port: 0 } as any, client: {} as any }),
+  claude: createClaudeBackend(),
+  copilot: createCopilotBackend(),
+}
+const createNormaliser = (backend: string) => adapters[backend].createNormaliser()
+const normaliseSessions = (backend: string, rows: any[] | null | undefined) => adapters[backend].normaliseSessions(rows)
 
 const fixture = (name: string) =>
   readFileSync(join(import.meta.dirname, 'fixtures', name), 'utf8')

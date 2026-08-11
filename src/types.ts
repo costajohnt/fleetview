@@ -205,4 +205,12 @@ export type Backend = {
   abort(id: string, directory: string): Promise<any>
   rename(id: string, title: string, directory: string): Promise<any>
   delete(id: string, directory: string): Promise<any>
+  // Normalisation is part of the contract (H3), not a string-keyed chain beside it: each adapter
+  // states how its listings and events become the store's vocabulary (backend-normalise.ts is the
+  // vocabulary's home and documents the rules). opencode's are identity — its payloads ARE the
+  // vocabulary — and a new backend cannot silently pass its wire format through unnormalised.
+  normaliseSessions(rows: any[] | null | undefined): any[]
+  // A fresh normaliser per events() subscription: it folds per-session state across events, and two
+  // directories' runs must never share that fold.
+  createNormaliser(): (event: unknown) => OpencodeEvent[]
 }

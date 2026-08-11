@@ -2,7 +2,7 @@
 // from fleetview's backend contract onto OpencodeClient, connectEvents and `opencode attach` argv,
 // and nothing more. Anything opencode can do that the contract doesn't name is still reached through
 // OpencodeClient directly.
-import type { Backend, ServerRef } from '../../types.ts'
+import type { Backend, OpencodeEvent, ServerRef } from '../../types.ts'
 import { OpencodeClient } from './client.ts'
 import { connectEvents } from './event-mux.ts'
 import { assertSessionId } from '../session-id.ts'
@@ -63,5 +63,10 @@ export function createOpencodeBackend({
     abort: (id, directory) => client.abortSession(id, directory),
     rename: (id, title, directory) => client.renameSession(id, title, directory),
     delete: (id, directory) => client.deleteSession(id, directory),
+    // Identity, both of them: opencode's payloads are already the store's vocabulary — they ARE the
+    // vocabulary (backend-normalise.ts) — which is what keeps the opencode path free of any
+    // normalisation cost or behaviour change at all.
+    normaliseSessions: (rows) => rows ?? [],
+    createNormaliser: () => (event) => [event as OpencodeEvent],
   }
 }

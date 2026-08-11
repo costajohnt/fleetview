@@ -578,3 +578,30 @@ test('a pre-existing capture is re-tightened to 0600 on the next run', async () 
   expect(statSync(log).mode & 0o777).toBe(0o600)
   expect(statSync(logDir).mode & 0o777).toBe(0o700)
 })
+
+// The tails map gains an entry per session ever seen, and copilot deleting a session's state dir is
+// the only thing that removes its files — so without pruning a long-lived subscription pins a folded
+// RunState, a decoder and a partial-line string per session forever. The proof pruning happened is
+// behavioral: the transcript keeps its inode across the rename, so no reset fires, and only a
+// dropped tail (fresh fold, fresh emitted-signature) explains the event re-emitting unchanged.
+test('a tail whose session vanished is pruned, so a returning session re-folds and re-emits from scratch', async () => {
+  const { backend, stateDir } = harness()
+  const dir = writeSession(stateDir, 'wanderer', '/repo/alpha', { pid: 12, events: SAID('halfway there') })
+  const onEvent = vi.fn()
+  const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
+  try {
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    // Hide the workspace.yaml, as deletion of the session would: a dir without one is skipped as
+    // mid-creation, so the session drops out of visible() and its tail must be dropped with it.
+    // events.jsonl itself never moves, so its inode and size are unchanged throughout — a surviving
+    // tail would see no reset, no new bytes, an unchanged emitted-signature, and never emit again.
+    renameSync(join(dir, 'workspace.yaml'), join(dir, 'workspace.yaml.hidden'))
+    await new Promise((r) => setTimeout(r, 50)) // several ticks with the session invisible
+    renameSync(join(dir, 'workspace.yaml.hidden'), join(dir, 'workspace.yaml'))
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    expect(onEvent.mock.calls[1][1]).toMatchObject({ sessionId: 'wanderer', status: 'working', lastOutput: 'halfway there' })
+  } finally {
+    sub.stop()
+    await sub.done
+  }
+})
