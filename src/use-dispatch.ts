@@ -37,6 +37,11 @@ export function useDispatch({
   setOfflineProjects,
   streamProjectRef,
   activateBackendRef,
+  // Post-dispatch auto-select: the selection lands on the row the dispatch just created, so the
+  // next Enter attaches to it. By identity (the ref), not a key — the row may render a poll
+  // later, and App's identity re-resolution keeps looking every render until it appears.
+  selectedSessionRef,
+  setSelectedKey,
   dirExistsImpl = existsSync,
 }: {
   client: any
@@ -60,8 +65,15 @@ export function useDispatch({
   setOfflineProjects: (updater: (s: Set<string>) => Set<string>) => void
   streamProjectRef: { current: any }
   activateBackendRef: { current: ((name: string) => Promise<void>) | null }
+  selectedSessionRef: { current: { projectKey: string; id: string } | null }
+  setSelectedKey: (key: string | null) => void
   dirExistsImpl?: (dir: string) => boolean
 }) {
+  // Same session identity (or both empty). Guards the post-dispatch auto-select: only fires when
+  // the selection is still what it was when the dispatch left, so an arrow-key move made while the
+  // network call was in flight is not clobbered.
+  const sameSelection = (a: { projectKey: string; id: string } | null, b: { projectKey: string; id: string } | null) =>
+    a?.id === b?.id && a?.projectKey === b?.projectKey
   // The post-dispatch tail both dispatch paths share (H2): the immediate relist that makes the new
   // row reflect the backend's own record now rather than on the next poll, and the offline-list
   // cleanup a successful dispatch has just proven right.
@@ -93,6 +105,9 @@ export function useDispatch({
     const typed = input
     let dispatched = false
     setInput('')
+    // Snapshot what was selected when the dispatch left: the auto-select below must not clobber an
+    // arrow-key move the user made while the network call was in flight.
+    const selAtDispatch = selectedSessionRef.current
     try {
       // Streaming starts before the dispatch, not after: the run can finish inside the poll interval
       // and a subscription attached afterwards would miss the whole of it.
@@ -125,7 +140,15 @@ export function useDispatch({
       // No worktree isolation: creating one is opencode's `/experimental/worktree`, and there is no
       // equivalent to ask claude or copilot for. Said out loud in the notice rather than left for the
       // user to discover from a dirty checkout.
-      else flash(`dispatched into ${basename(target) || target} on ${name} — it edits the checkout`, 5000)
+      else {
+        // Land the selection on the row this dispatch just created, so Enter attaches to it —
+        // unless the selection moved during the awaits above: the user's own navigation wins.
+        if (sameSelection(selectedSessionRef.current, selAtDispatch)) {
+          selectedSessionRef.current = { projectKey: target, id: ref.id }
+          setSelectedKey(null)
+        }
+        flash(`dispatched into ${basename(target) || target} on ${name} — it edits the checkout`, 5000)
+      }
     } catch {
       if (dispatched) return flash('session started, but the project list is stale')
       setInput((current) => (current === '' ? typed : current))
@@ -154,6 +177,9 @@ export function useDispatch({
     const typed = input // put it back if the dispatch fails; retyping a lost prompt is miserable
     let dispatched = false
     setInput('')
+    // Snapshot for the auto-select below — an arrow-key move made while this dispatch is in
+    // flight must win over it.
+    const selAtDispatch = selectedSessionRef.current
     // Where the session will actually run. Isolation happens before the session exists, so there is
     // no window in which it could edit the shared working copy: agent view moves a background
     // session into its own worktree "before editing files", and this is fleetview's version of that.
@@ -208,6 +234,14 @@ export function useDispatch({
       // Say where it went. An `@name` that matches no repository stays in the prompt and the
       // dispatch falls back to another project, which is otherwise invisible until you notice the
       // row is in the wrong place.
+      // Select the row this dispatch just created — the next Enter attaches to it instead of
+      // whatever happened to be under the cursor. By identity, not pendingSelect: the row may not
+      // render for another poll, and pendingSelect drops a request it can't resolve. Skipped when
+      // the selection moved during the awaits above: the user's own navigation wins.
+      if (!thenAttach && sameSelection(selectedSessionRef.current, selAtDispatch)) {
+        selectedSessionRef.current = { projectKey: worktree, id: session.id }
+        setSelectedKey(null)
+      }
       if (thenAttach) attach({ id: session.id, projectKey: worktree })
       // Names the repository: the worktree path is a hashed cache directory that means nothing to
       // the user, and the repository is what they actually chose. When isolation was expected and

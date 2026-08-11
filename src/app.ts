@@ -957,6 +957,10 @@ export function App({
     streamProjectRef,
     activateBackendRef,
     dirExistsImpl,
+    // Post-dispatch auto-select: the hook lands the selection on the row it just created (so
+    // Enter attaches to it), by identity because the row may render a poll later.
+    selectedSessionRef,
+    setSelectedKey,
   })
 
   // Routes whatever is in the input. Everything except `dispatch` and `shell` either changes the
