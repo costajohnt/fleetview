@@ -29,7 +29,7 @@ import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, isB
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
-import { loadRoster, saveRoster, makePersistRoster, defaultRosterFile, hasSession } from './roster-store.ts'
+import { loadRoster, saveRoster, makePersistRoster, defaultRosterFile } from './roster-store.ts'
 import { attachPty } from './pty-host.ts'
 import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
 import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories } from './worktree.ts'
