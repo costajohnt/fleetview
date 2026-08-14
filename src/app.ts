@@ -537,7 +537,10 @@ export function App({
   // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the joined worktrees, not the array identity
   // repoProjects, not projects: completing `@` to a worktree would dispatch into another session's
   // isolated copy, which is the one thing isolation exists to prevent.
-  const repos = useMemo<{ name: string; worktree: string }[]>(() => repoChoices({ cwd, projects: repoProjects }), [cwd, projectKeys])
+  const repos = useMemo<{ name: string; worktree: string }[]>(
+    () => repoChoices({ cwd, projects: repoProjects, dirExists: dirExistsImpl }),
+    [cwd, projectKeys], // eslint-disable-line react-hooks/exhaustive-deps -- dirExistsImpl is a stable dep
+  )
   const vocab = {
     agents: agents.map((a) => a.name),
     repos: repos.map((r) => r.name),

@@ -52,6 +52,7 @@ test('every worktree gone yields null rather than a target that can never dispat
 const fakeFs = {
   readDir: (dir: string) => ({ '/home': ['fleetview', 'notes', 'my project'] } as Record<string, string[]>)[dir] ?? [],
   isRepo: (p: string) => p !== '/home/notes', // notes is a plain directory, not a repo
+  dirExists: () => true, // these paths are fixtures, not real directories
 }
 
 test('repoChoices lists projects with sessions plus git repos one level below cwd', () => {
@@ -63,6 +64,27 @@ test('repoChoices skips non-repos and names containing a space', () => {
   const names = repoChoices({ cwd: '/home', projects: [], ...fakeFs }).map((c) => c.name)
   expect(names).not.toContain('notes') // not a git repo
   expect(names).not.toContain('my project') // agent view skips these too
+})
+
+test('a project whose worktree was deleted is not offered as an @repo target (#102)', () => {
+  const names = repoChoices({
+    cwd: '/home',
+    projects: [{ worktree: '/elsewhere/sandbox' }],
+    ...fakeFs,
+    dirExists: (d) => d !== '/elsewhere/sandbox',
+  }).map((c) => c.name)
+  expect(names).not.toContain('sandbox')
+  expect(names).toContain('fleetview') // the cwd scan is unaffected
+})
+
+test('a deleted project does not shadow a live same-named directory below cwd', () => {
+  const choices = repoChoices({
+    cwd: '/home',
+    projects: [{ worktree: '/elsewhere/fleetview' }],
+    ...fakeFs,
+    dirExists: (d) => d !== '/elsewhere/fleetview',
+  })
+  expect(choices.filter((c) => c.name === 'fleetview')).toEqual([{ name: 'fleetview', worktree: '/home/fleetview' }])
 })
 
 test('a project already in the list wins over a same-named directory below cwd', () => {
