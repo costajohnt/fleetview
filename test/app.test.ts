@@ -829,7 +829,7 @@ test('a deleted session worktree never becomes a browse group or an @repo comple
   expect(lastFrame()).not.toContain('sleepy') // and not offered as a dispatch target
 })
 
-test('dispatch into a directory that no longer exists is refused and keeps the prompt (#22)', async () => {
+test('dispatch is refused and keeps the prompt when every project directory is gone (#22, #102)', async () => {
   const deps = makeDeps()
   deps.dirExistsImpl = () => false
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
@@ -837,7 +837,8 @@ test('dispatch into a directory that no longer exists is refused and keeps the p
   stdin.write('say hi')
   await waitFor(() => lastFrame().includes('say hi'))
   stdin.write('\r')
-  await waitFor(() => lastFrame().includes('no longer exists'))
+  // pickTarget skipped every stale project, so the message names the situation, not a dead path
+  await waitFor(() => lastFrame().includes('no valid projects available'))
   expect(deps.client.createSession).not.toHaveBeenCalled()
   expect(lastFrame()).toContain('say hi') // the prompt is still there to retarget
 })
