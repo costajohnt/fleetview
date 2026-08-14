@@ -2,26 +2,49 @@ import { test, expect } from 'vitest'
 import { pickTarget, repoChoices } from '../src/dispatch-target.ts'
 
 const projects = [{ worktree: '/x/beta' }, { worktree: '/x/alpha' }] // sorted newest-updated first
+const dirExists = () => true // these paths are fixtures, not real directories
 
 test('launch cwd wins when opencode already knows it as a project', () => {
-  expect(pickTarget({ cwd: '/x/alpha', projects, current: { projectKey: '/x/beta' } })).toBe('/x/alpha')
+  expect(pickTarget({ cwd: '/x/alpha', projects, current: { projectKey: '/x/beta' }, dirExists })).toBe('/x/alpha')
 })
 
 test('an unknown cwd falls back to the selected row rather than dispatching somewhere invisible', () => {
-  expect(pickTarget({ cwd: '/somewhere/else', projects, current: { projectKey: '/x/beta' } })).toBe('/x/beta')
+  expect(pickTarget({ cwd: '/somewhere/else', projects, current: { projectKey: '/x/beta' }, dirExists })).toBe('/x/beta')
 })
 
 test('project grouping targets the highlighted row even when cwd is a known project', () => {
-  const target = pickTarget({ cwd: '/x/alpha', projects, current: { projectKey: '/x/beta' }, groupBy: 'project' })
+  const target = pickTarget({ cwd: '/x/alpha', projects, current: { projectKey: '/x/beta' }, groupBy: 'project', dirExists })
   expect(target).toBe('/x/beta')
 })
 
 test('with no cwd match and no selection, the most recently updated project wins', () => {
-  expect(pickTarget({ cwd: '/somewhere/else', projects })).toBe('/x/beta')
+  expect(pickTarget({ cwd: '/somewhere/else', projects, dirExists })).toBe('/x/beta')
 })
 
 test('no projects at all yields null so the caller can say so instead of dispatching nowhere', () => {
-  expect(pickTarget({ cwd: '/x/alpha', projects: [] })).toBe(null)
+  expect(pickTarget({ cwd: '/x/alpha', projects: [], dirExists })).toBe(null)
+})
+
+// --- stale worktrees (#102) ---
+
+test('a project whose worktree was deleted is skipped for the next one', () => {
+  const target = pickTarget({ cwd: '/somewhere/else', projects, dirExists: (d) => d === '/x/alpha' })
+  expect(target).toBe('/x/alpha')
+})
+
+test('a deleted selection and cwd both fall through to a project that still exists', () => {
+  const target = pickTarget({
+    cwd: '/x/beta',
+    projects,
+    current: { projectKey: '/x/beta' },
+    groupBy: 'project',
+    dirExists: (d) => d === '/x/alpha',
+  })
+  expect(target).toBe('/x/alpha')
+})
+
+test('every worktree gone yields null rather than a target that can never dispatch', () => {
+  expect(pickTarget({ cwd: '/x/alpha', projects, current: { projectKey: '/x/beta' }, dirExists: () => false })).toBe(null)
 })
 
 // --- @repo completion targets ---

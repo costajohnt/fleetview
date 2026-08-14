@@ -971,7 +971,13 @@ export function App({
     // can never land in someone else's worktree.
     return (
       named ??
-      pickTarget({ cwd, projects: repoProjects, current: current && { ...current, projectKey: repoOf(current.projectKey) }, groupBy: rosterState.groupBy })
+      pickTarget({
+        cwd,
+        projects: repoProjects,
+        current: current && { ...current, projectKey: repoOf(current.projectKey) },
+        groupBy: rosterState.groupBy,
+        dirExists: dirExistsImpl,
+      }) ?? undefined
     )
   }
 

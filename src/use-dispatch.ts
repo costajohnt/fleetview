@@ -108,7 +108,7 @@ export function useDispatch({
     if (shell) return flash(`! shell jobs run on opencode — ${name} has no shell surface`, 4000)
     const text = expandPastes(rawText)
     const target = dispatchTarget(repo)
-    if (!target) return flash('no projects discovered yet')
+    if (!target) return flash(projects.length ? 'no valid projects available' : 'no projects discovered yet')
     if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
     const typed = input
     let dispatched = false
@@ -176,7 +176,9 @@ export function useDispatch({
     // Coalesce to undefined (not null) when neither is set — createSession omits the field entirely.
     const effectiveAgent = agent ?? initialAgent ?? undefined
     const target = dispatchTarget(repo)
-    if (!target) return flash('no opencode projects discovered yet')
+    // pickTarget already skipped every project whose worktree is gone (#102), so an empty target with
+    // projects on the roster means all of them are stale — say that instead of naming a dead path.
+    if (!target) return flash(projects.length ? 'no valid projects available' : 'no opencode projects discovered yet')
     // A target can outlive the directory (#22): a project record survives the listing that dropped
     // it, so a deleted session's worktree is still nameable, and dispatching into one is accepted
     // silently — the server creates a session against a path that is gone. Refuse before anything is

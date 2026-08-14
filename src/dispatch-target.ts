@@ -55,20 +55,29 @@ function safeReadDir(dir: string) {
 
 const safeIsRepo = (path: string) => existsSync(join(path, '.git'))
 
+// Candidates are tried in preference order and the first one that still exists on disk wins (#102).
+// A project record outlives the directory — a temp worktree the OS cleaned up is still listed by the
+// server — and without the skip the stale entry is chosen forever, so dispatch is permanently stuck
+// behind "<name> no longer exists" with no way to recover in the UI.
 export function pickTarget({
   cwd,
   projects = [],
   current,
   groupBy,
+  dirExists = existsSync,
 }: {
   cwd?: string
   projects?: Project[]
   current?: { projectKey?: string }
   groupBy?: string
+  dirExists?: (dir: string) => boolean
 }) {
   const known = new Set(projects.map((p) => p.worktree))
-  if (groupBy === 'project' && current?.projectKey) return current.projectKey
-  if (cwd && known.has(cwd)) return cwd
-  if (current?.projectKey) return current.projectKey
-  return projects[0]?.worktree ?? null // projects arrive sorted newest-updated first
+  const candidates = [
+    groupBy === 'project' ? current?.projectKey : undefined,
+    cwd && known.has(cwd) ? cwd : undefined,
+    current?.projectKey,
+    ...projects.map((p) => p.worktree), // projects arrive sorted newest-updated first
+  ]
+  return candidates.find((c): c is string => Boolean(c) && dirExists(c!)) ?? null
 }
