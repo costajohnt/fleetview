@@ -12,7 +12,8 @@ Three lines of header: `fleetview` and its version, the dispatch model (`provide
 on a narrow terminal.
 
 A row is a state glyph, the session's name, what it's doing, and its age. No directory: sessions
-group by state (`pinned`, `needs input`, `working`, `completed`, `idle`) and the header carries
+group by state (`pinned`, `needs input`, `working`, `completed` — an idle session that has
+never run folds into `completed`) and the header carries
 what the row doesn't. `^s` switches to project grouping, which moves the state onto the row as a
 coloured word.
 
@@ -99,6 +100,9 @@ A backend other than opencode is streamed only once something has asked for it: 
 `FLEETVIEW_BACKEND`, or a row from a previous run. Without that, fleetview reads nothing outside
 opencode and the roster is exactly what it always was. When a second backend does have sessions,
 every row grows a dim backend name after its title.
+
+Only the roster TUI spans every backend. The shell commands (`ls`, `--json`, `attach`, `logs`,
+`stop`, `rm`, `bg`) talk to the opencode server directly and so act on opencode sessions only.
 
 ![A roster with opencode, claude, and copilot sessions, each row carrying its dim backend name](images/backends.png)
 

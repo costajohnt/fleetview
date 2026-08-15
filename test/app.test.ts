@@ -438,6 +438,21 @@ test('r renames selected session', async () => {
   expect(deps.client.renameSession).toHaveBeenCalledWith('s1', 'fix tests v2', '/x/alpha')
 })
 
+// #112.3: a paste into the rename input must have C0 bytes / escape residue stripped, the same as
+// the dispatch input, so they don't land verbatim in the title sent to the server.
+test('#112.3: rename input strips control bytes and escape residue from a paste', async () => {
+  const deps = makeDeps()
+  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await tick()
+  stdin.write('\x12')
+  await tick()
+  stdin.write(' v2\x00\x07\x1f') // NUL, BEL, and a C0 unit-separator byte from a paste
+  await tick()
+  stdin.write('\r')
+  await tick()
+  expect(deps.client.renameSession).toHaveBeenCalledWith('s1', 'fix tests v2', '/x/alpha')
+})
+
 // M3: backspace must remove a whole grapheme, not just the last UTF-16 code unit — a raw
 // slice(0, -1) after a surrogate-pair emoji leaves a lone (unpaired) surrogate behind.
 test('M3: backspace in the rename input after an emoji removes the whole emoji, not half of it', async () => {
@@ -2930,6 +2945,25 @@ test('a finished shell job cleans itself up after the TTL; a fresh one stays', a
   // Still running is never cleaned regardless of age.
   sessionsById.set('/x/a:job-old', { status: 'running', updatedAt: now - SHELL_JOB_TTL_MS * 10 })
   expect(expiredShellJobs(roster, sessionsById, now)).toEqual([])
+})
+
+test('#112.2: a finished shell job whose store row has updatedAt=0 falls back to addedAt, not insta-reaped', async () => {
+  const { expiredShellJobs, SHELL_JOB_TTL_MS } = await import('../src/app.ts')
+  const now = 1_000_000_000
+  const roster = {
+    groupBy: 'state',
+    sessions: [
+      { worktree: '/x/a', id: 'fresh-no-time', addedAt: now - 1000, shell: true },
+      { worktree: '/x/a', id: 'old-no-time', addedAt: now - SHELL_JOB_TTL_MS - 1, shell: true },
+    ],
+  }
+  // updatedAt=0 is what a listing that returned no server time defaults to (session-store.ts).
+  const sessionsById = new Map([
+    ['/x/a:fresh-no-time', { status: 'idle', updatedAt: 0 }],
+    ['/x/a:old-no-time', { status: 'idle', updatedAt: 0 }],
+  ])
+  // Fresh job survives (the real 5-minute window runs from addedAt); a genuinely old one still ages out.
+  expect(expiredShellJobs(roster, sessionsById, now).map((m: any) => m.id)).toEqual(['old-no-time'])
 })
 
 test('/fork copies the selected session and sends the argument as the fork prompt', async () => {

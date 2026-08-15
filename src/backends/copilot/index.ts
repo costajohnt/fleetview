@@ -151,7 +151,7 @@ export function createCopilotBackend({
     // `--resume=<id> -p …` continues the same session (it recalled the previous turn) and appends to
     // the same on-disk transcript rather than starting a new one.
     async prompt(id, text, directory) {
-      return { id, pid: run(id, [`--resume=${id}`], text, directory, []) }
+      return { id, pid: run(id, [`--resume=${assertSessionId(id)}`], text, directory, []) }
     },
 
     // Polling wearing a subscription's clothes: there is no stream to subscribe to. The

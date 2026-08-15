@@ -384,6 +384,14 @@ export async function runBg(
   // directory (or --cwd), joins the roster so the next `fleetview` shows it, and prints the id.
   // No worktree isolation from here: that is the interactive dispatch path's business; a shell
   // dispatch runs where you pointed it, like the `!` form.
+  // #108: `bg` dispatches on opencode only — there is no multi-backend bg dispatch yet, and the
+  // parser accepts `--backend` for every command. Reject it loudly rather than silently running the
+  // prompt on opencode regardless, the way the roster path rejects a bad `--backend`.
+  if (args.backend !== undefined && args.backend !== DEFAULT_BACKEND) {
+    error(`bg dispatches on opencode only — --backend ${args.backend} is not supported here`)
+    setExitCode(1)
+    return
+  }
   const r = await ensureServer(loadServerImpl(serverFile) ?? DEFAULT_SERVER)
   if (!r.ok) {
     error(r.reason ?? 'opencode server unreachable')
@@ -573,7 +581,7 @@ async function withSession(id: string, ensureServer: EnsureServer, serverFile: s
 // test without a server — the seeding rounds below are where `ls` decides a session's state, and
 // asserting on the printed rows is the only way to know they all ran.
 export async function listSessions(
-  { all, json, cwd }: ParsedArgs,
+  { all, json, cwd: rawCwd }: ParsedArgs,
   ensureServer: EnsureServer,
   serverFile: string,
   {
@@ -595,6 +603,10 @@ export async function listSessions(
     setExitCode(1)
     return
   }
+  // #107: resolve `--cwd` the same way the roster (resolve at cli.ts) and `bg` (realpathSync) do,
+  // so `ls`/`--json` scope against the absolute project paths the roster stores rather than a raw
+  // relative string that matches nothing. Resolved once, here, rather than at each underCwd call.
+  const cwd = rawCwd === undefined ? undefined : resolve(rawCwd)
   const client = createClient(`http://${r.server.host}:${r.server.port}`)
   const projects = allProjectDirectories(await client.listProjects())
   const parents = sandboxParents(projects)
@@ -732,6 +744,16 @@ export async function main() {
     const found = await withSession(args.id!, ensureServerForCommands, serverFile)
     if (!found) return
     await found.client.deleteSession(found.session.id, found.worktree)
+    // #105: the session is gone server-side, but the roster still lists it — the next TUI shows a
+    // ghost completed row for a session that no longer exists. Drop the member (matched by the same
+    // worktree+id key the store uses) from roster.json. A missing/corrupt roster is nothing to
+    // prune, so failures here are swallowed — the delete already succeeded.
+    try {
+      const rosterFile = defaultRosterFile()
+      const roster = loadRoster(rosterFile)
+      const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.session.id))
+      if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
+    } catch {}
     // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
     // commits that exist nowhere else, which is the case that actually loses work. Reported either
     // way, because a worktree left behind is something the user should know about.

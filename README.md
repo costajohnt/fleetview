@@ -52,7 +52,9 @@ what they can't do, the roster says so instead of pretending. ([full table](docs
 
 **Scriptable.** `fleetview bg "<prompt>"` dispatches from any terminal, `fleetview --json`
 reports states in the same words as `claude agents --json`, so scripts written against agent
-view read fleetview too. ([CLI reference](docs/reference.md#from-the-shell))
+view read fleetview too. The shell commands (`ls`, `--json`, `attach`, `logs`, `stop`, `rm`,
+`bg`) act on opencode sessions only; the roster TUI is the view that spans every backend.
+([CLI reference](docs/reference.md#from-the-shell))
 
 **Locked down by default.** The opencode server fleetview spawns exposes shell execution, so
 fleetview password-protects it with HTTP basic auth automatically. ([how](docs/reference.md#the-server-fleetview-spawns-is-password-protected))

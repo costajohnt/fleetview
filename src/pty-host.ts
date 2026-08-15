@@ -76,12 +76,14 @@ function installHandlers() {
   }
   process.on('exit', restoreAll)
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(signal, () => {
+    const handler = () => {
       restoreAll()
       // Re-raise with the default disposition so the exit code and any parent's wait() are honest.
-      process.removeAllListeners(signal)
+      // Remove only our own handler, not every subsystem's listener for this signal.
+      process.removeListener(signal, handler)
       process.kill(process.pid, signal)
-    })
+    }
+    process.on(signal, handler)
   }
 }
 // Alt+1..9, as agent view's Alt+1..9 quick-switch. Terminals send these as ESC followed by the
