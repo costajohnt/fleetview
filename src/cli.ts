@@ -679,6 +679,10 @@ export async function main() {
     process.exitCode = 1
     return
   }
+  // #107: resolve --cwd once here, right after parsing, so every downstream consumer
+  // (listSessions, rosterLoop, runBg) sees the same absolute path — a relative arg like
+  // `--cwd ../sibling` was matching nothing because the roster stores absolute paths.
+  if (args.cwd !== undefined) args.cwd = resolve(args.cwd)
   const serverFile = defaultServerFile()
   const ensureServerForCommands = makeEnsureServer({ isServerHealthy, isAuthEnforced, probeServer, spawnServer, saveServer, serverFile })
 
