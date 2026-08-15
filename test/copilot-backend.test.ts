@@ -565,6 +565,13 @@ test('attach refuses a session id with flag syntax or control bytes', () => {
   expect(() => backend.attach({ id: `ok${String.fromCharCode(27)}[2Jbad`, directory: '/repo/alpha' })).toThrow(/malformed session id/)
 })
 
+// prompt() spawns `copilot --resume=<id> …`; defense-in-depth, the id is asserted before the spawn.
+test('prompt refuses a session id with flag syntax', async () => {
+  const { backend, spawnImpl } = harness()
+  await expect(backend.prompt('--banner', 'go', '/repo/alpha')).rejects.toThrow(/malformed session id/)
+  expect(spawnImpl).not.toHaveBeenCalled()
+})
+
 // mode on open only applies when it creates, so a pre-existing capture kept its perms while
 // receiving prompts and repo paths — every open re-tightens the file and its dir now.
 test('a pre-existing capture is re-tightened to 0600 on the next run', async () => {

@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWrite } from './paths.ts'
 import { configDir } from './registry.ts'
@@ -77,6 +77,44 @@ export type PersistRoster = ((snap: Roster) => void) & {
   reload: () => Roster | null
 }
 
+// #106: makePersistRoster's read-merge-write is not atomic — two processes (a TUI and a
+// `fleetview bg`) that both loadRoster before either saves each write back a merge missing the
+// other's append, so one is lost. An exclusive lockfile serialises the read-merge-write across
+// processes: whoever creates `${file}.lock` (open 'wx' — fails if it exists) holds it for one
+// persist. A lock older than STALE_LOCK_MS is a crashed holder's leftover and is broken.
+// ponytail: busy-wait spin, since persist is fully synchronous anyway; best-effort — if locking
+// can't be had (foreign error, or the spin times out) the write falls through unlocked rather than
+// throwing, keeping the pre-#106 behaviour as the floor.
+const STALE_LOCK_MS = 5000
+function withRosterLock<T>(file: string, fn: () => T): T {
+  const lock = `${file}.lock`
+  let fd: number | null = null
+  for (let i = 0; i < 100; i++) {
+    try {
+      fd = openSync(lock, 'wx')
+      break
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') break // undirectory/permission — give up, write unlocked
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS) {
+          unlinkSync(lock) // crashed holder — break it and retry immediately
+          continue
+        }
+      } catch {} // lock vanished between open and stat — retry
+      const until = Date.now() + 10 // brief spin before the next attempt
+      while (Date.now() < until) {}
+    }
+  }
+  try {
+    return fn()
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd) } catch {}
+      try { unlinkSync(lock) } catch {}
+    }
+  }
+}
+
 export function makePersistRoster({ roster, file }: { roster: Roster; file: string }): PersistRoster {
   let prev = roster
   const stamp = () => {
@@ -88,7 +126,7 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
     }
   }
   let lastStamp = stamp()
-  const persist = (snap: Roster) => {
+  const persist = (snap: Roster) => withRosterLock(file, () => {
     let disk: Roster
     try {
       disk = loadRoster(file)
@@ -121,7 +159,7 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
     // would merge the row back from disk — resurrecting what the user deleted.
     prev = snap
     lastStamp = stamp()
-  }
+  })
   persist.reload = () => {
     const now = stamp()
     if (now === lastStamp) return null

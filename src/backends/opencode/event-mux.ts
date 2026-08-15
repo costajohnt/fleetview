@@ -3,10 +3,11 @@ import type { OpencodeEvent } from '../../types.ts'
 
 export function parseSseChunk(buffer: string): { events: unknown[]; rest: string } {
   const events: unknown[] = []
-  const blocks = buffer.split('\n\n')
+  // SSE permits CRLF line endings, not just LF — a CRLF/proxied server would otherwise never frame.
+  const blocks = buffer.split(/\r?\n\r?\n/)
   const rest = blocks.pop() ?? '' // partial block stays buffered
   for (const block of blocks) {
-    for (const line of block.split('\n')) {
+    for (const line of block.split(/\r?\n/)) {
       if (!line.startsWith('data:')) continue
       try {
         events.push(JSON.parse(line.slice(5).trim()))

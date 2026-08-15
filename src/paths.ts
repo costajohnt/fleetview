@@ -1,6 +1,6 @@
 // The on-disk mechanics every state store shares (registry, roster-store, seen-store). Extracted
 // verbatim from the three copies each carried — a fix to how fleetview writes a file must land once.
-import { writeFileSync, mkdirSync, chmodSync, renameSync, existsSync } from 'node:fs'
+import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, chmodSync, renameSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 // Prefer the fleetview dir under `parent`, but keep reading an existing pre-rename roost one until
@@ -27,6 +27,15 @@ export function atomicWrite(file: string, data: string) {
     chmodSync(dirname(file), 0o700)
   } catch {}
   const tmp = `${file}.${process.pid}.tmp`
-  writeFileSync(tmp, data, { mode: 0o600 })
+  // fsync the tmp file's data before the rename, so a crash can't leave a truncated roster.json that
+  // loadRoster then throws on. writeFileSync alone returns once the data is in the page cache, not on
+  // disk. mode 0o600 for the same perms-on-every-write reason as the rename below.
+  const fd = openSync(tmp, 'w', 0o600)
+  try {
+    writeSync(fd, data)
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
   renameSync(tmp, file)
 }

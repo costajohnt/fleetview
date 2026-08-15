@@ -156,6 +156,21 @@ test('the help names the backend flag and its default', () => {
   expect(USAGE).toContain('$FLEETVIEW_BACKEND')
 })
 
+// #112.1: a flag a command ignores used to parse clean and silently vanish (`fleetview ls --exec`).
+test('#112.1: a flag the command ignores is an error, not silently dropped', () => {
+  expect(parseArgs(['ls', '--exec'])).toEqual({ error: '--exec is not valid for ls' })
+  expect(parseArgs(['ls', '--model', 'a/b'])).toEqual({ error: '--model is not valid for ls' })
+  expect(parseArgs(['attach', 'ses_1', '--name', 'x'])).toEqual({ error: '--name is not valid for attach' })
+  expect(parseArgs(['bg', 'ship', '--backend', 'claude'])).toEqual({ error: '--backend is not valid for bg' })
+  expect(parseArgs(['--json', '--exec'])).toEqual({ error: '--exec is not valid for ls' })
+})
+
+test('#112.1: valid flag/command combos still parse', () => {
+  expect(parseArgs(['bg', 'ship', '--exec'])).toMatchObject({ command: 'bg', exec: true })
+  expect(parseArgs(['bg', 'ship', '--name', 'x', '--agent', 'plan', '--model', 'a/b'])).toMatchObject({ command: 'bg' })
+  expect(parseArgs(['--model', 'a/b', '--agent', 'plan', '--backend', 'claude'])).toMatchObject({ command: 'ui', backend: 'claude' })
+})
+
 // --- #33: a degenerate session id must not prefix-match every session ---
 
 test('#33: an empty or whitespace id is rejected, naming the unset-variable case that produces it', () => {

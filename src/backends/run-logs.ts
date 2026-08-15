@@ -34,7 +34,13 @@ export function reapRunLogs(dir: string, now: number): string[] {
     } catch {
       continue
     }
-    rmSync(join(dir, name), { force: true })
+    try {
+      // Best effort: an EACCES/EPERM on one log must skip it, not throw out of reapRunLogs into
+      // dispatch() after the child already spawned (which would lose the run ref).
+      rmSync(join(dir, name), { force: true })
+    } catch {
+      continue
+    }
     reaped.push(name.slice(0, -'.jsonl'.length))
   }
   return reaped
