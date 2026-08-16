@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { mkdtempSync, writeFileSync, readdirSync, mkdirSync, rmdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readdirSync, mkdirSync, rmdirSync, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -37,16 +37,13 @@ test('a collapsed list of the wrong shape is tolerated as nothing collapsed', ()
   expect(loadRoster(file).collapsed).toEqual(['ok'])
 })
 
-test('loadRoster throws on corrupt JSON', () => {
+test('loadRoster returns default roster on corrupt JSON and sets aside the bad file', () => {
   const file = tmpFile()
   writeFileSync(file, '{ truncated')
-  expect(() => loadRoster(file)).toThrow(/corrupt/)
-})
-
-test('loadRoster throws includes file path', () => {
-  const file = tmpFile()
-  writeFileSync(file, '{ truncated')
-  expect(() => loadRoster(file)).toThrow(new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  expect(loadRoster(file)).toEqual({ groupBy: 'state', sessions: [], collapsed: [] })
+  // The bad file must have been renamed aside so nothing is silently discarded.
+  expect(existsSync(file)).toBe(false)
+  expect(existsSync(`${file}.corrupt`)).toBe(true)
 })
 
 test('saveRoster writes atomically: no leftover .tmp, content roundtrips', () => {
