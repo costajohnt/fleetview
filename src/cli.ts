@@ -388,7 +388,7 @@ export async function runBg(
   // parser accepts `--backend` for every command. Reject it loudly rather than silently running the
   // prompt on opencode regardless, the way the roster path rejects a bad `--backend`.
   if (args.backend !== undefined && args.backend !== DEFAULT_BACKEND) {
-    error(`bg dispatches on opencode only — --backend ${args.backend} is not supported here`)
+    error(`--backend is not supported for bg (bg always dispatches via opencode; remove --backend to proceed)`)
     setExitCode(1)
     return
   }

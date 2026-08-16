@@ -622,7 +622,7 @@ test('a failure with no reason still says something rather than exiting silently
 test('bg rejects a non-opencode --backend and creates nothing', async () => {
   const h = bgHarness()
   await runBg({ command: 'bg', prompt: 'ship it', cwd: '/x', backend: 'claude' }, h.deps)
-  expect(h.errs).toEqual(['bg dispatches on opencode only — --backend claude is not supported here'])
+  expect(h.errs).toEqual(['--backend is not supported for bg (bg always dispatches via opencode; remove --backend to proceed)'])
   expect(h.codes).toEqual([1])
   expect(h.calls).toEqual([])
   expect(h.saved).toEqual([])
