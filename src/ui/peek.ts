@@ -109,6 +109,10 @@ export type PeekProps = {
   savedReply?: string | null
   now?: number
   prReason?: string | null
+  // #113.4: the merge-back command for a finished isolated session, already filled in with the
+  // repository and branch. Shown rather than run: merging is the user's call, it can conflict, and
+  // a TUI keypress is the wrong place to touch a checkout that may have work in it.
+  mergeBack?: string | null
   canAnswer?: boolean
   backend?: string | null
 }
@@ -125,6 +129,7 @@ export function Peek({
   savedReply = null,
   now,
   prReason = null,
+  mergeBack = null,
   // Whether this session's backend can take an answer from the roster (backend.capabilities.
   // questions). The banners are unaffected — a blocked session is blocked either way — but the
   // `y allow · a always · d deny` line would be an offer fleetview cannot keep, so it is replaced by
@@ -165,6 +170,9 @@ export function Peek({
   // No pull requests and a reason means gh could not answer. Saying so here rather than as a
   // startup notice keeps fleetview from nagging in every repository that will never have one.
   const prReasonRow = prs.length === 0 && prReason ? truncateGraphemes(prReason, columns) : null
+  // Truncated, not wrapped, for the same reason the pull request lines are: a long repository path
+  // would otherwise eat the panel on a narrow terminal.
+  const mergeBackRow = mergeBack ? truncateGraphemes(`merge back: ${mergeBack}`, columns) : null
   const permLineText = pending.length > 0
     ? `⚠ permission: ${permissionLabel(pending[0])}${pending.length > 1 ? ` (+${pending.length - 1} more)` : ''}`
     : null
@@ -179,7 +187,7 @@ export function Peek({
   // since banners plus nine options can exceed a short terminal on their own.
   const allOptions = questionLineText ? questionOptions(pendingQuestions[0]).slice(0, 9) : []
   // Fixed cost before options: title + reply + each banner and its hint + the error line.
-  const extras = (waited ? 1 : 0) + (savedReply ? 1 : 0) + prRows.length + (prReasonRow ? 1 : 0)
+  const extras = (waited ? 1 : 0) + (savedReply ? 1 : 0) + prRows.length + (prReasonRow ? 1 : 0) + (mergeBackRow ? 1 : 0)
   const fixedReserve =
     2 + extras + (permLineText ? permRows.length + 1 : 0) + (questionLineText ? questionRows.length + 1 : 0) + (error ? 1 : 0)
   // Leave at least one row for the body; drop options rather than overflow the panel.
@@ -220,6 +228,7 @@ export function Peek({
     waited ? React.createElement(Text, { key: 'waited', dimColor: true }, waited) : null,
     ...prRows.map((r, i) => React.createElement(Text, { key: `pr${i}`, color: r.color }, r.text)),
     prReasonRow ? React.createElement(Text, { key: 'prReason', dimColor: true }, prReasonRow) : null,
+    mergeBackRow ? React.createElement(Text, { key: 'mergeBack', dimColor: true }, mergeBackRow) : null,
     ...permRows.map((t, i) => React.createElement(Text, { key: `perm${i}`, color: theme.warn }, t)),
     permLineText
       ? React.createElement(

@@ -9,6 +9,7 @@ import {
   isRootProject,
   displayProject,
   isSandbox,
+  mergeBackCommand,
   shouldIsolate,
   worktreeName,
   worktreeSafety,
@@ -232,4 +233,17 @@ test('a repo whose config and hooks try to run commands cannot run them through 
   expect(existsSync(marker)).toBe(false)
   // And the answer is still the right one — hardening must not cost the refusal rules their meaning.
   expect(safety).toMatchObject({ removable: true, dirty: false, unpushed: false })
+})
+
+// --- #113.4: the merge-back command line ---
+
+test('mergeBackCommand names the parent repository and the session branch', () => {
+  expect(mergeBackCommand('/wt/one', '/x/repo', 'opencode/fix-tests')).toBe('git -C /x/repo merge opencode/fix-tests')
+})
+
+test('mergeBackCommand yields nothing when there is nothing to merge back', () => {
+  expect(mergeBackCommand('/wt/one', null, 'opencode/fix')).toBe(null) // not isolated: no parent repo
+  expect(mergeBackCommand('/wt/one', '/x/repo', null)).toBe(null) // detached HEAD or no git
+  // an unisolated session works IN the repository, so there is no branch to merge into it
+  expect(mergeBackCommand('/x/repo', '/x/repo', 'main')).toBe(null)
 })

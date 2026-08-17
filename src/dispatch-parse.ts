@@ -12,10 +12,11 @@
 //
 // Takes its vocabularies as arguments (agent names, repo names, backend names) so it stays pure and
 // testable.
+import { hasOpenPr } from './pull-requests.ts'
 import type { PullRequest } from './types.ts'
 
 // A parsed filter (see parseInput / applyFilter). Every axis is optional; at most one is set.
-type Filter = { state?: string; agent?: string; url?: string; pr?: number; repo?: string }
+type Filter = { state?: string; agent?: string; url?: string; pr?: number; repo?: string; openPr?: boolean }
 
 // The rendered row shape applyFilter reads. Sessions are a genuinely dynamic runtime shape assembled
 // elsewhere; only the fields the filters touch are named here.
@@ -60,7 +61,12 @@ export function parseInput(
   const filter = FILTER.exec(text)
   if (filter) {
     const [, axis, value] = filter
-    return { kind: 'filter', filter: axis === 'a' ? { agent: value } : { state: value } }
+    if (axis === 'a') return { kind: 'filter', filter: { agent: value } }
+    // #113.5: `s:pr` is not a state — it is agent view's "ready for review" view, which fleetview
+    // folds into completed rather than giving a fourth section. As a filter it costs one word of
+    // vocabulary and restores the list on demand. `s:review` reads the same intent, so both work.
+    if (value === 'pr' || value === 'review') return { kind: 'filter', filter: { openPr: true } }
+    return { kind: 'filter', filter: { state: value } }
   }
 
   // Agent view defines this as a filter and nothing else — filtering to that one row is the
@@ -195,6 +201,9 @@ export function applyFilter<T extends Session>(
     const want = filter.url
     return sessions.filter((s) => (promptOf(s) ?? '').includes(want))
   }
+  // #113.5: an open pull request, whatever the session's state — the same predicate the row badge
+  // and the completed-group fold already use, so the filter and the badges can never disagree.
+  if (filter.openPr) return sessions.filter((s) => hasOpenPr(s.prs))
   if (filter.pr !== undefined) {
     // A URL filter carries its owner/repo and must match the pull request's own URL, so two
     // repositories that both have a #5 can't answer for each other. A bare `#5` has no repository

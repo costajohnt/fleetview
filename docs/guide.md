@@ -58,6 +58,7 @@ from when opencode already knows it as a project, otherwise to the selected row'
 | `/command args` | sent to a new session as its first prompt |
 | `! npm test` | runs a shell job instead of starting a session |
 | `s:working`, `s:blocked` | filters the list instead of dispatching. Also `s:failed`, `s:idle`, and `a:name` by agent |
+| `s:pr`, `s:review` | filters to sessions with an open pull request — the ready-for-review view, without a fourth section |
 | `#1234` | filters to the session working on that pull request. A full PR URL works too |
 | `/model provider/model` | sets the model for sessions dispatched from here. `/model default` clears it. Lasts for this run only |
 | `/fork [prompt]` | copies the selected session's conversation into a new one; a prompt goes to the fork |
@@ -238,7 +239,10 @@ opencode does the git work (`/experimental/worktree`): a real worktree on a bran
 `opencode/<name>` under `~/.local/share/opencode/worktree/`, named from your prompt, so `fix the
 flaky tests` becomes `opencode/fix-the-flaky-tests`. Rows never mention any of it — a session
 shows under the repository you dispatched into, because that is the thing you chose. Merging back
-is yours: it's an ordinary branch, so `git merge opencode/<name>` or a pull request both work.
+is yours: it's an ordinary branch, so `git merge opencode/<name>` or a pull request both work. Peek
+on a finished isolated session spells that command out with the repository and branch filled in
+(`merge back: git -C <repo> merge opencode/<name>`) to copy; it stops short of running it, because a
+merge can conflict and the checkout it lands in may have work of your own in it.
 
 Three cases skip isolation, matching agent view: a directory that isn't a git repository, one
 that is already a linked worktree, and a server with no worktree support — the last says `not

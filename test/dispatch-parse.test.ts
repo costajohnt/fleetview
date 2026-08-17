@@ -272,3 +272,23 @@ test('suggestions offer backends after agents and repositories', () => {
     { name: 'copilot', kind: 'backend' },
   ])
 })
+
+// --- #113.5: `s:pr` is the ready-for-review view fleetview folds into completed ---
+
+const prRows = [
+  { id: 'a', status: 'done', prs: [{ number: 1, state: 'OPEN', url: 'https://github.com/o/r/pull/1' }] },
+  { id: 'b', status: 'done', prs: [{ number: 2, state: 'MERGED', url: 'https://github.com/o/r/pull/2' }] },
+  { id: 'c', status: 'running' },
+  { id: 'd', status: 'running', prs: [{ number: 3, state: 'OPEN', url: 'https://github.com/o/r/pull/3' }] },
+]
+
+test('s:pr and s:review parse to the open-pull-request filter, not a state', () => {
+  expect(parseInput('s:pr', vocab)).toEqual({ kind: 'filter', filter: { openPr: true } })
+  expect(parseInput('s:review', vocab)).toEqual({ kind: 'filter', filter: { openPr: true } })
+  // an ordinary state filter is untouched
+  expect(parseInput('s:failed', vocab)).toEqual({ kind: 'filter', filter: { state: 'failed' } })
+})
+
+test('the open-pull-request filter keeps every state, and only open pull requests', () => {
+  expect(applyFilter(prRows, { openPr: true }).map((r) => r.id)).toEqual(['a', 'd'])
+})
