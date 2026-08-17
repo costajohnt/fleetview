@@ -39,6 +39,7 @@ const GRAMMAR = [
   ['! cmd', 'run a shell command as a job instead of starting a session'],
   ['s:working', 'filter the list by state (also s:blocked, s:failed, s:idle)'],
   ['a:name', 'filter the list by agent'],
+  ['s:pr', 'filter to sessions with an open pull request (s:review too)'],
   ['#1234', 'filter to the session working on that pull request (a PR URL works too)'],
   ['/model p/m', 'set the model for sessions dispatched from here (/model default clears it)'],
   ['/fork [p]', "copy the selected session's conversation to a new one; a prompt goes to the fork"],

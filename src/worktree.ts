@@ -164,3 +164,17 @@ export function worktreeSafety(dir: string, parentDir: string | null | undefined
     return { removable: false, dirty: false, unpushed: true, reason: 'could not read the worktree' }
   }
 }
+
+// #113.4: the last manual step of dispatch → isolate → complete. The guide ends with "merging back
+// is yours", and the two things that step needs — which repository the worktree belongs to and
+// which branch the session committed on — are already known here, so the command can be spelled out
+// in full instead of leaving the user to reconstruct it.
+//
+// Shown, never run: a merge can conflict, the parent checkout may have work in it, and neither is
+// something a keystroke in a roster should decide. Pure so the wording is testable without a
+// repository; the caller supplies the branch lookup.
+export function mergeBackCommand(worktree: string, repo: string | null | undefined, branch: string | null | undefined) {
+  if (!repo || !branch || repo === worktree) return null
+  return `git -C ${repo} merge ${branch}`
+}
+

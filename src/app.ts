@@ -20,7 +20,7 @@ import { useDiscovery } from './use-discovery.ts'
 import { useDispatch } from './use-dispatch.ts'
 import { pickTarget, repoChoices } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
-import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety } from './worktree.ts'
+import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety, mergeBackCommand } from './worktree.ts'
 import { fetchPullRequests, branchOf, hasOpenPr } from './pull-requests.ts'
 import { theme } from './ui/theme.ts'
 import { asNumber, asString, isRecord } from './types.ts'
@@ -1610,6 +1610,12 @@ export function App({
           // Scoped to the peek target's own repository: `reasons` is per-repo, and a session must
           // only ever see why ITS repo has no PR data, never why some other repo failed.
           prReason: pullRequests.reasons.get(repoOf(peekTarget.projectKey)) ?? null,
+          // #113.4: only for a finished session in its own worktree — a session still working has
+          // commits coming, and an unisolated one has nothing to merge back from.
+          mergeBack:
+            isSandbox(parents, peekTarget.projectKey) && FINISHED_STATUSES.has(store.get(peekTarget.projectKey, peekTarget.id)?.status ?? '')
+              ? mergeBackCommand(peekTarget.projectKey, parents.get(peekTarget.projectKey), branchOfImpl(peekTarget.projectKey))
+              : null,
           // Drives the answer hints only — the banners still render, because "this session is
           // blocked on a permission" is true whether or not fleetview can answer it from here.
           canAnswer: capabilitiesOf(peekTarget).questions,

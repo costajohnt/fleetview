@@ -428,3 +428,24 @@ test('a non-http pull request url is not made a hyperlink', () => {
   const row = frame!.split('\n').find((l) => l.includes('#9'))
   expect(row).not.toContain('\u001B]8;;')
 })
+
+// --- #113.4: the merge-back command, shown rather than run ---
+
+test('Peek: a merge-back command renders as its own line', () => {
+  const frame = render(
+    React.createElement(Peek, {
+      target: { title: 't', projectKey: '/wt/one' },
+      messages: [],
+      mergeBack: 'git -C /x/repo merge opencode/fix-tests',
+      columns: 200,
+    }),
+  ).lastFrame()!
+  expect(frame).toContain('merge back: git -C /x/repo merge opencode/fix-tests')
+})
+
+test('Peek: no merge-back line when there is nothing to merge back', () => {
+  const frame = render(
+    React.createElement(Peek, { target: { title: 't', projectKey: '/wt/one' }, messages: [], columns: 200 }),
+  ).lastFrame()!
+  expect(frame).not.toContain('merge back')
+})
