@@ -1,4 +1,4 @@
-import { readFileSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs'
+import { readFileSync, renameSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWrite } from './paths.ts'
 import { configDir } from './registry.ts'
@@ -22,7 +22,15 @@ export function loadRoster(file: string): Roster {
   try {
     parsed = JSON.parse(raw)
   } catch {
-    throw new Error(`roster file corrupt: ${file} — fix or delete it`)
+    // Unreadable content is set aside rather than discarded so nothing is silently lost and the
+    // evidence survives for anyone who wants to look. A corrupt roster no longer stops fleetview
+    // starting; it recovers the same way seen.json does.
+    try {
+      renameSync(file, `${file}.corrupt`)
+    } catch {
+      // nothing to do; the caller falls back to empty state either way
+    }
+    return defaultRoster()
   }
   // tolerated the same way as seen.json: a non-object parse (e.g. from a torn write) is
   // treated as an empty roster rather than corrupt.
