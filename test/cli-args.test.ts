@@ -70,6 +70,23 @@ test('the subcommands each take exactly one session id', () => {
   expect(parseArgs(['stop', 'a', 'b'])).toEqual({ error: 'stop takes one session id' })
 })
 
+// #113: answer takes an id plus a reply, watch takes an id, status takes nothing at all.
+test('answer takes an id and a reply, joined like a prompt', () => {
+  expect(parseArgs(['answer', 'ses_1', 'y'])).toMatchObject({ command: 'answer', id: 'ses_1', reply: 'y' })
+  expect(parseArgs(['answer', 'ses_1', 'use', 'the', 'other', 'branch'])).toMatchObject({ reply: 'use the other branch' })
+  expect(parseArgs(['answer'])).toEqual({ error: 'answer needs a session id' })
+  expect(parseArgs(['answer', 'ses_1'])).toEqual({ error: 'answer needs a reply: y, a, d, an option number, or text' })
+})
+
+test('watch takes one session id and status takes none', () => {
+  expect(parseArgs(['watch', 'ses_1'])).toMatchObject({ command: 'watch', id: 'ses_1' })
+  expect(parseArgs(['watch'])).toEqual({ error: 'watch needs a session id' })
+  expect(parseArgs(['status'])).toMatchObject({ command: 'status' })
+  expect(parseArgs(['status', 'ses_1'])).toEqual({ error: 'status takes no arguments' })
+  // `server status` is a different command and must not be swallowed by the new one
+  expect(parseArgs(['server', 'status'])).toMatchObject({ command: 'server', serverAction: 'status' })
+})
+
 test('ls takes no id, and accepts the same flags', () => {
   expect(parseArgs(['ls'])).toMatchObject({ command: 'ls', all: false })
   expect(parseArgs(['ls', '--all'])).toMatchObject({ command: 'ls', all: true })
