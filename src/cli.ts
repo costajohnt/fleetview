@@ -106,6 +106,19 @@ type ListSessionsDeps = {
   setExitCode?(code: number): void
 }
 
+type RunAddDeps = {
+  ensureServer: EnsureServer
+  serverFile: string
+  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions'>
+  rosterFile?: string
+  loadRosterImpl?(file: string): { sessions: RosterMember[] }
+  saveRosterImpl?(file: string, roster: { sessions: RosterMember[] }): unknown
+  now?(): number
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
+
 // Read live from package.json (same as the header banner) rather than a hardcoded literal, so
 // `fleetview --version` can't drift from the published version the way a stale '0.0.0' did.
 const VERSION = createRequire(import.meta.url)('../package.json').version
@@ -535,6 +548,62 @@ export async function matchSessions(
   return exact.length === 1 ? exact : matches
 }
 
+// `fleetview add <id>`: adopt an existing opencode session into the roster without opening the TUI.
+// Counterpart to the ^a key in browse view — scripted roster setup, tmux bindings, or a
+// one-keypress "background this session" flow from inside opencode.
+export async function runAdd(
+  args: ParsedArgs,
+  {
+    ensureServer,
+    serverFile,
+    createClient = (url: string) => new OpencodeClient(url),
+    rosterFile = defaultRosterFile(),
+    loadRosterImpl = loadRoster,
+    saveRosterImpl = saveRoster,
+    now = Date.now,
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: RunAddDeps,
+) {
+  const problem = sessionIdProblem(args.id)
+  if (problem) {
+    error(`fleetview: ${problem}`)
+    setExitCode(1)
+    return
+  }
+  const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
+  if (!r.ok) {
+    error(r.reason ?? 'opencode server unreachable')
+    setExitCode(1)
+    return
+  }
+  const client = createClient(`http://${r.server.host}:${r.server.port}`)
+  const projects = allProjectDirectories(await client.listProjects())
+  const matches = await matchSessions(client, projects, args.id!)
+  if (matches.length === 0) {
+    error(`no session matching ${args.id}`)
+    setExitCode(1)
+    return
+  }
+  if (matches.length > 1) {
+    error([`${args.id} matches ${matches.length} sessions — use more of the id:`, ...matches.map((m) => `  ${m.session.id}  ${m.worktree}`)].join('\n'))
+    setExitCode(1)
+    return
+  }
+  const { session, worktree } = matches[0]
+  const roster = loadRosterImpl(rosterFile)
+  if (roster.sessions.some((s) => s.worktree === worktree && s.id === session.id)) {
+    log(`${session.id} is already on the roster`)
+    return
+  }
+  roster.sessions.push({ worktree, id: session.id, addedAt: now() })
+  saveRosterImpl(rosterFile, roster)
+  log(`added ${session.id}`)
+}
+
 // The shell commands. Each one needs a healthy server and a session id, so they share this: resolve
 // the server, find the session across every project, and hand both to the caller. Exits with a
 // message rather than a stack when the id doesn't match anything — or matches more than one thing —
@@ -689,6 +758,7 @@ export async function main() {
   if (args.command === 'version') return console.log(VERSION)
 
   if (args.command === 'bg') return runBg(args, { ensureServer: ensureServerForCommands, serverFile })
+  if (args.command === 'add') return runAdd(args, { ensureServer: ensureServerForCommands, serverFile })
   // No ensureServer passed on purpose — `server` is the one command that must never spawn one.
   if (args.command === 'server') return runServer(args, { serverFile, probeServerImpl: probeServer })
   if (args.command === 'ls') return listSessions(args, ensureServerForCommands, serverFile)

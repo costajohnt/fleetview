@@ -4,7 +4,7 @@ import { mkdtempSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSy
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
-import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runServer, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
+import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runServer, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
 
 // #57: the exit/signal path (restoreScreen, registered on `exit` and reached from SIGTERM/HUP/INT)
@@ -615,6 +615,95 @@ test('a failure with no reason still says something rather than exiting silently
   h.deps.ensureServer = (() => Promise.resolve({ ok: false, server: {} })) as any
   await runBg({ command: 'bg', prompt: 'ship it', cwd: '/x' }, h.deps)
   expect(h.errs).toEqual(['opencode server unreachable'])
+})
+
+// --- `fleetview add`: adopt an existing session into the roster ---
+
+const addHarness = ({ sessions = [{ id: 'ses_abc123', createdAt: 0 }], projects = [{ id: '/x/repo', worktree: '/x/repo', repoPath: '/x/repo' }], existingRoster = { groupBy: 'state', sessions: [], collapsed: [] } }: any = {}) => {
+  const saved: any[] = []
+  const out: any[] = []
+  const errs: any[] = []
+  const codes: any[] = []
+  const client = {
+    listProjects: vi.fn(() => Promise.resolve(projects)),
+    listSessions: vi.fn(() => Promise.resolve(sessions)),
+  }
+  const deps = {
+    ensureServer: vi.fn(() => Promise.resolve({ ok: true, server: { host: '127.0.0.1', port: 4900 } })),
+    serverFile: '/tmp/s.json',
+    createClient: vi.fn(() => client),
+    rosterFile: '/tmp/roster.json',
+    loadRosterImpl: () => structuredClone(existingRoster),
+    saveRosterImpl: (file: any, roster: any) => saved.push([file, roster]),
+    now: () => 1_700_000_000_000,
+    log: (m: any) => out.push(m),
+    error: (m: any) => errs.push(m),
+    setExitCode: (c: any) => codes.push(c),
+  }
+  return { saved, out, errs, codes, deps, client }
+}
+
+test('add writes session+worktree to the roster and prints confirmation', async () => {
+  const h = addHarness()
+  await runAdd({ command: 'add', id: 'ses_abc1' }, h.deps)
+  expect(h.deps.createClient).toHaveBeenCalledWith('http://127.0.0.1:4900')
+  expect(h.saved).toEqual([[
+    '/tmp/roster.json',
+    { groupBy: 'state', collapsed: [], sessions: [{ worktree: '/x/repo', id: 'ses_abc123', addedAt: 1_700_000_000_000 }] },
+  ]])
+  expect(h.out).toEqual(['added ses_abc123'])
+  expect(h.codes).toEqual([])
+})
+
+test('add is idempotent: session already on the roster exits 0 without writing', async () => {
+  const h = addHarness({
+    existingRoster: { groupBy: 'state', collapsed: [], sessions: [{ worktree: '/x/repo', id: 'ses_abc123', addedAt: 1000 }] },
+  })
+  await runAdd({ command: 'add', id: 'ses_abc1' }, h.deps)
+  expect(h.saved).toEqual([])
+  expect(h.out).toEqual(['ses_abc123 is already on the roster'])
+  expect(h.codes).toEqual([])
+})
+
+test('add errors when the id matches nothing on the server', async () => {
+  const h = addHarness({ sessions: [] })
+  await runAdd({ command: 'add', id: 'ses_nope' }, h.deps)
+  expect(h.errs).toEqual(['no session matching ses_nope'])
+  expect(h.codes).toEqual([1])
+  expect(h.saved).toEqual([])
+})
+
+test('add errors when the id is ambiguous across projects', async () => {
+  const h = addHarness({
+    projects: [
+      { id: '/x/a', worktree: '/x/a', repoPath: '/x/a' },
+      { id: '/x/b', worktree: '/x/b', repoPath: '/x/b' },
+    ],
+    sessions: [{ id: 'ses_abc123', createdAt: 0 }],
+  })
+  ;(h.client as any).listSessions = (dir: string) => Promise.resolve(
+    dir === '/x/a' ? [{ id: 'ses_abc123', createdAt: 0 }] : [{ id: 'ses_abc456', createdAt: 0 }]
+  )
+  await runAdd({ command: 'add', id: 'ses_abc' }, h.deps)
+  expect(h.errs[0]).toMatch(/matches 2 sessions/)
+  expect(h.codes).toEqual([1])
+  expect(h.saved).toEqual([])
+})
+
+test('add errors when the server is unreachable', async () => {
+  const h = addHarness()
+  h.deps.ensureServer = (() => Promise.resolve({ ok: false, server: {} })) as any
+  await runAdd({ command: 'add', id: 'ses_abc1' }, h.deps)
+  expect(h.errs).toEqual(['opencode server unreachable'])
+  expect(h.codes).toEqual([1])
+})
+
+test('add rejects a degenerate id before contacting the server', async () => {
+  const h = addHarness()
+  await runAdd({ command: 'add', id: 'ses' }, h.deps)
+  expect(h.errs[0]).toMatch(/too short/)
+  expect(h.codes).toEqual([1])
+  expect(h.deps.createClient).not.toHaveBeenCalled()
 })
 
 // #108: the parser accepts --backend for every command, but bg dispatches on opencode only — it

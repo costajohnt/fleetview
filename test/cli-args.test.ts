@@ -63,7 +63,10 @@ test('the subcommands each take exactly one session id', () => {
   expect(parseArgs(['logs', 'ses_1'])).toMatchObject({ command: 'logs', id: 'ses_1' })
   expect(parseArgs(['stop', 'ses_1'])).toMatchObject({ command: 'stop', id: 'ses_1' })
   expect(parseArgs(['rm', 'ses_1'])).toMatchObject({ command: 'rm', id: 'ses_1' })
+  expect(parseArgs(['add', 'ses_1'])).toMatchObject({ command: 'add', id: 'ses_1' })
   expect(parseArgs(['stop'])).toEqual({ error: 'stop needs a session id' })
+  expect(parseArgs(['add'])).toEqual({ error: 'add needs a session id' })
+  expect(parseArgs(['add', 'a', 'b'])).toEqual({ error: 'add takes one session id' })
   expect(parseArgs(['stop', 'a', 'b'])).toEqual({ error: 'stop takes one session id' })
 })
 

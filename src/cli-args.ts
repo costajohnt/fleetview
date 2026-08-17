@@ -24,6 +24,7 @@ export const USAGE = `fleetview — a roster for opencode sessions
   fleetview ls [--all]           the same list, one line per session
   fleetview attach <id>          attach to a session in this terminal
   fleetview logs <id> [--all]    print a session's recent output (--all for everything)
+  fleetview add <id>             add an existing session to the roster
   fleetview stop <id>            stop a session, leaving it in the list
   fleetview rm <id>              delete a session (keeps a worktree holding commits)
   fleetview bg "<prompt>"        dispatch a background session without opening the roster
@@ -37,7 +38,7 @@ export const USAGE = `fleetview — a roster for opencode sessions
   fleetview --version            print the version (-v)
   fleetview --help               this text`
 
-const SUBCOMMANDS = new Set(['attach', 'logs', 'stop', 'rm', 'ls', 'server', 'bg'])
+const SUBCOMMANDS = new Set(['attach', 'logs', 'stop', 'rm', 'ls', 'server', 'bg', 'add'])
 
 export type ParsedArgs = {
   command: string
