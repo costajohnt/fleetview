@@ -17,14 +17,18 @@ export const USAGE = `fleetview — a roster for opencode sessions
                                  (default opencode, or $FLEETVIEW_BACKEND)
   fleetview --cwd <path>         open it scoped to sessions under <path>
 
-  The shell commands below (ls/--json/attach/logs/stop/rm/bg) act on opencode
-  sessions only; the roster TUI shows sessions from every backend.
+  The shell commands below (ls/--json/attach/logs/add/answer/watch/status/
+  stop/rm/bg) act on opencode sessions only; the roster TUI shows sessions
+  from every backend.
 
   fleetview --json [--all]       print sessions as JSON instead of opening the roster
   fleetview ls [--all]           the same list, one line per session
   fleetview attach <id>          attach to a session in this terminal
   fleetview logs <id> [--all]    print a session's recent output (--all for everything)
   fleetview add <id>             add an existing session to the roster
+  fleetview answer <id> <reply>  answer a waiting session: y, a, d, an option number, or text
+  fleetview watch <id>           stream a session's output until it finishes
+  fleetview status               one line of counts; exits 0 when something awaits input
   fleetview stop <id>            stop a session, leaving it in the list
   fleetview rm <id>              delete a session (keeps a worktree holding commits)
   fleetview bg "<prompt>"        dispatch a background session without opening the roster
@@ -38,7 +42,7 @@ export const USAGE = `fleetview — a roster for opencode sessions
   fleetview --version            print the version (-v)
   fleetview --help               this text`
 
-const SUBCOMMANDS = new Set(['attach', 'logs', 'stop', 'rm', 'ls', 'server', 'bg', 'add'])
+const SUBCOMMANDS = new Set(['attach', 'logs', 'stop', 'rm', 'ls', 'server', 'bg', 'add', 'answer', 'watch', 'status'])
 
 export type ParsedArgs = {
   command: string
@@ -47,6 +51,7 @@ export type ParsedArgs = {
   cwd?: string
   id?: string
   prompt?: string
+  reply?: string
   serverAction?: string
   name?: string
   agent?: string
@@ -147,6 +152,21 @@ export function parseArgs(argv: string[] = []): ParseResult {
     const prompt = args.join(' ').trim()
     if (!prompt) return { error: 'bg needs a prompt' }
     out.prompt = prompt
+    return out
+  }
+  if (name === 'answer') {
+    // <id> then the answer: `y`/`a`/`d` for a permission, a digit for a question option, anything
+    // else as typed text. The text half is joined like bg's prompt so a sentence needs no quoting.
+    if (args.length === 0) return { error: 'answer needs a session id' }
+    const reply = args.slice(1).join(' ').trim()
+    if (!reply) return { error: 'answer needs a reply: y, a, d, an option number, or text' }
+    out.id = args[0]
+    out.reply = reply
+    return out
+  }
+  if (name === 'status') {
+    // A summary of everything, like `ls` — no id to take.
+    if (args.length > 0) return { error: 'status takes no arguments' }
     return out
   }
   if (name === 'server') {

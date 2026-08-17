@@ -32,6 +32,8 @@ import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
 import { loadRoster, saveRoster, makePersistRoster, withRosterLock, defaultRosterFile } from './roster-store.ts'
 import { attachPty } from './pty-host.ts'
 import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
+import { connectEvents } from './backends/opencode/event-mux.ts'
+import { summarise } from './ui/header.ts'
 import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories } from './worktree.ts'
 import { parseArgs, resolveCwd, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, USAGE } from './cli-args.ts'
 import { stripControl } from './text-utils.ts'
@@ -114,6 +116,36 @@ type RunAddDeps = {
   loadRosterImpl?(file: string): { sessions: RosterMember[] }
   saveRosterImpl?(file: string, roster: { sessions: RosterMember[] }): unknown
   now?(): number
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
+
+type RunAnswerDeps = {
+  ensureServer: EnsureServer
+  serverFile: string
+  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'listPermissions' | 'listQuestions' | 'respondPermission' | 'respondQuestion' | 'promptAsync'>
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
+
+type RunWatchDeps = {
+  ensureServer: EnsureServer
+  serverFile: string
+  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions'>
+  connect?: typeof connectEvents
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
+
+type RunStatusDeps = {
+  ensureServer: EnsureServer
+  serverFile: string
+  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'sessionStatus' | 'listPermissions' | 'listQuestions'>
+  loadSeenImpl?(file: string): SeenMap
+  seenFile?(): string
   log?(message: string): void
   error?(message: string): void
   setExitCode?(code: number): void
@@ -553,6 +585,46 @@ export async function matchSessions(
   return exact.length === 1 ? exact : matches
 }
 
+// The injectable half of `withSession` below: same resolve-server-then-find-the-session steps and
+// the same messages, but reporting through the caller's log/error/setExitCode so `add`, `answer`
+// and `watch` can be driven end to end in a test without a server. Returns null once it has said
+// why, so every caller is a single `if (!found) return`.
+async function resolveSession(
+  id: string | undefined,
+  ensureServer: EnsureServer,
+  serverFile: string,
+  createClient: (url: string) => Pick<RosterClient, 'listProjects' | 'listSessions'>,
+  error: (message: string) => void,
+  setExitCode: (code: number) => void,
+) {
+  const problem = sessionIdProblem(id)
+  if (problem) {
+    error(`fleetview: ${problem}`)
+    setExitCode(1)
+    return null
+  }
+  const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
+  if (!r.ok) {
+    error(r.reason ?? 'opencode server unreachable')
+    setExitCode(1)
+    return null
+  }
+  const client = createClient(`http://${r.server.host}:${r.server.port}`)
+  const projects = allProjectDirectories(await client.listProjects())
+  const matches = await matchSessions(client, projects, id!)
+  if (matches.length === 0) {
+    error(`no session matching ${id}`)
+    setExitCode(1)
+    return null
+  }
+  if (matches.length > 1) {
+    error([`${id} matches ${matches.length} sessions — use more of the id:`, ...matches.map((m) => `  ${m.session.id}  ${m.worktree}`)].join('\n'))
+    setExitCode(1)
+    return null
+  }
+  return { client, server: r.server, session: matches[0].session, worktree: matches[0].worktree }
+}
+
 // `fleetview add <id>`: adopt an existing opencode session into the roster without opening the TUI.
 // Counterpart to the ^a key in browse view — scripted roster setup, tmux bindings, or a
 // one-keypress "background this session" flow from inside opencode.
@@ -573,32 +645,9 @@ export async function runAdd(
     },
   }: RunAddDeps,
 ) {
-  const problem = sessionIdProblem(args.id)
-  if (problem) {
-    error(`fleetview: ${problem}`)
-    setExitCode(1)
-    return
-  }
-  const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
-  if (!r.ok) {
-    error(r.reason ?? 'opencode server unreachable')
-    setExitCode(1)
-    return
-  }
-  const client = createClient(`http://${r.server.host}:${r.server.port}`)
-  const projects = allProjectDirectories(await client.listProjects())
-  const matches = await matchSessions(client, projects, args.id!)
-  if (matches.length === 0) {
-    error(`no session matching ${args.id}`)
-    setExitCode(1)
-    return
-  }
-  if (matches.length > 1) {
-    error([`${args.id} matches ${matches.length} sessions — use more of the id:`, ...matches.map((m) => `  ${m.session.id}  ${m.worktree}`)].join('\n'))
-    setExitCode(1)
-    return
-  }
-  const { session, worktree } = matches[0]
+  const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
+  if (!found) return
+  const { session, worktree } = found
   // #106: the already-on-the-roster check and the append are one read-modify-write, so they hold
   // the lock together — checking outside it would let two `add`s of the same id both see "absent"
   // and write the member twice.
@@ -610,6 +659,214 @@ export async function runAdd(
     return true
   })
   log(added ? `added ${session.id}` : `${session.id} is already on the roster`)
+}
+
+// `fleetview answer <id> <y|a|d|N|text>`: the peek panel's one-keypress answering, from the shell.
+// FLEETVIEW_NOTIFY_CMD already fires on `agent_needs_input` with the session id in the environment,
+// but until now that notification was a dead end — you had to open the roster to act on it. This is
+// the same three replies peek sends: y/a/d answer the oldest pending permission the way the peek
+// keys do, a digit picks an option of the oldest pending question, and anything else is sent as a
+// follow-up prompt, which is what typing in peek's reply input does.
+export async function runAnswer(
+  args: ParsedArgs,
+  {
+    ensureServer,
+    serverFile,
+    createClient = (url: string) => new OpencodeClient(url),
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: RunAnswerDeps,
+) {
+  const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
+  if (!found) return
+  const { session, worktree } = found
+  const client = found.client as ReturnType<NonNullable<RunAnswerDeps['createClient']>>
+  const reply = args.reply!
+  // Both lists, always: which one answers depends on the reply word, and a `y` typed at a session
+  // whose pending request is a question should say so rather than silently prompting the model
+  // with the letter y. Oldest-first is peek's rule (the store sorts pending by asked-order); these
+  // come straight off the endpoints, so ordering is the server's list order.
+  const [permissions, questions] = await Promise.all([
+    client.listPermissions(worktree).catch(() => []),
+    client.listQuestions(worktree).catch(() => []),
+  ])
+  const permission = (permissions ?? []).filter((p) => p?.sessionID === session.id)[0]
+  const question = (questions ?? []).filter((q) => q?.sessionID === session.id)[0]
+
+  if (reply === 'y' || reply === 'a' || reply === 'd') {
+    if (!permission) {
+      error(question ? `${session.id} is waiting on a question, not a permission — answer it with an option number` : `nothing is waiting on ${session.id}`)
+      setExitCode(1)
+      return
+    }
+    const decision = reply === 'y' ? 'once' : reply === 'a' ? 'always' : 'reject'
+    try {
+      await client.respondPermission(permission.id, decision, worktree)
+    } catch {
+      error(`couldn't answer permission on ${session.id}`)
+      setExitCode(1)
+      return
+    }
+    log(`${decision} — ${session.id}`)
+    return
+  }
+
+  // A bare number is an option pick, but only when a question is actually waiting: "2" typed at a
+  // session with no pending question is far more likely to be a short reply than a mis-aimed pick,
+  // and prompting with it is recoverable where answering the wrong question is not.
+  if (/^\d+$/.test(reply) && question) {
+    const options = question.questions?.[0]?.options ?? []
+    const option = options[Number(reply) - 1]
+    if (!option) {
+      error([`${reply} is not one of the options:`, ...options.map((o, i) => `  ${i + 1}  ${stripControl(o.label)}`)].join('\n'))
+      setExitCode(1)
+      return
+    }
+    try {
+      // One answer array per question, each holding the chosen labels — a single choice is [[label]].
+      await client.respondQuestion(question.id, [[option.label]], worktree)
+    } catch {
+      error(`couldn't answer question on ${session.id}`)
+      setExitCode(1)
+      return
+    }
+    log(`answered ${session.id}: ${stripControl(option.label)}`)
+    return
+  }
+
+  try {
+    await client.promptAsync(session.id, reply, worktree)
+  } catch {
+    error(`couldn't send to ${session.id}`)
+    setExitCode(1)
+    return
+  }
+  log(`sent to ${session.id}`)
+}
+
+// `fleetview watch <id>`: tail -f for one session. `logs` is a snapshot and `attach` takes the whole
+// terminal; this is the middle ground a split pane or a script wants — new output on stdout as it
+// arrives, and an exit when the session goes idle.
+//
+// Deltas, not whole parts: opencode re-sends a growing text part on every token, so printing each
+// `message.part.updated` verbatim would reprint the message from the top on every frame. What has
+// already been written per part is remembered and only the tail goes out.
+export async function runWatch(
+  args: ParsedArgs,
+  {
+    ensureServer,
+    serverFile,
+    createClient = (url: string) => new OpencodeClient(url),
+    connect = connectEvents,
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: RunWatchDeps,
+) {
+  const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
+  if (!found) return
+  const { session, worktree, server } = found
+  const printed = new Map<string, number>()
+  // Assigned synchronously inside the executor, so it is set by the time anything can resolve.
+  let conn: ReturnType<typeof connect> | null = null
+  await new Promise<void>((done) => {
+    conn = connect(
+      { host: server.host, port: server.port, directory: worktree },
+      {
+        onEvent: (_directory, event) => {
+          if (event.type === 'message.part.updated' && event.properties.sessionID === session.id) {
+            const part = event.properties.part
+            const text = typeof part?.text === 'string' ? stripControl(part.text) : ''
+            if (!text) return
+            // messageID rather than the part's own id: parts arrive keyed either way across
+            // opencode versions, and a message id is the one field the Part type promises.
+            const key = typeof part?.id === 'string' ? part.id : (part?.messageID ?? 'part')
+            const already = printed.get(key) ?? 0
+            // A shorter text than last time is a different part reusing the key, not a rewind:
+            // print it whole rather than slicing into the middle of it.
+            const fresh = text.length >= already ? text.slice(already) : text
+            printed.set(key, text.length)
+            if (fresh.trim()) log(fresh)
+            return
+          }
+          if (event.type === 'session.error' && event.properties.sessionID === session.id) {
+            const failure = errorLabel(event.properties.error)
+            if (failure) error(`error: ${failure}`)
+            return
+          }
+          // Idle is how a turn ends. `watch` on an already-idle session therefore returns almost
+          // immediately, which is the honest answer: there is no output coming.
+          if (event.type === 'session.status' && event.properties.sessionID === session.id && event.properties.status?.type === 'idle') done()
+          if (event.type === 'session.deleted' && event.properties.info?.id === session.id) done()
+        },
+        // No reconnect: a dropped stream mid-watch should end the command rather than silently
+        // resume minutes later having missed the output the caller was waiting for.
+        reconnect: false,
+      },
+    )
+    // The stream ending on its own (server stopped, session's project gone) ends the watch too.
+    void conn.done.then(() => done(), () => done())
+  })
+  // Always: a watch that ended because the session went idle still holds an open SSE request, and
+  // leaving it open keeps the process alive after the command is logically over.
+  ;(conn as ReturnType<typeof connect> | null)?.stop()
+}
+
+// `fleetview status`: the header's counts line, once, for a shell prompt or tmux status-right.
+// Exits 0 when something awaits input and 1 when nothing does — grep's convention, so
+// `fleetview status && notify-send "fleet needs you"` reads the way it looks.
+export async function runStatus(
+  args: ParsedArgs,
+  {
+    ensureServer,
+    serverFile,
+    createClient = (url: string) => new OpencodeClient(url),
+    loadSeenImpl = loadSeen,
+    seenFile = defaultSeenFile,
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: RunStatusDeps,
+) {
+  const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
+  if (!r.ok) {
+    error(r.reason ?? 'opencode server unreachable')
+    setExitCode(1)
+    return
+  }
+  const client = createClient(`http://${r.server.host}:${r.server.port}`)
+  const projects = allProjectDirectories(await client.listProjects())
+  const parents = sandboxParents(projects)
+  const store = createStore()
+  const seen = loadSeenImpl(seenFile())
+  // The same three seeding rounds `ls` runs, and for the same reason: sessions alone have no
+  // status, and statuses alone have no pending permission/question — summarise counts both.
+  const lists = await Promise.all(projects.map((p) => client.listSessions(p.worktree).catch(() => null)))
+  lists.forEach((sessions, i) => sessions && store.setSessions(projects[i].worktree, sessions, seen))
+  const statuses = await Promise.all(projects.map((p) => client.sessionStatus(p.worktree).catch(() => null)))
+  statuses.forEach((s, i) => s && store.seedStatuses(projects[i].worktree, s))
+  const mark = store.seedMark()
+  await Promise.all(
+    projects.flatMap((p) => [
+      client.listPermissions(p.worktree).then((x) => store.seedPermissions(p.worktree, x, mark)).catch(() => {}),
+      client.listQuestions(p.worktree).then((x) => store.seedQuestions(p.worktree, x, mark)).catch(() => {}),
+    ]),
+  )
+  const sessions = []
+  for (const group of store.byProject()) {
+    const repo = displayProject(parents, group.projectKey)
+    if (!underCwd(repo, args.cwd) && !underCwd(group.projectKey, args.cwd)) continue
+    sessions.push(...group.sessions)
+  }
+  log(summarise(sessions))
+  setExitCode(sessions.some((s) => s.status === 'waiting' && Boolean(s.pendingRequest)) ? 0 : 1)
 }
 
 // The shell commands. Each one needs a healthy server and a session id, so they share this: resolve
@@ -767,6 +1024,9 @@ export async function main() {
 
   if (args.command === 'bg') return runBg(args, { ensureServer: ensureServerForCommands, serverFile })
   if (args.command === 'add') return runAdd(args, { ensureServer: ensureServerForCommands, serverFile })
+  if (args.command === 'answer') return runAnswer(args, { ensureServer: ensureServerForCommands, serverFile })
+  if (args.command === 'watch') return runWatch(args, { ensureServer: ensureServerForCommands, serverFile })
+  if (args.command === 'status') return runStatus(args, { ensureServer: ensureServerForCommands, serverFile })
   // No ensureServer passed on purpose — `server` is the one command that must never spawn one.
   if (args.command === 'server') return runServer(args, { serverFile, probeServerImpl: probeServer })
   if (args.command === 'ls') return listSessions(args, ensureServerForCommands, serverFile)
