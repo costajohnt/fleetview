@@ -11,6 +11,7 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview --json [--all]     the same list as JSON
     fleetview attach <id>        attach in this terminal
     fleetview logs <id> [--all]  recent output
+    fleetview add <id>           put an existing session on the roster (the ^a key, scripted)
     fleetview stop <id>          stop it, leave it in the list
     fleetview rm <id>            delete it (keeps a worktree holding commits)
     fleetview bg "<prompt>"      dispatch a background session from the shell
@@ -18,7 +19,7 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview server status      the opencode server: host, port, pid, health
     fleetview server stop        stop that server (sessions stop streaming until restart)
 
-These shell commands (`ls`, `--json`, `attach`, `logs`, `stop`, `rm`, `bg`) act on opencode
+These shell commands (`ls`, `--json`, `attach`, `logs`, `add`, `stop`, `rm`, `bg`) act on opencode
 sessions only — they talk to the opencode server directly. The roster TUI is the only view that
 shows sessions from every backend (opencode, claude, copilot).
 
