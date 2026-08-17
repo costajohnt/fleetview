@@ -12,6 +12,9 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview attach <id>        attach in this terminal
     fleetview logs <id> [--all]  recent output
     fleetview add <id>           put an existing session on the roster (the ^a key, scripted)
+    fleetview answer <id> <r>    answer a waiting session: y/a/d, an option number, or text
+    fleetview watch <id>         stream its output until it goes idle
+    fleetview status             one counts line; exits 0 when something awaits input
     fleetview stop <id>          stop it, leave it in the list
     fleetview rm <id>            delete it (keeps a worktree holding commits)
     fleetview bg "<prompt>"      dispatch a background session from the shell
@@ -19,13 +22,24 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview server status      the opencode server: host, port, pid, health
     fleetview server stop        stop that server (sessions stop streaming until restart)
 
-These shell commands (`ls`, `--json`, `attach`, `logs`, `add`, `stop`, `rm`, `bg`) act on opencode
+These shell commands (`ls`, `--json`, `attach`, `logs`, `add`, `answer`, `watch`, `status`, `stop`, `rm`, `bg`) act on opencode
 sessions only — they talk to the opencode server directly. The roster TUI is the only view that
 shows sessions from every backend (opencode, claude, copilot).
 
 Session ids can be abbreviated to any unique prefix. `--cwd` also fixes where a bare dispatch
 lands; a relative path (`--cwd .`) is resolved against the current directory before it is matched
 against opencode's project paths, so `--cwd .` means this repository.
+
+`answer` is the peek panel's answering from the shell, so a `FLEETVIEW_NOTIFY_CMD` notification or a
+tmux binding can act on a waiting session without opening the roster: `y`, `a` and `d` answer the
+oldest pending permission once / always / reject, a number picks that option of a pending question,
+and anything else is sent as a follow-up prompt. A letter reply with no permission waiting is
+refused rather than sent as text, and a number is only an option pick when a question is actually
+waiting.
+
+`status` prints the header's counts line and exits 0 when something awaits input, 1 when nothing
+does — grep's convention, so `fleetview status && notify-send "fleet needs you"` reads the way it
+looks. `watch` prints new output as it arrives and returns when the session goes idle.
 
 States are reported in agent view's words — `working`, `blocked`, `failed`, `done`, `stopped`,
 `idle` — so a script written against `claude agents --json` reads fleetview's output too. `cwd`
@@ -45,6 +59,7 @@ duplicate `id` (opencode's `ses_…` id is already `id`).
 | `OPENCODE_SERVER_PASSWORD` | HTTP basic auth for the opencode server; overrides the password fleetview generates, see [below](#the-server-fleetview-spawns-is-password-protected). `OPENCODE_SERVER_USERNAME` overrides the `opencode` default |
 | `FLEETVIEW_NOTIFY_CMD` | shell command run on each needs-input / completed / failed transition |
 | `FLEETVIEW_BACKEND` | default backend for dispatches: `opencode` (default), `claude`, `copilot`. `--backend` overrides it, and rejects an unknown name rather than falling back |
+| `FLEETVIEW_DEFAULT_PROJECT` | repository a bare dispatch lands in when nothing more specific applies, e.g. `~/repos/ui`. Beats the newest-updated project (which is otherwise whatever opencode touched last) and the highlighted row; a known launch `--cwd` and a project-grouped highlighted row still win, and a path that no longer exists is skipped |
 | `FLEETVIEW_NO_ISOLATE=1` | dispatches edit the checkout directly instead of a per-session git worktree |
 | `FLEETVIEW_NO_ALT_SWITCH=1` | turn off `alt+1..9` quick-switch (recommended over SSH) |
 | `FLEETVIEW_BACK_ARROW=1` | make every `←` detach while attached, at the cost of that key inside the session (prefer the opencode `app_exit` keybind in the [guide](guide.md#-back-on-an-empty-prompt-recommended) for empty-prompt-only) |

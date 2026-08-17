@@ -4,7 +4,7 @@ import { mkdtempSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSy
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
-import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runServer, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
+import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
 
 // #57: the exit/signal path (restoreScreen, registered on `exit` and reached from SIGTERM/HUP/INT)
@@ -1367,4 +1367,258 @@ test('a failing pending read leaves the rest of the listing intact', async () =>
   expect(rows).toHaveLength(1)
   expect(rows[0]).toMatchObject({ id: 's1', state: 'working' })
   expect(rows[0].waitingFor).toBe(undefined)
+})
+
+// --- `fleetview answer`: peek's y/a/d and option picks, from the shell (#113.1) ---
+
+const answerHarness = ({
+  permissions = [] as any[],
+  questions = [] as any[],
+  respondPermission = vi.fn(() => Promise.resolve({})),
+  respondQuestion = vi.fn(() => Promise.resolve({})),
+  promptAsync = vi.fn(() => Promise.resolve({})),
+}: any = {}) => {
+  const out: any[] = []
+  const errs: any[] = []
+  const codes: any[] = []
+  const client = {
+    listProjects: vi.fn(() => Promise.resolve([{ id: '/x/repo', worktree: '/x/repo', repoPath: '/x/repo' }])),
+    listSessions: vi.fn(() => Promise.resolve([{ id: 'ses_abc123', createdAt: 0 }])),
+    listPermissions: vi.fn(() => Promise.resolve(permissions)),
+    listQuestions: vi.fn(() => Promise.resolve(questions)),
+    respondPermission,
+    respondQuestion,
+    promptAsync,
+  }
+  const deps = {
+    ensureServer: vi.fn(() => Promise.resolve({ ok: true, server: { host: '127.0.0.1', port: 4900 } })),
+    serverFile: '/tmp/s.json',
+    createClient: vi.fn(() => client),
+    log: (m: any) => out.push(m),
+    error: (m: any) => errs.push(m),
+    setExitCode: (c: any) => codes.push(c),
+  }
+  return { out, errs, codes, deps, client }
+}
+
+const pendingPermission = { id: 'per_1', sessionID: 'ses_abc123', permission: 'bash' }
+const pendingQuestion = {
+  id: 'que_1',
+  sessionID: 'ses_abc123',
+  questions: [{ question: 'which?', header: 'h', options: [{ label: 'rebase', description: '' }, { label: 'merge', description: '' }] }],
+}
+
+test('answer y/a/d map to the same replies the peek keys send', async () => {
+  for (const [reply, decision] of [['y', 'once'], ['a', 'always'], ['d', 'reject']]) {
+    const h = answerHarness({ permissions: [pendingPermission] })
+    await runAnswer({ command: 'answer', id: 'ses_abc1', reply }, h.deps)
+    expect(h.client.respondPermission).toHaveBeenCalledWith('per_1', decision, '/x/repo')
+    expect(h.out).toEqual([`${decision} — ses_abc123`])
+    expect(h.codes).toEqual([])
+  }
+})
+
+test('answer only touches the permission raised for that session', async () => {
+  const h = answerHarness({ permissions: [{ id: 'per_other', sessionID: 'ses_zzz', permission: 'bash' }, pendingPermission] })
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'y' }, h.deps)
+  expect(h.client.respondPermission).toHaveBeenCalledWith('per_1', 'once', '/x/repo')
+})
+
+test('answer y on a session waiting for a question says so instead of prompting with "y"', async () => {
+  const h = answerHarness({ questions: [pendingQuestion] })
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'y' }, h.deps)
+  expect(h.errs[0]).toMatch(/waiting on a question/)
+  expect(h.codes).toEqual([1])
+  expect(h.client.respondPermission).not.toHaveBeenCalled()
+  expect(h.client.promptAsync).not.toHaveBeenCalled()
+})
+
+test('answer y with nothing waiting refuses rather than sending a stray prompt', async () => {
+  const h = answerHarness()
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'y' }, h.deps)
+  expect(h.errs).toEqual(['nothing is waiting on ses_abc123'])
+  expect(h.codes).toEqual([1])
+  expect(h.client.promptAsync).not.toHaveBeenCalled()
+})
+
+test('a number picks that option of the pending question, one answer array per question', async () => {
+  const h = answerHarness({ questions: [pendingQuestion] })
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: '2' }, h.deps)
+  expect(h.client.respondQuestion).toHaveBeenCalledWith('que_1', [['merge']], '/x/repo')
+  expect(h.out).toEqual(['answered ses_abc123: merge'])
+})
+
+test('an out-of-range option lists the real ones instead of answering', async () => {
+  const h = answerHarness({ questions: [pendingQuestion] })
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: '9' }, h.deps)
+  expect(h.errs[0]).toContain('1  rebase')
+  expect(h.errs[0]).toContain('2  merge')
+  expect(h.codes).toEqual([1])
+  expect(h.client.respondQuestion).not.toHaveBeenCalled()
+})
+
+// A digit is only an option pick when a question is actually waiting — otherwise it is a short reply.
+test('a number with no question waiting is sent as text', async () => {
+  const h = answerHarness()
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: '2' }, h.deps)
+  expect(h.client.promptAsync).toHaveBeenCalledWith('ses_abc123', '2', '/x/repo')
+  expect(h.out).toEqual(['sent to ses_abc123'])
+})
+
+test('anything else is sent as a follow-up prompt', async () => {
+  const h = answerHarness({ permissions: [pendingPermission] })
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'use the other branch' }, h.deps)
+  expect(h.client.promptAsync).toHaveBeenCalledWith('ses_abc123', 'use the other branch', '/x/repo')
+  expect(h.codes).toEqual([])
+})
+
+test('a refused respond exits 1 rather than reporting an answer that never landed', async () => {
+  const h = answerHarness({ permissions: [pendingPermission], respondPermission: vi.fn(() => Promise.reject(new Error('nope'))) })
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'y' }, h.deps)
+  expect(h.errs).toEqual(["couldn't answer permission on ses_abc123"])
+  expect(h.codes).toEqual([1])
+  expect(h.out).toEqual([])
+})
+
+// --- `fleetview watch`: stream one session until it goes idle (#113.2) ---
+
+const watchHarness = () => {
+  const out: any[] = []
+  const errs: any[] = []
+  const codes: any[] = []
+  let emit: (event: any) => void = () => {}
+  let endStream: () => void = () => {}
+  const stop = vi.fn()
+  const deps = {
+    ensureServer: vi.fn(() => Promise.resolve({ ok: true, server: { host: '127.0.0.1', port: 4900 } })),
+    serverFile: '/tmp/s.json',
+    createClient: vi.fn(() => ({
+      listProjects: () => Promise.resolve([{ id: '/x/repo', worktree: '/x/repo', repoPath: '/x/repo' }]),
+      listSessions: () => Promise.resolve([{ id: 'ses_abc123', createdAt: 0 }]),
+    })),
+    connect: vi.fn((_target: any, { onEvent }: any) => {
+      emit = (event: any) => onEvent('/x/repo', event)
+      return { done: new Promise<void>((res) => { endStream = res }), stop }
+    }),
+    log: (m: any) => out.push(m),
+    error: (m: any) => errs.push(m),
+    setExitCode: (c: any) => codes.push(c),
+  }
+  // runWatch resolves the session (server, projects, id match) before it opens the stream, so a
+  // test has to wait for connect() to have been called or its first event goes nowhere.
+  const opened = async () => {
+    for (let i = 0; i < 100 && !deps.connect.mock.calls.length; i++) await new Promise((r) => setImmediate(r))
+  }
+  return { out, errs, codes, deps, stop, opened, emit: (e: any) => emit(e), endStream: () => endStream() }
+}
+
+const part = (text: string, id = 'prt_1') => ({
+  type: 'message.part.updated',
+  properties: { sessionID: 'ses_abc123', part: { type: 'text', id, text } },
+})
+
+test('watch prints only the new tail of a growing text part', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit(part('Look'))
+  h.emit(part('Looking at the tests'))
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.out).toEqual(['Look', 'ing at the tests'])
+  expect(h.stop).toHaveBeenCalled() // or the SSE request keeps the process alive
+})
+
+test('watch ignores other sessions on the same project stream', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_other', part: { type: 'text', id: 'p', text: 'not mine' } } })
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_other', status: { type: 'idle' } } })
+  h.emit(part('mine'))
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.out).toEqual(['mine'])
+})
+
+test('a shorter text under the same key is a new part, printed whole', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit(part('a long first answer'))
+  h.emit(part('short'))
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.out).toEqual(['a long first answer', 'short'])
+})
+
+test('watch reports a failed turn and ends when the stream itself ends', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.error', properties: { sessionID: 'ses_abc123', error: { name: 'APIError', data: { message: 'overloaded' } } } })
+  h.endStream()
+  await done
+  expect(h.errs[0]).toContain('overloaded')
+})
+
+// --- `fleetview status`: the header counts line for a prompt or tmux (#113.3) ---
+
+const statusHarness = ({ sessions = [] as any[], statuses = {} as any, permissions = [] as any[] }: any = {}) => {
+  const out: any[] = []
+  const errs: any[] = []
+  const codes: any[] = []
+  const deps = {
+    ensureServer: vi.fn(() => Promise.resolve({ ok: true, server: { host: '127.0.0.1', port: 4900 } })),
+    serverFile: '/tmp/s.json',
+    createClient: vi.fn(() => ({
+      listProjects: () => Promise.resolve([{ id: '/x/repo', worktree: '/x/repo', repoPath: '/x/repo' }]),
+      listSessions: () => Promise.resolve(sessions),
+      sessionStatus: () => Promise.resolve(statuses),
+      listPermissions: () => Promise.resolve(permissions),
+      listQuestions: () => Promise.resolve([]),
+    })),
+    loadSeenImpl: () => ({}),
+    seenFile: () => '/tmp/seen.json',
+    log: (m: any) => out.push(m),
+    error: (m: any) => errs.push(m),
+    setExitCode: (c: any) => codes.push(c),
+  }
+  return { out, errs, codes, deps }
+}
+
+test('status prints the header counts line', async () => {
+  const h = statusHarness({
+    sessions: [{ id: 'ses_1', createdAt: 1 }, { id: 'ses_2', createdAt: 2 }],
+    statuses: { ses_1: { type: 'busy' }, ses_2: { type: 'idle' } },
+  })
+  await runStatus({ command: 'status' }, h.deps as any)
+  expect(h.out[0]).toMatch(/^\d+ awaiting input · \d+ working · \d+ completed/)
+  expect(h.out[0]).toContain('1 working')
+})
+
+// grep's convention: 0 when there is something to act on, so `fleetview status && notify` reads
+// the way it looks.
+test('status exits 0 when a session awaits input and 1 when none does', async () => {
+  const quiet = statusHarness({ sessions: [{ id: 'ses_1', createdAt: 1 }], statuses: { ses_1: { type: 'busy' } } })
+  await runStatus({ command: 'status' }, quiet.deps as any)
+  expect(quiet.codes).toEqual([1])
+
+  const waiting = statusHarness({
+    sessions: [{ id: 'ses_1', createdAt: 1 }],
+    statuses: { ses_1: { type: 'idle' } },
+    permissions: [{ id: 'per_1', sessionID: 'ses_1', permission: 'bash' }],
+  })
+  await runStatus({ command: 'status' }, waiting.deps as any)
+  expect(waiting.out[0]).toContain('1 awaiting input')
+  expect(waiting.codes).toEqual([0])
+})
+
+test('status says why rather than printing counts when the server is unreachable', async () => {
+  const h = statusHarness()
+  h.deps.ensureServer = (() => Promise.resolve({ ok: false, server: {}, reason: 'opencode not installed' })) as any
+  await runStatus({ command: 'status' }, h.deps as any)
+  expect(h.errs).toEqual(['opencode not installed'])
+  expect(h.codes).toEqual([1])
+  expect(h.out).toEqual([])
 })
