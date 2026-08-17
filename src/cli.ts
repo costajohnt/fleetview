@@ -29,7 +29,7 @@ import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, isB
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
-import { loadRoster, saveRoster, makePersistRoster, defaultRosterFile } from './roster-store.ts'
+import { loadRoster, saveRoster, makePersistRoster, withRosterLock, defaultRosterFile } from './roster-store.ts'
 import { attachPty } from './pty-host.ts'
 import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
 import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories } from './worktree.ts'
@@ -428,11 +428,16 @@ export async function runBg(
   if (args.name) await client.renameSession(session.id, args.name, dir)
   if (args.exec) await client.runShell(session.id, args.prompt ?? '', dir, args.agent ?? 'build')
   else await client.promptAsync(session.id, args.prompt ?? '', dir)
-  const roster = loadRosterImpl(rosterFile)
-  // Same membership shape App writes: shell flag drives the job auto-clean, prompt feeds the
-  // any-URL filter.
-  roster.sessions.push({ worktree: dir, id: session.id, addedAt: now(), ...(args.exec ? { shell: true } : {}), prompt: (args.prompt ?? '').slice(0, 2000) })
-  saveRosterImpl(rosterFile, roster)
+  // #106: locked, because a running TUI persisting a pin or a TTL clean at this moment reads the
+  // pre-append file and renames its own merge over ours — the dispatched session keeps running
+  // server-side but leaves the roster for good. Same lock makePersistRoster takes.
+  withRosterLock(rosterFile, () => {
+    const roster = loadRosterImpl(rosterFile)
+    // Same membership shape App writes: shell flag drives the job auto-clean, prompt feeds the
+    // any-URL filter.
+    roster.sessions.push({ worktree: dir, id: session.id, addedAt: now(), ...(args.exec ? { shell: true } : {}), prompt: (args.prompt ?? '').slice(0, 2000) })
+    saveRosterImpl(rosterFile, roster)
+  })
   log(`${session.id}  ${args.exec ? '!' : ''}${(args.prompt ?? '').slice(0, 60)}`)
 }
 
@@ -594,14 +599,17 @@ export async function runAdd(
     return
   }
   const { session, worktree } = matches[0]
-  const roster = loadRosterImpl(rosterFile)
-  if (roster.sessions.some((s) => s.worktree === worktree && s.id === session.id)) {
-    log(`${session.id} is already on the roster`)
-    return
-  }
-  roster.sessions.push({ worktree, id: session.id, addedAt: now() })
-  saveRosterImpl(rosterFile, roster)
-  log(`added ${session.id}`)
+  // #106: the already-on-the-roster check and the append are one read-modify-write, so they hold
+  // the lock together — checking outside it would let two `add`s of the same id both see "absent"
+  // and write the member twice.
+  const added = withRosterLock(rosterFile, () => {
+    const roster = loadRosterImpl(rosterFile)
+    if (roster.sessions.some((s) => s.worktree === worktree && s.id === session.id)) return false
+    roster.sessions.push({ worktree, id: session.id, addedAt: now() })
+    saveRosterImpl(rosterFile, roster)
+    return true
+  })
+  log(added ? `added ${session.id}` : `${session.id} is already on the roster`)
 }
 
 // The shell commands. Each one needs a healthy server and a session id, so they share this: resolve
@@ -823,9 +831,11 @@ export async function main() {
     // prune, so failures here are swallowed — the delete already succeeded.
     try {
       const rosterFile = defaultRosterFile()
-      const roster = loadRoster(rosterFile)
-      const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.session.id))
-      if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
+      withRosterLock(rosterFile, () => {
+        const roster = loadRoster(rosterFile)
+        const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.session.id))
+        if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
+      })
     } catch {}
     // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
     // commits that exist nowhere else, which is the case that actually loses work. Reported either

@@ -93,8 +93,11 @@ export type PersistRoster = ((snap: Roster) => void) & {
 // ponytail: busy-wait spin, since persist is fully synchronous anyway; best-effort — if locking
 // can't be had (foreign error, or the spin times out) the write falls through unlocked rather than
 // throwing, keeping the pre-#106 behaviour as the floor.
+// Exported because the TUI's persist is only one side of the race: `fleetview bg`, `add` and `rm`
+// each do their own read-modify-write of the same file from a separate process, and a lock only one
+// writer takes serialises nothing.
 const STALE_LOCK_MS = 5000
-function withRosterLock<T>(file: string, fn: () => T): T {
+export function withRosterLock<T>(file: string, fn: () => T): T {
   const lock = `${file}.lock`
   let fd: number | null = null
   for (let i = 0; i < 100; i++) {

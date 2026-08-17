@@ -724,6 +724,43 @@ test('bg allows an explicit --backend opencode as a no-op', async () => {
   expect(h.calls[0][0]).toBe('createSession')
 })
 
+// #106: the TUI's persist takes a lockfile around its read-merge-write, but the CLI's one-shot
+// edits are the other half of that race — an unlocked `bg`/`add` append is exactly what a
+// concurrent TUI merge overwrites. Asserted by watching for the lockfile from inside the read:
+// if the read-modify-write ran outside the lock, no lock exists while it runs.
+const lockWatchingRoster = (rosterFile: string, roster: any = { groupBy: 'state', sessions: [], collapsed: [] }) => {
+  const lockedDuringRead: boolean[] = []
+  return {
+    lockedDuringRead,
+    loadRosterImpl: () => {
+      lockedDuringRead.push(existsSync(`${rosterFile}.lock`))
+      return structuredClone(roster)
+    },
+  }
+}
+
+test('#106: bg appends to the roster under the lock, and releases it after', async () => {
+  const h = bgHarness()
+  const rosterFile = join(mkdtempSync(join(tmpdir(), 'fleetview-roster-')), 'roster.json')
+  const watcher = lockWatchingRoster(rosterFile)
+  Object.assign(h.deps, { rosterFile, loadRosterImpl: watcher.loadRosterImpl })
+  await runBg({ command: 'bg', prompt: 'ship it', cwd: '/link' }, h.deps)
+  expect(watcher.lockedDuringRead).toEqual([true])
+  expect(h.saved[0][1].sessions).toHaveLength(1)
+  expect(existsSync(`${rosterFile}.lock`)).toBe(false) // released, or the next writer spins for nothing
+})
+
+test('#106: add checks membership and appends inside one lock hold', async () => {
+  const h = addHarness()
+  const rosterFile = join(mkdtempSync(join(tmpdir(), 'fleetview-roster-')), 'roster.json')
+  const watcher = lockWatchingRoster(rosterFile)
+  Object.assign(h.deps, { rosterFile, loadRosterImpl: watcher.loadRosterImpl })
+  await runAdd({ command: 'add', id: 'ses_abc1' }, h.deps)
+  expect(watcher.lockedDuringRead).toEqual([true])
+  expect(h.out).toEqual(['added ses_abc123'])
+  expect(existsSync(`${rosterFile}.lock`)).toBe(false)
+})
+
 // --- `fleetview server status` / `server stop` ---
 
 const serverHarness = ({ healthy = true, pid = 4242, identity = { ok: true, command: 'opencode serve' }, kill }: any = {}) => {
