@@ -1,5 +1,6 @@
 import { test, expect } from 'vitest'
-import { parseArgs, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, MIN_SESSION_ID_CHARS, USAGE } from '../src/cli-args.ts'
+import { parseArgs, resolveCwd, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, MIN_SESSION_ID_CHARS, USAGE } from '../src/cli-args.ts'
+import type { ParsedArgs } from '../src/cli-args.ts'
 
 test('parseModel splits provider/model and rejects a bare word', () => {
   expect(parseModel('anthropic/claude-opus-5')).toEqual({ providerID: 'anthropic', id: 'claude-opus-5' })
@@ -24,6 +25,26 @@ test('--cwd scopes the roster, in both spellings', () => {
   expect(parseArgs(['--cwd=/x/alpha'])).toMatchObject({ command: 'ui', cwd: '/x/alpha' })
   expect(parseArgs(['--cwd'])).toEqual({ error: '--cwd needs a path' })
   expect(parseArgs(['--cwd='])).toEqual({ error: '--cwd needs a path' })
+})
+
+// #107: the roster and opencode both speak absolute paths, so a relative --cwd that reaches
+// underCwd unresolved matches nothing at all — `--cwd .` in a repository listed zero sessions.
+test('resolveCwd makes a relative --cwd absolute against the working directory', () => {
+  const rel = parseArgs(['--cwd', '../sibling']) as ParsedArgs
+  expect(resolveCwd(rel, '/x/alpha').cwd).toBe('/x/sibling')
+  expect(resolveCwd(parseArgs(['--cwd', '.']) as ParsedArgs, '/x/alpha').cwd).toBe('/x/alpha')
+  // Already absolute: unchanged, and a trailing slash is left for underCwd to normalise.
+  expect(resolveCwd(parseArgs(['--cwd', '/x/beta']) as ParsedArgs, '/x/alpha').cwd).toBe('/x/beta')
+  // No --cwd at all stays absent rather than becoming the working directory.
+  expect(resolveCwd(parseArgs([]) as ParsedArgs, '/x/alpha').cwd).toBeUndefined()
+})
+
+// The resolved path is what the filter actually consumes: `--cwd .` from inside a repository has
+// to select that repository's sessions, which is the bug #107 reported.
+test('a resolved relative --cwd then matches the sessions underCwd keeps', () => {
+  const args = resolveCwd(parseArgs(['--cwd', '.']) as ParsedArgs, '/x/alpha')
+  expect(underCwd('/x/alpha/pkg', args.cwd)).toBe(true)
+  expect(underCwd('/x/alphabet', args.cwd)).toBe(false)
 })
 
 // `claude agents --json` prints the list rather than opening anything.

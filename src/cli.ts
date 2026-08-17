@@ -33,7 +33,7 @@ import { loadRoster, saveRoster, makePersistRoster, defaultRosterFile } from './
 import { attachPty } from './pty-host.ts'
 import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
 import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories } from './worktree.ts'
-import { parseArgs, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, USAGE } from './cli-args.ts'
+import { parseArgs, resolveCwd, sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem, USAGE } from './cli-args.ts'
 import { stripControl } from './text-utils.ts'
 import type { ParsedArgs } from './cli-args.ts'
 import { isListedSession } from './types.ts'
@@ -673,16 +673,15 @@ export async function main() {
   // Said once, at startup, because a broken native build is an install problem and the raw ESM
   // import stack it used to surface as named nothing the user could act on.
   if (!pty) console.error('node-pty failed to build during install — attach will be degraded. Reinstall with a C++ toolchain present (xcode-select --install on macOS).')
-  const args = parseArgs(process.argv.slice(2))
-  if ('error' in args) {
-    console.error(`${args.error}\n\n${USAGE}`)
+  const parsed = parseArgs(process.argv.slice(2))
+  if ('error' in parsed) {
+    console.error(`${parsed.error}\n\n${USAGE}`)
     process.exitCode = 1
     return
   }
-  // #107: resolve --cwd once here, right after parsing, so every downstream consumer
-  // (listSessions, rosterLoop, runBg) sees the same absolute path — a relative arg like
-  // `--cwd ../sibling` was matching nothing because the roster stores absolute paths.
-  if (args.cwd !== undefined) args.cwd = resolve(args.cwd)
+  // #107: relative `--cwd` becomes absolute here, between parsing and doing, so every consumer
+  // below (listSessions, rosterLoop, runBg) compares the same absolute path.
+  const args = resolveCwd(parsed)
   const serverFile = defaultServerFile()
   const ensureServerForCommands = makeEnsureServer({ isServerHealthy, isAuthEnforced, probeServer, spawnServer, saveServer, serverFile })
 
