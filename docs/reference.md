@@ -59,6 +59,7 @@ duplicate `id` (opencode's `ses_…` id is already `id`).
 | `OPENCODE_SERVER_PASSWORD` | HTTP basic auth for the opencode server; overrides the password fleetview generates, see [below](#the-server-fleetview-spawns-is-password-protected). `OPENCODE_SERVER_USERNAME` overrides the `opencode` default |
 | `FLEETVIEW_NOTIFY_CMD` | shell command run on each needs-input / completed / failed transition |
 | `FLEETVIEW_BACKEND` | default backend for dispatches: `opencode` (default), `claude`, `copilot`. `--backend` overrides it, and rejects an unknown name rather than falling back |
+| `FLEETVIEW_DEFAULT_PROJECT` | repository a bare dispatch lands in when nothing more specific applies, e.g. `~/repos/ui`. Beats the newest-updated project (which is otherwise whatever opencode touched last) and the highlighted row; a known launch `--cwd` and a project-grouped highlighted row still win, and a path that no longer exists is skipped |
 | `FLEETVIEW_NO_ISOLATE=1` | dispatches edit the checkout directly instead of a per-session git worktree |
 | `FLEETVIEW_NO_ALT_SWITCH=1` | turn off `alt+1..9` quick-switch (recommended over SSH) |
 | `FLEETVIEW_BACK_ARROW=1` | make every `←` detach while attached, at the cost of that key inside the session (prefer the opencode `app_exit` keybind in the [guide](guide.md#-back-on-an-empty-prompt-recommended) for empty-prompt-only) |

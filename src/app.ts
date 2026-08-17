@@ -18,7 +18,7 @@ import { Peek } from './ui/peek.ts'
 import { usePeek } from './use-peek.ts'
 import { useDiscovery } from './use-discovery.ts'
 import { useDispatch } from './use-dispatch.ts'
-import { pickTarget, repoChoices } from './dispatch-target.ts'
+import { pickTarget, repoChoices, defaultProjectFromEnv } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
 import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety } from './worktree.ts'
 import { fetchPullRequests, branchOf, hasOpenPr } from './pull-requests.ts'
@@ -189,6 +189,7 @@ type AppProps = {
   fetchPullRequestsImpl?: (dir: string) => Promise<{ prs: PullRequest[]; reason: string | null }>
   branchOfImpl?: (dir: string) => string | null
   cwd?: string
+  defaultProject?: string
   worktreeSafetyImpl?: (dir: string, parentDir: string | null | undefined) => { removable: boolean; reason?: string | null }
   dirExistsImpl?: (dir: string) => boolean
 }
@@ -231,6 +232,9 @@ export function App({
   fetchPullRequestsImpl = fetchPullRequests,
   branchOfImpl = branchOf,
   cwd = process.cwd(),
+  // #119: FLEETVIEW_DEFAULT_PROJECT, read here rather than deep in pickTarget so the environment is
+  // touched once per mount and a test can pin a target without setting a variable on the process.
+  defaultProject = defaultProjectFromEnv(),
   // Injected so the branch that decides whether deleting a session destroys committed work can be
   // tested without building a git repository per case. Defaults to the real thing.
   worktreeSafetyImpl = worktreeSafety,
@@ -984,6 +988,7 @@ export function App({
         projects: repoProjects,
         current: current && { ...current, projectKey: repoOf(current.projectKey) },
         groupBy: rosterState.groupBy,
+        defaultProject,
         dirExists: dirExistsImpl,
       }) ?? undefined
     )

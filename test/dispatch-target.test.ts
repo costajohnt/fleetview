@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { pickTarget, repoChoices } from '../src/dispatch-target.ts'
+import { pickTarget, repoChoices, defaultProjectFromEnv } from '../src/dispatch-target.ts'
 
 const projects = [{ worktree: '/x/beta' }, { worktree: '/x/alpha' }] // sorted newest-updated first
 const dirExists = () => true // these paths are fixtures, not real directories
@@ -23,6 +23,45 @@ test('with no cwd match and no selection, the most recently updated project wins
 
 test('no projects at all yields null so the caller can say so instead of dispatching nowhere', () => {
   expect(pickTarget({ cwd: '/x/alpha', projects: [], dirExists })).toBe(null)
+})
+
+// --- pinned default target (#119) ---
+//
+// The reported failure: the newest-updated project keeps winning, so every bare dispatch lands in a
+// repository the user never dispatches to. A pinned default has to beat that, and the highlighted
+// row under state grouping with it, while still losing to the two explicit signals.
+
+test('the configured default beats the newest-updated project', () => {
+  expect(pickTarget({ cwd: '/somewhere/else', projects, defaultProject: '/x/pinned', dirExists })).toBe('/x/pinned')
+})
+
+test('the configured default beats a highlighted row that is not a project grouping', () => {
+  const target = pickTarget({ cwd: '/somewhere/else', projects, current: { projectKey: '/x/beta' }, defaultProject: '/x/pinned', dirExists })
+  expect(target).toBe('/x/pinned')
+})
+
+test('a known launch cwd and a project-grouped row still outrank the configured default', () => {
+  expect(pickTarget({ cwd: '/x/alpha', projects, defaultProject: '/x/pinned', dirExists })).toBe('/x/alpha')
+  const grouped = pickTarget({ cwd: '/somewhere/else', projects, current: { projectKey: '/x/beta' }, groupBy: 'project', defaultProject: '/x/pinned', dirExists })
+  expect(grouped).toBe('/x/beta')
+})
+
+// The default names a repository precisely because recency keeps losing to it — a directory that
+// has gone away must not strand dispatch there.
+test('a configured default that no longer exists falls through to the projects', () => {
+  const target = pickTarget({ cwd: '/somewhere/else', projects, defaultProject: '/x/pinned', dirExists: (d) => d !== '/x/pinned' })
+  expect(target).toBe('/x/beta')
+})
+
+test('defaultProjectFromEnv expands a tilde, resolves a relative path, and ignores blanks', () => {
+  expect(defaultProjectFromEnv({ FLEETVIEW_DEFAULT_PROJECT: '~/repos/ui' }, '/home/j', '/base')).toBe('/home/j/repos/ui')
+  expect(defaultProjectFromEnv({ FLEETVIEW_DEFAULT_PROJECT: '~' }, '/home/j', '/base')).toBe('/home/j')
+  expect(defaultProjectFromEnv({ FLEETVIEW_DEFAULT_PROJECT: '../sibling' }, '/home/j', '/base/here')).toBe('/base/sibling')
+  expect(defaultProjectFromEnv({ FLEETVIEW_DEFAULT_PROJECT: '/abs/path' }, '/home/j', '/base')).toBe('/abs/path')
+  expect(defaultProjectFromEnv({ FLEETVIEW_DEFAULT_PROJECT: '  ' }, '/home/j', '/base')).toBe(undefined)
+  expect(defaultProjectFromEnv({}, '/home/j', '/base')).toBe(undefined)
+  // `~backup` is a directory name, not a home reference — expanding it would invent a path
+  expect(defaultProjectFromEnv({ FLEETVIEW_DEFAULT_PROJECT: '~backup' }, '/home/j', '/base')).toBe('/base/~backup')
 })
 
 // --- stale worktrees (#102) ---
