@@ -1,3 +1,5 @@
+import { resolve } from 'node:path'
+
 // Agent view has a shell surface next to the view itself — `claude agents --cwd/--json`, and
 // `attach`, `logs`, `stop`, `rm` as subcommands. fleetview took no arguments at all, which made the
 // dispatch target unpredictable (it fell back to wherever you happened to be) and left no way to
@@ -22,6 +24,7 @@ export const USAGE = `fleetview — a roster for opencode sessions
   fleetview ls [--all]           the same list, one line per session
   fleetview attach <id>          attach to a session in this terminal
   fleetview logs <id> [--all]    print a session's recent output (--all for everything)
+  fleetview add <id>             add an existing session to the roster
   fleetview stop <id>            stop a session, leaving it in the list
   fleetview rm <id>              delete a session (keeps a worktree holding commits)
   fleetview bg "<prompt>"        dispatch a background session without opening the roster
@@ -35,7 +38,7 @@ export const USAGE = `fleetview — a roster for opencode sessions
   fleetview --version            print the version (-v)
   fleetview --help               this text`
 
-const SUBCOMMANDS = new Set(['attach', 'logs', 'stop', 'rm', 'ls', 'server', 'bg'])
+const SUBCOMMANDS = new Set(['attach', 'logs', 'stop', 'rm', 'ls', 'server', 'bg', 'add'])
 
 export type ParsedArgs = {
   command: string
@@ -52,6 +55,14 @@ export type ParsedArgs = {
   exec?: boolean
 }
 export type ParseResult = ParsedArgs | { error: string }
+
+// #107: every path `--cwd` is compared against — opencode's project directories, the roster's
+// worktrees — is absolute, so a relative `--cwd .` or `--cwd ../sibling` matched nothing at all.
+// Resolved once, between parsing and doing, so listSessions, rosterLoop and runBg all see the same
+// absolute path. `base` is a parameter rather than a process.cwd() call inside so this stays as
+// testable as the parser above it.
+export const resolveCwd = (args: ParsedArgs, base: string = process.cwd()): ParsedArgs =>
+  args.cwd === undefined ? args : { ...args, cwd: resolve(base, args.cwd) }
 
 // Returns {command, id?, cwd?, all?, json?} or {error}. `command` is 'ui' when there is nothing to
 // do but open the roster, which is still the common case.
