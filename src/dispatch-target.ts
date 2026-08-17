@@ -11,8 +11,20 @@
 // ponytail: no @repo parsing here; that's the Phase 5 grammar. This function only answers the
 // bare case, and takes everything it needs as arguments so it stays pure.
 import { readdirSync, existsSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { homedir } from 'node:os'
+import { basename, join, resolve } from 'node:path'
 import type { Project } from './types.ts'
+
+// #119: the durable form of "dispatch here unless I say otherwise" — an export in a shell profile,
+// read once at launch. A tilde is expanded here because a quoted assignment
+// (`FLEETVIEW_DEFAULT_PROJECT="~/repos/ui"`) reaches the process with the `~` still in it, and a
+// relative path is resolved against the launch directory so `.` means what it says.
+export function defaultProjectFromEnv(env: NodeJS.ProcessEnv = process.env, home = homedir(), base = process.cwd()): string | undefined {
+  const raw = env.FLEETVIEW_DEFAULT_PROJECT?.trim()
+  if (!raw) return undefined
+  const expanded = raw === '~' ? home : raw.startsWith('~/') ? join(home, raw.slice(2)) : raw
+  return resolve(base, expanded)
+}
 
 // What `@` can complete to. Agent view lists "Git repositories one level below the launch
 // directory ... [and] any directory that already has a session in the list", and skips any
@@ -69,18 +81,27 @@ export function pickTarget({
   projects = [],
   current,
   groupBy,
+  defaultProject,
   dirExists = existsSync,
 }: {
   cwd?: string
   projects?: Project[]
   current?: { projectKey?: string }
   groupBy?: string
+  defaultProject?: string
   dirExists?: (dir: string) => boolean
 }) {
   const known = new Set(projects.map((p) => p.worktree))
   const candidates = [
     groupBy === 'project' ? current?.projectKey : undefined,
     cwd && known.has(cwd) ? cwd : undefined,
+    // #119: a pinned default, above every fallback that is merely incidental. The two candidates
+    // above it are explicit — the group the user scrolled to, the directory they launched from —
+    // but the highlighted row under any other grouping and the newest-updated project below are
+    // just whatever the roster happened to be showing, and that is exactly what put dispatches in
+    // the wrong repository. Unlike the candidates around it this one need not be a known project:
+    // its whole job is to name the repository that recency keeps losing to.
+    defaultProject,
     current?.projectKey,
     ...projects.map((p) => p.worktree), // projects arrive sorted newest-updated first
   ]
