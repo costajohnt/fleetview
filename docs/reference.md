@@ -11,6 +11,7 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview --json [--all]     the same list as JSON
     fleetview attach <id>        attach in this terminal
     fleetview logs <id> [--all]  recent output
+    fleetview add <id>           put an existing session on the roster (the ^a key, scripted)
     fleetview stop <id>          stop it, leave it in the list
     fleetview rm <id>            delete it (keeps a worktree holding commits)
     fleetview bg "<prompt>"      dispatch a background session from the shell
@@ -18,9 +19,13 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview server status      the opencode server: host, port, pid, health
     fleetview server stop        stop that server (sessions stop streaming until restart)
 
+These shell commands (`ls`, `--json`, `attach`, `logs`, `add`, `stop`, `rm`, `bg`) act on opencode
+sessions only — they talk to the opencode server directly. The roster TUI is the only view that
+shows sessions from every backend (opencode, claude, copilot).
+
 Session ids can be abbreviated to any unique prefix. `--cwd` also fixes where a bare dispatch
-lands; give it an absolute path, since it is compared against opencode's own project paths
-verbatim and a relative one (`--cwd .`) matches nothing.
+lands; a relative path (`--cwd .`) is resolved against the current directory before it is matched
+against opencode's project paths, so `--cwd .` means this repository.
 
 States are reported in agent view's words — `working`, `blocked`, `failed`, `done`, `stopped`,
 `idle` — so a script written against `claude agents --json` reads fleetview's output too. `cwd`

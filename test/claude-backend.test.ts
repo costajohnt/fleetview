@@ -505,6 +505,14 @@ test('attach refuses a session id with flag syntax or control bytes', () => {
   expect(() => b.attach({ id: `ok${String.fromCharCode(27)}[2Jbad`, directory: '/repo/alpha' })).toThrow(/malformed session id/)
 })
 
+// prompt() spawns `claude --resume <id> …`, same argv edge as attach: a leading-dash id would parse
+// as a flag, so it is asserted before the spawn rather than handed to it.
+test('prompt refuses a session id with flag syntax', async () => {
+  const { b, spawnImpl } = backend()
+  await expect(b.prompt('--fork-session', 'go', '/repo/alpha')).rejects.toThrow(/malformed session id/)
+  expect(spawnImpl.calls.length).toBe(0)
+})
+
 // mode on open only applies when it creates, so a pre-existing (or pre-loosened) run log kept its
 // perms while receiving prompts and repo paths — every open re-tightens the file and its dir now.
 test('a pre-existing run log is re-tightened to 0600 on the next run', async () => {

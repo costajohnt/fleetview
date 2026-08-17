@@ -25,11 +25,13 @@ export function repoChoices({
   projects = [],
   readDir = safeReadDir,
   isRepo = safeIsRepo,
+  dirExists = existsSync,
 }: {
   cwd?: string
   projects?: Project[]
   readDir?: (dir: string) => string[]
   isRepo?: (path: string) => boolean
+  dirExists?: (dir: string) => boolean
 }) {
   const byName = new Map<string, { name: string; worktree: string }>()
   const add = (worktree: string) => {
@@ -37,7 +39,10 @@ export function repoChoices({
     if (!name || name.includes(' ')) return
     if (!byName.has(name)) byName.set(name, { name, worktree })
   }
-  for (const p of projects) add(p.worktree)
+  // A project whose worktree is gone must not be completable either (#102): offering `@simon` for a
+  // cleaned-up temp directory only leads back to the "no longer exists" dead end that skipping it in
+  // pickTarget just removed. The cwd scan below is inherently current; only project records go stale.
+  for (const p of projects) if (dirExists(p.worktree)) add(p.worktree)
   for (const entry of cwd ? readDir(cwd) : []) {
     const path = join(cwd!, entry) // loop only runs when cwd is set
     if (isRepo(path)) add(path)
@@ -55,20 +60,29 @@ function safeReadDir(dir: string) {
 
 const safeIsRepo = (path: string) => existsSync(join(path, '.git'))
 
+// Candidates are tried in preference order and the first one that still exists on disk wins (#102).
+// A project record outlives the directory — a temp worktree the OS cleaned up is still listed by the
+// server — and without the skip the stale entry is chosen forever, so dispatch is permanently stuck
+// behind "<name> no longer exists" with no way to recover in the UI.
 export function pickTarget({
   cwd,
   projects = [],
   current,
   groupBy,
+  dirExists = existsSync,
 }: {
   cwd?: string
   projects?: Project[]
   current?: { projectKey?: string }
   groupBy?: string
+  dirExists?: (dir: string) => boolean
 }) {
   const known = new Set(projects.map((p) => p.worktree))
-  if (groupBy === 'project' && current?.projectKey) return current.projectKey
-  if (cwd && known.has(cwd)) return cwd
-  if (current?.projectKey) return current.projectKey
-  return projects[0]?.worktree ?? null // projects arrive sorted newest-updated first
+  const candidates = [
+    groupBy === 'project' ? current?.projectKey : undefined,
+    cwd && known.has(cwd) ? cwd : undefined,
+    current?.projectKey,
+    ...projects.map((p) => p.worktree), // projects arrive sorted newest-updated first
+  ]
+  return candidates.find((c): c is string => Boolean(c) && dirExists(c!)) ?? null
 }

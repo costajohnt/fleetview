@@ -7,6 +7,12 @@ test('parseSseChunk yields JSON payloads from data: lines, keeps partial tail', 
   expect(rest).toBe('data: {"ty')
 })
 
+test('parseSseChunk frames CRLF line endings (proxied/spec-compliant server)', () => {
+  const { events, rest } = parseSseChunk('data: {"type":"a"}\r\n\r\ndata: {"type":"b"}\r\n\r\ndata: {"ty')
+  expect(events).toEqual([{ type: 'a' }, { type: 'b' }])
+  expect(rest).toBe('data: {"ty')
+})
+
 test('parseSseChunk skips malformed JSON without throwing', () => {
   const { events } = parseSseChunk('data: {nope}\n\ndata: {"type":"ok"}\n\n')
   expect(events).toEqual([{ type: 'ok' }])

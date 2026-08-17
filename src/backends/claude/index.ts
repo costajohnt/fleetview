@@ -178,7 +178,7 @@ export function createClaudeBackend({
     // Resume is scoped by cwd: the same id from a sibling directory fails with "No conversation
     // found" before any API call, so `directory` here is load-bearing rather than a label.
     // The text rides behind `--` for the same leading-dash reason as dispatch.
-    prompt: async (id, text, directory) => run(['--resume', id, '-p', '--output-format=stream-json', '--verbose', '--', text], id, directory),
+    prompt: async (id, text, directory) => run(['--resume', assertSessionId(id), '-p', '--output-format=stream-json', '--verbose', '--', text], id, directory),
 
     // Same subscription contract as opencode's, satisfied by polling rather than by a socket:
     // stop() ends the loop, done resolves when the loop has actually finished.

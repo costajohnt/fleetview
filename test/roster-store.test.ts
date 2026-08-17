@@ -1,7 +1,8 @@
 import { test, expect } from 'vitest'
 import { mkdtempSync, writeFileSync, readdirSync, mkdirSync, rmdirSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { loadRoster, saveRoster, hasSession, makePersistRoster } from '../src/roster-store.ts'
 
 const tmpFile = () => join(mkdtempSync(join(tmpdir(), 'fleetview-roster-')), 'roster.json')
@@ -176,6 +177,38 @@ test('makePersistRoster retries a removal whose save failed instead of resurrect
   rmdirSync(tmp)
   persist(rosterOf(member('a'))) // the retry must still know b was removed here, not merge it back
   expect(loadRoster(file).sessions.map((s) => s.id)).toEqual(['a'])
+})
+
+// #106: makePersistRoster's read-merge-write is unlocked, so two processes that both loadRoster
+// before either saves each write back a merge missing the other's append. The lockfile serialises
+// the read-merge-write across processes. Driven through real child processes because a single JS
+// thread runs each sync persist to completion — the race only exists between processes.
+test('#106: concurrent persists from separate processes all survive the merge', async () => {
+  const file = tmpFile()
+  saveRoster(file, rosterOf(member('seed')))
+  const store = resolve(import.meta.dirname, '../src/roster-store.ts')
+  const worker = join(tmpFile(), '..', 'append.mjs')
+  writeFileSync(
+    worker,
+    `import { loadRoster, makePersistRoster } from ${JSON.stringify(store)}
+const [file, id] = process.argv.slice(2)
+const roster = loadRoster(file)
+makePersistRoster({ roster, file })({ ...roster, sessions: [...roster.sessions, { worktree: '/x', id, addedAt: 1 }] })
+`,
+  )
+  const ids = Array.from({ length: 8 }, (_, i) => `p${i}`)
+  await Promise.all(
+    ids.map(
+      (id) =>
+        new Promise<void>((res, rej) => {
+          const c = spawn(process.execPath, [worker, file, id], { stdio: 'ignore' })
+          c.on('exit', (code) => (code === 0 ? res() : rej(new Error(`worker ${id} exited ${code}`))))
+          c.on('error', rej)
+        }),
+    ),
+  )
+  const got = loadRoster(file).sessions.map((s) => s.id).sort()
+  expect(got).toEqual(['seed', ...ids].sort())
 })
 
 // A file corrupted mid-run must not take the running instance down on its next keystroke; writing

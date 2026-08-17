@@ -706,6 +706,24 @@ test('add rejects a degenerate id before contacting the server', async () => {
   expect(h.deps.createClient).not.toHaveBeenCalled()
 })
 
+// #108: the parser accepts --backend for every command, but bg dispatches on opencode only — it
+// must reject a non-opencode backend rather than silently running the prompt on opencode anyway.
+test('bg rejects a non-opencode --backend and creates nothing', async () => {
+  const h = bgHarness()
+  await runBg({ command: 'bg', prompt: 'ship it', cwd: '/x', backend: 'claude' }, h.deps)
+  expect(h.errs).toEqual(['bg dispatches on opencode only — --backend claude is not supported here'])
+  expect(h.codes).toEqual([1])
+  expect(h.calls).toEqual([])
+  expect(h.saved).toEqual([])
+})
+
+test('bg allows an explicit --backend opencode as a no-op', async () => {
+  const h = bgHarness()
+  await runBg({ command: 'bg', prompt: 'ship it', cwd: '/x', backend: 'opencode' }, h.deps)
+  expect(h.codes).toEqual([])
+  expect(h.calls[0][0]).toBe('createSession')
+})
+
 // --- `fleetview server status` / `server stop` ---
 
 const serverHarness = ({ healthy = true, pid = 4242, identity = { ok: true, command: 'opencode serve' }, kill }: any = {}) => {
@@ -1270,6 +1288,36 @@ test('#45: ls reports a previously-errored session as failed, not done', async (
   const rows = JSON.parse(printed.join('\n'))
   expect(rows).toHaveLength(1)
   expect(rows[0]).toMatchObject({ id: 's1', state: 'failed' })
+})
+
+// #107: `ls`/`--json` compared the raw `--cwd` against opencode's absolute project paths, while the
+// roster resolves it — so `ls --cwd <relative>` scoped against a string that matched nothing. It is
+// resolved once now, the same as the roster path.
+test('#107: ls --cwd resolves a relative path so it matches the roster', async () => {
+  const under = join(process.cwd(), 'sub-project')
+  const client = {
+    listProjects: vi.fn(() => Promise.resolve([{ id: 'a-1', worktree: under, vcs: 'git', time: { created: 1, updated: 1 } }])),
+    listSessions: vi.fn(() => Promise.resolve([{ id: 's1', title: 't', directory: under, time: { created: 1, updated: 2000 } }])),
+    sessionStatus: vi.fn(() => Promise.resolve({ s1: { type: 'busy' } })),
+    listPermissions: vi.fn(() => Promise.resolve([])),
+    listQuestions: vi.fn(() => Promise.resolve([])),
+  }
+  const printed: string[] = []
+  const opts = {
+    createClient: () => client,
+    loadSeenImpl: () => ({}),
+    seenFile: () => '/tmp/does-not-exist-seen.json',
+    loadRosterImpl: () => ({ sessions: [] }),
+    rosterFile: () => '/tmp/does-not-exist-roster.json',
+    log: (line: string) => printed.push(line),
+    error: (line: string) => printed.push(line),
+    setExitCode: vi.fn(),
+  }
+  const ensureServer = vi.fn(() => Promise.resolve({ ok: true, server }))
+  await listSessions({ command: 'ls', json: true, cwd: 'sub-project' } as any, ensureServer, '/tmp/s.json', opts as any)
+  const rows = JSON.parse(printed.join('\n'))
+  expect(rows).toHaveLength(1)
+  expect(rows[0].id).toBe('s1')
 })
 
 test('a failing pending read leaves the rest of the listing intact', async () => {

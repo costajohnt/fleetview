@@ -14,6 +14,10 @@ export const USAGE = `fleetview — a roster for opencode sessions
     --backend <name>             agent CLI to dispatch on: opencode, claude, copilot
                                  (default opencode, or $FLEETVIEW_BACKEND)
   fleetview --cwd <path>         open it scoped to sessions under <path>
+
+  The shell commands below (ls/--json/attach/logs/stop/rm/bg) act on opencode
+  sessions only; the roster TUI shows sessions from every backend.
+
   fleetview --json [--all]       print sessions as JSON instead of opening the roster
   fleetview ls [--all]           the same list, one line per session
   fleetview attach <id>          attach to a session in this terminal
@@ -22,12 +26,14 @@ export const USAGE = `fleetview — a roster for opencode sessions
   fleetview stop <id>            stop a session, leaving it in the list
   fleetview rm <id>              delete a session (keeps a worktree holding commits)
   fleetview bg "<prompt>"        dispatch a background session without opening the roster
+    --cwd <path>                 dispatch in <path> instead of the current directory
     --name <title>               name the session instead of waiting for opencode's title
     --agent <name>               run as that subagent
     --model <provider/model>     override the model for this dispatch
     --exec                       treat the prompt as a shell command (a ! job)
   fleetview server status        the opencode server fleetview talks to: host, port, pid, health
   fleetview server stop          stop that server (all sessions stop streaming until restart)
+  fleetview --version            print the version (-v)
   fleetview --help               this text`
 
 const SUBCOMMANDS = new Set(['attach', 'logs', 'stop', 'rm', 'ls', 'server', 'bg', 'add'])
@@ -94,14 +100,36 @@ export function parseArgs(argv: string[] = []): ParseResult {
     rest.push(arg)
   }
 
+  // #112.1: the value flags below are parsed for every command but only a few commands act on any
+  // given one — `fleetview ls --exec` used to parse clean and silently drop the flag. A flag a
+  // command ignores is a usage mistake, so it errors like an unknown option rather than vanishing.
+  // Only these five are command-scoped; --all/--cwd/--json are handled inline above and are broadly
+  // meaningful.
+  const ALLOWED_FLAGS: Record<string, Set<string>> = {
+    ui: new Set(['model', 'agent', 'backend']),
+    bg: new Set(['name', 'agent', 'model', 'exec']),
+  }
+  const flagProblem = (command: string): string | null => {
+    const allowed = ALLOWED_FLAGS[command] ?? new Set<string>()
+    for (const f of ['exec', 'name', 'model', 'agent', 'backend'] as const) {
+      const given = f === 'exec' ? out.exec === true : (out as Record<string, unknown>)[f] !== undefined
+      if (given && !allowed.has(f)) return `--${f} is not valid for ${command === 'ui' ? 'the roster' : command}`
+    }
+    return null
+  }
+
   if (rest.length === 0) {
     // `--json` on its own is the listing, which is what agent view's `claude agents --json` means.
     if (out.json) out.command = 'ls'
+    const problem = flagProblem(out.command)
+    if (problem) return { error: problem }
     return out
   }
   const [name, ...args] = rest
   if (!SUBCOMMANDS.has(name)) return { error: `unknown command: ${name}` }
   out.command = name
+  const problem = flagProblem(name)
+  if (problem) return { error: problem }
   if (name === 'ls') return out
   if (name === 'bg') {
     // The prompt is everything after `bg`, joined — quoting the whole thing is friendlier than

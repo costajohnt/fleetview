@@ -149,7 +149,12 @@ export function expiredShellJobs(
   return roster.sessions.filter((m) => {
     if (!m.shell) return false
     const s = sessionsById.get(`${m.worktree}:${m.id}`)
-    return s && FINISHED_STATUSES.has(s.status) && now - (s.updatedAt ?? 0) > SHELL_JOB_TTL_MS
+    if (!s || !FINISHED_STATUSES.has(s.status)) return false
+    // #112.2: a store row that returned no server time defaults updatedAt to 0, which would age out
+    // instantly. Fall back to when the member was added so a real 5-minute window always applies;
+    // with no timestamp at all, leave it alone rather than reap before `fleetview logs` can read it.
+    const settledAt = s.updatedAt || (typeof m.addedAt === 'number' ? m.addedAt : 0)
+    return settledAt > 0 && now - settledAt > SHELL_JOB_TTL_MS
   })
 }
 
@@ -537,7 +542,10 @@ export function App({
   // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the joined worktrees, not the array identity
   // repoProjects, not projects: completing `@` to a worktree would dispatch into another session's
   // isolated copy, which is the one thing isolation exists to prevent.
-  const repos = useMemo<{ name: string; worktree: string }[]>(() => repoChoices({ cwd, projects: repoProjects }), [cwd, projectKeys])
+  const repos = useMemo<{ name: string; worktree: string }[]>(
+    () => repoChoices({ cwd, projects: repoProjects, dirExists: dirExistsImpl }),
+    [cwd, projectKeys], // eslint-disable-line react-hooks/exhaustive-deps -- dirExistsImpl is a stable dep
+  )
   const vocab = {
     agents: agents.map((a) => a.name),
     repos: repos.map((r) => r.name),
@@ -971,7 +979,13 @@ export function App({
     // can never land in someone else's worktree.
     return (
       named ??
-      pickTarget({ cwd, projects: repoProjects, current: current && { ...current, projectKey: repoOf(current.projectKey) }, groupBy: rosterState.groupBy })
+      pickTarget({
+        cwd,
+        projects: repoProjects,
+        current: current && { ...current, projectKey: repoOf(current.projectKey) },
+        groupBy: rosterState.groupBy,
+        dirExists: dirExistsImpl,
+      }) ?? undefined
     )
   }
 
@@ -1091,6 +1105,11 @@ export function App({
     // a guard whose correctness turns on that is a guard waiting to break.
     const remaining = (byProjectSessions.get(projectKey) ?? []).filter((s) => s.id !== deletedId).length
     if (remaining > 0) return
+    // #112.4: this safety read is the last synchronous thing before the removal — callers await the
+    // session delete first, and nothing async runs between here and removeWorktree — so a commit an
+    // agent lands after the session is stopped is measured, not destroyed. The one window the client
+    // can't close is the round-trip inside removeWorktree itself; the server does the actual `git
+    // worktree remove`, so a commit that lands during that call is the server's race, not this one's.
     const safety = worktreeSafetyImpl(projectKey, repo)
     if (!safety.removable) return flash(`kept the worktree — ${safety.reason}`, 5000)
     try {
@@ -1641,7 +1660,12 @@ function RenameInput({ initial, onSubmit, onCancel }: { initial: string; onSubmi
     if (key.return) return text.trim() && onSubmit(text.trim())
     if (parseMouseEvents(input).length) return // mouse sequences are not text
     if (key.backspace || key.delete) setText((t) => graphemes(t).slice(0, -1).join(''))
-    else if (input && !key.ctrl && !key.meta) setText((t) => t + input)
+    else if (input && !key.ctrl && !key.meta) {
+      // #112.3: strip control bytes / escape residue the same way the dispatch input does, so a
+      // paste can't land C0 bytes verbatim in the title sent to the server.
+      const text = stripEscapeResidue(input.replace(/[\r\n]+/g, ' ').replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, ''))
+      if (text) setText((t) => t + text)
+    }
   })
   return React.createElement(Text, null, `Rename: ${text}█ (⏎ save · esc cancel)`)
 }
