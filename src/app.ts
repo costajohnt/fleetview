@@ -827,7 +827,7 @@ export function App({
   useEffect(() => {
     if (!lastAttachedKey) return
     if (!allMembers.some((s) => `${s.projectKey}:${s.id}` === lastAttachedKey)) setLastAttachedKey(null)
-  })
+  }, [lastAttachedKey, allMembers])
 
   // Transient one-liner above the input. Every caller replaces the previous timer rather than
   // stacking them, so a fast second notice can't be cleared early by the first one's timeout.
