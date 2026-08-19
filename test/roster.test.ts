@@ -50,6 +50,26 @@ test('renders repo headers, titles, state glyphs, and a full-width highlighted s
   expect(highlighted(frame, 'fix tests')).toBe(false)
 })
 
+// #126: the last-attached row's title gets a bold ANSI escape. We test against the raw frame
+// (before stripping) because stripAnsi removes the bold codes that are the observable signal.
+test('lastAttachedKey makes the matching row title bold', () => {
+  const raw = inkRender(
+    React.createElement(Roster, {
+      groups,
+      selected: 1,
+      offlineProjects: new Set(),
+      lastAttachedKey: '/x/a:s1',
+    }),
+  )
+  const frame = raw.lastFrame() ?? ''
+  // The bold code must appear, and must appear before 'fix tests' on its line.
+  const fixLine = frame.split('\n').find((l: string) => l.includes('fix tests')) ?? ''
+  expect(fixLine.indexOf('\x1b[1m')).toBeGreaterThanOrEqual(0)
+  // The non-last-attached row must NOT have a bold marker on its line.
+  const docsLine = frame.split('\n').find((l: string) => l.includes('write docs')) ?? ''
+  expect(docsLine.indexOf('\x1b[1m')).toBe(-1)
+})
+
 test('offline project is flagged', () => {
   const frame = render(React.createElement(Roster, { groups, selected: 0, offlineProjects: new Set(['/x/b']) })).lastFrame()
   expect(frame).toContain('offline')

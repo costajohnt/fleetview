@@ -149,6 +149,8 @@ export type RosterProps = {
   markMembers?: KeySet
   showStateWord?: boolean
   showBackendTag?: boolean
+  // #126: `${projectKey}:${id}` of the session the user last attached to; its title renders bold.
+  lastAttachedKey?: string
   now?: number
 }
 
@@ -166,6 +168,7 @@ export function Roster({
   // one backend holds every session, so the opencode-only row is byte-for-byte what it was: no tag,
   // no gap, no change to the snippet budget.
   showBackendTag = false,
+  lastAttachedKey,
   now,
 }: RosterProps) {
   const flat = flattenGroups(groups)
@@ -213,6 +216,7 @@ export function Roster({
       if (line.type === 'placeholder') return React.createElement(Text, { key: line.key, dimColor: true }, line.text)
       const s = line.session
       const isSelected = selectedKey === undefined ? s === selectedSession : line.key === selectedKey
+      const isLastAttached = lastAttachedKey !== undefined && line.key === lastAttachedKey
       const isMember = markMembers?.has(`${s.projectKey}:${s.id}`)
       const isOffline = offlineProjects.has(s.projectKey)
       const timeText = ageLabel(s, now)
@@ -267,8 +271,8 @@ export function Roster({
         React.createElement(StatusBadge, { status: s.status, alive: !isOffline, frame }),
         ' ',
         // Title: white on the selection bar, otherwise the secondary grey the snippet uses — agent
-        // view's rows carry color only in the state glyph until selected. Pinned stays bold.
-        React.createElement(Text, { bold: Boolean(s.pinned), color: isSelected ? theme.selectionFg : undefined, dimColor: !isSelected }, title),
+        // view's rows carry color only in the state glyph until selected. Pinned and last-attached stay bold.
+        React.createElement(Text, { bold: Boolean(s.pinned) || isLastAttached, color: isSelected ? theme.selectionFg : undefined, dimColor: !isSelected }, title),
         stateWord ? React.createElement(Text, { color: stateColor(s.status) }, ` ${stateWord}`) : '',
         backendTag ? React.createElement(Text, { dimColor: true }, ` ${backendTag}`) : '',
         snippetText ? React.createElement(Text, { dimColor: true }, ` ${snippetText}`) : '',

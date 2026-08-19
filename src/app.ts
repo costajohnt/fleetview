@@ -327,6 +327,9 @@ export function App({
   // interaction clears it whole: the undo is immediate-after-detach only, so Esc stays the quit
   // key the rest of the time and there is no stale ref to attach weeks later.
   const [backgrounded, setBackgrounded] = useState<{ id: string; projectKey: string; notice: boolean } | null>(null)
+  // #126: the session the user last attached to, bolded in the roster for the life of the process.
+  // Separate from `backgrounded` so the undo/notice semantics stay untouched.
+  const [lastAttachedKey, setLastAttachedKey] = useState<string | null>(null)
   // A selection request by identity, resolved against the live rows by the effect below.
   const [pendingSelect, setPendingSelect] = useState<{ id: string; projectKey: string } | null>(null)
   const [helpPageIndex, setHelpPageIndex] = useState(0)
@@ -820,6 +823,11 @@ export function App({
   })
   // Hand the tab title back on the way out rather than leaving a stale count on the terminal.
   useEffect(() => () => setTitle(stdout, ''), [stdout])
+  // #126: clear the last-attached marker when its session leaves the live roster.
+  useEffect(() => {
+    if (!lastAttachedKey) return
+    if (!allMembers.some((s) => `${s.projectKey}:${s.id}` === lastAttachedKey)) setLastAttachedKey(null)
+  })
 
   // Transient one-liner above the input. Every caller replaces the previous timer rather than
   // stacking them, so a fast second notice can't be cleared early by the first one's timeout.
@@ -848,6 +856,7 @@ export function App({
     // #34: there is no session to hand the terminal over to. Say so and name the key that ends it,
     // rather than launching a CLI against an id the server has never heard of.
     if (row.ghost) return flash(`"${row.title}" is gone — ^x removes it from the roster`, 4000)
+    setLastAttachedKey(`${row.projectKey}:${row.id}`)
     const done = onAction({
       type: 'enter',
       sessionId: row.id,
@@ -1643,6 +1652,7 @@ export function App({
             // exactly the row it always did.
             showBackendTag,
             markMembers: view === 'browse' ? memberKeySet : undefined,
+            lastAttachedKey: lastAttachedKey ?? undefined,
           }),
     React.createElement(Box, { flexGrow: 1 }), // pushes the input to the terminal's bottom edge
     // The input stays mounted under the peek panel too: agent view's peek is an overlay on the
