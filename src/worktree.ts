@@ -8,9 +8,11 @@
 // is protect anything on the way out — DELETE removes a worktree holding uncommitted changes, and
 // its branch, without complaint (verified by losing a file to it). So the refusal rules live here.
 import { execFileSync } from 'node:child_process'
-import { statSync } from 'node:fs'
+import { statSync, appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { GIT_SAFE_ARGS } from './git-safe.ts'
+import { fleetviewDir } from './paths.ts'
 import type { Project } from './types.ts'
 
 // A project row from GET /project carries `sandboxes`: the worktree directories opencode has made
@@ -117,6 +119,24 @@ export function worktreeName(prompt: string, existing: string[] = []) {
     const candidate = `${base}-${n}`
     if (!taken.has(candidate)) return candidate
   }
+}
+
+// #128 instrumentation: a dispatch got a collision-suffixed worktree name even though the user
+// says the prompts were different — which means worktreeName received text slugging identical to
+// an existing worktree, and nobody can tell after the fact WHAT text that was. Append the evidence
+// (prompt, chosen name, taken slots) to a local NDJSON file so the next occurrence self-documents.
+// Best-effort by design: a debug log must never cost anyone their dispatch.
+export function logNameCollision(entry: { prompt: string; name: string; existing: string[] }) {
+  try {
+    const dir = (process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? fleetviewDir(join(homedir(), '.local', 'state'))
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    appendFileSync(
+      join(dir, 'dispatch-debug.ndjson'),
+      // The prompt is capped: this is a lookup key for the bug, not an archive of pasted walls.
+      `${JSON.stringify({ ts: new Date().toISOString(), ...entry, prompt: entry.prompt.slice(0, 200) })}\n`,
+      { mode: 0o600 },
+    )
+  } catch {}
 }
 
 // Every caller's `dir` is a project or sandbox path the unauthenticated opencode server named, which
