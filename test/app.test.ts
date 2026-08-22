@@ -3442,6 +3442,28 @@ test('detaching shows "Your conversation moved to the background" with that row 
   await pressUntil(stdin, '\x1B[B', () => !lastFrame().includes('Your conversation moved to the background'))
 })
 
+// #126: the row you were last inside renders bold, and the marker outlives the `backgrounded` undo
+// window — the notice dies on the next keypress, the bold stays for the process lifetime. Raw
+// (unstripped) frames on purpose: FORCE_COLOR=3 makes the bold escape the assertable contract.
+test('the last-attached row renders bold after detach, surviving the notice dismissal', async () => {
+  const deps = makeDeps()
+  let detach: any
+  const onAction = vi.fn((a: any) => (a.type === 'enter' ? new Promise((r) => { detach = r }) : undefined))
+  const instance = (inkRender as any)(React.createElement(App, { ...deps, onAction }))
+  live.push(instance)
+  const raw = () => instance.lastFrame() ?? ''
+  const plain = () => stripAnsi(raw())
+  const titleLine = () => raw().split('\n').find((l: string) => stripAnsi(l).includes('fix tests')) ?? ''
+  await waitFor(() => plain().includes('fix tests'))
+  expect(titleLine()).not.toContain('\x1b[1m') // never attached yet — nothing bold
+  instance.stdin.write('\r') // empty input → attach
+  await waitFor(() => plain() === '')
+  detach({ detached: true, sessionId: 's1', worktree: '/x/alpha' })
+  await waitFor(() => plain().includes('moved to the background'))
+  await pressUntil(instance.stdin, '\x1B[B', () => !plain().includes('moved to the background'))
+  expect(titleLine()).toContain('\x1b[1m')
+})
+
 // Regression: row keys are namespaced by the live grouping (`state:*` by default), so selecting
 // the detached row via a `${worktree}:${id}` key silently selected nothing and navigation fell
 // back to the FIRST session — `→` after a detach attached the wrong session when several existed.

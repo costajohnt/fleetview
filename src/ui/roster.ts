@@ -147,6 +147,9 @@ export type RosterProps = {
   columns?: number
   // Browse view: `${projectKey}:${id}` of every roster member, flagged with a dim `[roster]`.
   markMembers?: KeySet
+  // #126: `${projectKey}:${id}` of the session the user was last attached to — its title renders
+  // bold, agents-view style, so the eye lands on the row you just left. Absent row = nothing bold.
+  lastAttached?: string
   showStateWord?: boolean
   showBackendTag?: boolean
   now?: number
@@ -161,6 +164,7 @@ export function Roster({
   maxRows = Infinity,
   columns = 80,
   markMembers,
+  lastAttached,
   showStateWord = false,
   // "Roster rows carry a backend tag when more than one is active." Off by default and off whenever
   // one backend holds every session, so the opencode-only row is byte-for-byte what it was: no tag,
@@ -267,8 +271,9 @@ export function Roster({
         React.createElement(StatusBadge, { status: s.status, alive: !isOffline, frame }),
         ' ',
         // Title: white on the selection bar, otherwise the secondary grey the snippet uses — agent
-        // view's rows carry color only in the state glyph until selected. Pinned stays bold.
-        React.createElement(Text, { bold: Boolean(s.pinned), color: isSelected ? theme.selectionFg : undefined, dimColor: !isSelected }, title),
+        // view's rows carry color only in the state glyph until selected. Pinned stays bold, and so
+        // does the last-attached row (#126) — bold layers on top of the selection colour.
+        React.createElement(Text, { bold: Boolean(s.pinned) || `${s.projectKey}:${s.id}` === lastAttached, color: isSelected ? theme.selectionFg : undefined, dimColor: !isSelected }, title),
         stateWord ? React.createElement(Text, { color: stateColor(s.status) }, ` ${stateWord}`) : '',
         backendTag ? React.createElement(Text, { dimColor: true }, ` ${backendTag}`) : '',
         snippetText ? React.createElement(Text, { dimColor: true }, ` ${snippetText}`) : '',

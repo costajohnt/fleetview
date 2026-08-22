@@ -327,6 +327,13 @@ export function App({
   // interaction clears it whole: the undo is immediate-after-detach only, so Esc stays the quit
   // key the rest of the time and there is no stale ref to attach weeks later.
   const [backgrounded, setBackgrounded] = useState<{ id: string; projectKey: string; notice: boolean } | null>(null)
+  // #126: the session the user was last inside, kept for the life of the process — the roster bolds
+  // its row so the eye lands where you left off after a detach. Deliberately separate from
+  // `backgrounded` above: that is the immediate-after-detach undo window, cleared by any
+  // interaction, and its semantics must stay untouched. A ref, not state: it only ever changes
+  // during an attach/detach cycle, which re-renders via `attached` anyway. Not persisted across
+  // restarts — a stale bold weeks later is worse than none.
+  const lastAttached = useRef<{ id: string; projectKey: string } | null>(null)
   // A selection request by identity, resolved against the live rows by the effect below.
   const [pendingSelect, setPendingSelect] = useState<{ id: string; projectKey: string } | null>(null)
   const [helpPageIndex, setHelpPageIndex] = useState(0)
@@ -864,6 +871,8 @@ export function App({
         .map((s): AttachSibling => ({ id: s.id, projectKey: s.projectKey, ...(asString(s.backend) ? { backend: asString(s.backend) } : {}) })),
     })
     if (isThenable(done)) {
+      // Set on attach, not detach, so a hard exit of the attached PTY still leaves the marker.
+      lastAttached.current = { id: row.id, projectKey: row.projectKey }
       attachedRef.current = true
       setAttached(true)
       // `result` is the host's AttachOutcome, read through the same narrowing every other payload
@@ -878,6 +887,8 @@ export function App({
         // session was current on detach — Alt+N may have switched away from `row`.
         if (result?.detached) {
           const left = { id: asString(result.sessionId) ?? row.id, projectKey: asString(result.worktree) ?? row.projectKey, notice: true }
+          // Alt+1..9 may have switched sessions while attached — the row actually left wins (#126).
+          lastAttached.current = { id: left.id, projectKey: left.projectKey }
           setBackgrounded(left)
           // Selection by identity, not by a precomputed key: row keys are namespaced by whatever
           // grouping is live (`state:waiting` in the default view, the worktree in project view),
@@ -1643,6 +1654,9 @@ export function App({
             // exactly the row it always did.
             showBackendTag,
             markMembers: view === 'browse' ? memberKeySet : undefined,
+            // If the session no longer exists in the live rows, no row matches the key and nothing
+            // renders bold — the clearing the issue asks for, with no bookkeeping.
+            lastAttached: lastAttached.current ? `${lastAttached.current.projectKey}:${lastAttached.current.id}` : undefined,
           }),
     React.createElement(Box, { flexGrow: 1 }), // pushes the input to the terminal's bottom edge
     // The input stays mounted under the peek panel too: agent view's peek is an overlay on the
