@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -12,6 +12,7 @@ import {
   mergeBackCommand,
   shouldIsolate,
   worktreeName,
+  logNameCollision,
   worktreeSafety,
   gitKindOf,
 } from '../src/worktree.ts'
@@ -110,6 +111,38 @@ test('worktreeName slugs the prompt and never collides with an existing director
   // long prompts are cut without leaving a trailing dash on the branch name
   expect(worktreeName('a'.repeat(50)).length).toBe(32)
   expect(worktreeName('some words that run right up to the cut here').endsWith('-')).toBe(false)
+})
+
+// #128: two genuinely different prompts must never share a name — pins the behavior the bug report
+// disputes, and documents the one legitimate suffix case: prompts identical through the 32-char cut.
+test('worktreeName: distinct prompts get distinct names; only a shared 32-char prefix collides', () => {
+  const existing = ['/wt/x/find-some-jira-cards-to-work-on']
+  expect(worktreeName('review the open pull requests', existing)).toBe('review-the-open-pull-requests')
+  // Same first 32 chars, different tails — this suffix is the false-positive path, not the bug.
+  expect(worktreeName('find some jira cards to work on today', existing)).toBe('find-some-jira-cards-to-work-on-2')
+})
+
+test('logNameCollision appends an NDJSON line with the prompt capped, and never throws', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleetview-dbg-'))
+  const prev = process.env.FLEETVIEW_STATE_DIR
+  process.env.FLEETVIEW_STATE_DIR = dir
+  try {
+    logNameCollision({ prompt: 'p'.repeat(500), name: 'fix-tests-2', existing: ['/wt/x/fix-tests'] })
+    const lines = readFileSync(join(dir, 'dispatch-debug.ndjson'), 'utf8').trim().split('\n')
+    expect(lines).toHaveLength(1)
+    const entry = JSON.parse(lines[0])
+    expect(entry.name).toBe('fix-tests-2')
+    expect(entry.existing).toEqual(['/wt/x/fix-tests'])
+    expect(entry.prompt).toHaveLength(200)
+    expect(typeof entry.ts).toBe('string')
+    // best-effort contract: an unwritable dir must not throw into the dispatch path
+    process.env.FLEETVIEW_STATE_DIR = '/dev/null/nope'
+    expect(() => logNameCollision({ prompt: 'x', name: 'y', existing: [] })).not.toThrow()
+  } finally {
+    if (prev === undefined) delete process.env.FLEETVIEW_STATE_DIR
+    else process.env.FLEETVIEW_STATE_DIR = prev
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // --- the refusal rules, against real git repositories ---

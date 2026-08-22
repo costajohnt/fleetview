@@ -1,7 +1,7 @@
 import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
 import { DEFAULT_BACKEND } from './backends/index.ts'
-import { shouldIsolate, worktreeName } from './worktree.ts'
+import { shouldIsolate, worktreeName, logNameCollision } from './worktree.ts'
 import type { AttachTarget, Backend, ListedSession, ModelPair, Project, StreamProject, Worktree } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
@@ -207,7 +207,12 @@ export function useDispatch({
           const existing = ((await client.listWorktrees(target)) ?? []).map((w: Worktree | string | null | undefined) =>
             typeof w === 'string' ? w : w?.directory ?? w?.name ?? '',
           )
-          const created = await client.createWorktree(worktreeName(text, existing), target)
+          const name = worktreeName(text, existing)
+          // #128: a suffixed name means this prompt slugged onto an existing worktree. Reported
+          // once as the new session inheriting another session's name with a different prompt —
+          // log what was actually received so the next occurrence carries its own evidence.
+          if (name !== worktreeName(text)) logNameCollision({ prompt: text, name, existing })
+          const created = await client.createWorktree(name, target)
           if (created?.directory) {
             worktree = created.directory
             isolated = true
