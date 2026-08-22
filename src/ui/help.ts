@@ -53,6 +53,7 @@ const GRAMMAR = [
 const FLEETVIEW_ONLY = [
   ['^b', 'browse every opencode session, including ones fleetview did not start'],
   ['^a', 'add or remove the selected session from the roster (browse)'],
+  ['bold', 'the session you were last inside'],
 ]
 
 // Flattened once so the whole thing can be paged: help is 30-odd rows and a standard terminal is

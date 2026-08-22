@@ -134,6 +134,26 @@ test('markMembers flags member rows with a [roster] marker, leaves non-members u
   expect(frame.split('\n').find((l: string) => l.includes('non member row'))).not.toContain('[roster]')
 })
 
+// #126: the last-attached row's title renders bold. FORCE_COLOR=3 (vitest.config.js) makes the
+// raw frame carry the ANSI to assert on — no stripAnsi here, the escape code IS the contract.
+test('lastAttached bolds that row and no other session row', () => {
+  const g = [
+    {
+      projectKey: '/x/a',
+      repoName: 'alpha',
+      sessions: [
+        { projectKey: '/x/a', id: 's1', title: 'was inside', status: 'idle' },
+        { projectKey: '/x/a', id: 's2', title: 'never entered', status: 'idle' },
+      ],
+    },
+  ]
+  const raw = inkRender(
+    React.createElement(Roster, { groups: g, selected: 0, offlineProjects: new Set(), lastAttached: '/x/a:s1' }),
+  ).lastFrame() ?? ''
+  expect(raw.split('\n').find((l: string) => l.includes('was inside'))).toContain('\x1b[1m')
+  expect(raw.split('\n').find((l: string) => l.includes('never entered'))).not.toContain('\x1b[1m')
+})
+
 // --- relTime: pure helper (Wave B) ---
 
 test('relTime: under 60s is "now"', () => {
