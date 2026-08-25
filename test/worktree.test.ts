@@ -271,7 +271,8 @@ test('a repo whose config and hooks try to run commands cannot run them through 
 // --- #113.4: the merge-back command line ---
 
 test('mergeBackCommand names the parent repository and the session branch', () => {
-  expect(mergeBackCommand('/wt/one', '/x/repo', 'opencode/fix-tests')).toBe('git -C /x/repo merge opencode/fix-tests')
+  expect(mergeBackCommand('/wt/one', '/x/repo', 'opencode/fix-tests')).toBe("git -C '/x/repo' merge opencode/fix-tests")
+  expect(mergeBackCommand('/wt/one', '/My Projects/ui', 'feat')).toBe("git -C '/My Projects/ui' merge feat")
 })
 
 test('mergeBackCommand yields nothing when there is nothing to merge back', () => {
