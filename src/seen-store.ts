@@ -1,11 +1,9 @@
 import { readFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
-import { atomicWrite, fleetviewDir } from './paths.ts'
+import { atomicWrite, stateDir } from './paths.ts'
 
 // Same legacy fallback as the config stores: an existing pre-rename state dir keeps working.
-export const defaultSeenFile = () =>
-  join((process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? fleetviewDir(join(homedir(), '.local', 'state')), 'seen.json')
+export const defaultSeenFile = () => join(stateDir(), 'seen.json')
 
 // { "<repoId>:<sessionId>": { updated: <ms>, hasRun: <bool>, stopped?: <bool>, error?: <string|true> } }
 // #53: `stopped` is written by the store's snapshot() and read back by setSessions — the server
