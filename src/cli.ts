@@ -29,6 +29,7 @@ import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, isB
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
+import { noteExit } from './paths.ts'
 import { loadRoster, saveRoster, makePersistRoster, withRosterLock, defaultRosterFile } from './roster-store.ts'
 import { attachPty } from './pty-host.ts'
 import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
@@ -1179,7 +1180,27 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
     // SIGINT too: an external `kill -INT` (not the in-TUI ctrl+c, which Ink reads as a raw-mode
     // keypress and never as a signal) otherwise takes the default disposition, skipping the `exit`
     // handler and leaving the alt screen up with mouse reporting on and the cursor hidden.
-    for (const sig of ['SIGTERM', 'SIGHUP', 'SIGINT']) process.on(sig, () => process.exit(1))
+    for (const sig of ['SIGTERM', 'SIGHUP', 'SIGINT'])
+      process.on(sig, () => {
+        // The tty is often already gone here (a dropped SSH session HUPs its process group), so the
+        // log file is the only reader left — and it is what tells a user whose terminal vanished
+        // mid-session that fleetview was killed rather than that it crashed.
+        noteExit(`exited on ${sig}`)
+        process.exit(1)
+      })
+    // A crash used to leave no trace at all: node writes the stack to stderr while the alternate
+    // screen is still up, then the `exit` handler above switches back to the normal buffer and the
+    // whole alt-screen page — stack included — goes with it. What the user sees is a shell prompt
+    // and no reason. Restore the screen FIRST, then print, and keep a copy on disk.
+    for (const event of ['uncaughtException', 'unhandledRejection'])
+      process.on(event, (thrown: unknown) => {
+        restoreScreen()
+        process.removeListener('exit', restoreScreen)
+        const detail = thrown instanceof Error ? (thrown.stack ?? thrown.message) : String(thrown)
+        noteExit(`${event}: ${detail.split('\n')[0]}`)
+        console.error(`fleetview crashed (${event}):\n${detail}`)
+        process.exit(1)
+      })
   }
 
   try {
