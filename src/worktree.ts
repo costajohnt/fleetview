@@ -195,6 +195,6 @@ export function worktreeSafety(dir: string, parentDir: string | null | undefined
 // repository; the caller supplies the branch lookup.
 export function mergeBackCommand(worktree: string, repo: string | null | undefined, branch: string | null | undefined) {
   if (!repo || !branch || repo === worktree) return null
-  return `git -C ${repo} merge ${branch}`
+  return `git -C '${repo.replace(/'/g, "'\\''")}' merge ${branch}`
 }
 

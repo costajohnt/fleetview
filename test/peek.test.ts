@@ -436,11 +436,11 @@ test('Peek: a merge-back command renders as its own line', () => {
     React.createElement(Peek, {
       target: { title: 't', projectKey: '/wt/one' },
       messages: [],
-      mergeBack: 'git -C /x/repo merge opencode/fix-tests',
+      mergeBack: "git -C '/x/repo' merge opencode/fix-tests",
       columns: 200,
     }),
   ).lastFrame()!
-  expect(frame).toContain('merge back: git -C /x/repo merge opencode/fix-tests')
+  expect(frame).toContain("merge back: git -C '/x/repo' merge opencode/fix-tests")
 })
 
 test('Peek: no merge-back line when there is nothing to merge back', () => {
