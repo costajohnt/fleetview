@@ -119,7 +119,8 @@ without skip-permissions, so it denies by default.
 ## Keys
 
 ↑↓ move (rows and group headers) · ⏎ attach, dispatch if there's text, or collapse a group
-header · ⇧⏎ (or ⌥⏎) dispatch and attach · space peek · → attach · ^z detach and come back ·
+header · ⇧⏎ (or ⌥⏎) dispatch and attach · space peek · → attach (with text typed, ← → move the
+caret and ⌥← ⌥→ move it a word) · ^z detach and come back ·
 ^s state/project grouping · ^t pin · ⇧↑ ⇧↓ reorder within a group · ^r rename · ^x stop,
 again within 2s to delete (on a group header: the whole group) · ^j newline · ^g edit the
 prompt in $EDITOR · esc close peek, clear the input, or quit · ^c clear the input, again to

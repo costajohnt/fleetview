@@ -319,8 +319,10 @@ test('an arrow with an empty reply still retargets peek, and the reply that foll
 })
 
 // The right arrow is documented as attach, but with a draft it used to attach and silently drop
-// the text — the same class of loss as sending it to the wrong session.
-test('the right arrow with a draft in peek clears the draft rather than attaching and discarding it', async () => {
+// the text — the same class of loss as sending it to the wrong session. Since #134 the reply has a
+// caret, so → with a draft moves it (and ⌥← moves it a word) and the draft is kept; only an empty
+// reply lets → attach.
+test('the right arrow with a draft in peek moves the caret rather than attaching and discarding it', async () => {
   const deps = makeTwoSessionDeps()
   const onAction = vi.fn()
   const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction, projectPollMs: 40 }))
@@ -329,13 +331,17 @@ test('the right arrow with a draft in peek clears the draft rather than attachin
   await waitFor(() => lastFrame().includes('reply · ! runs a shell command'))
 
   stdin.write('do not lose me')
-  await waitFor(() => lastFrame().includes('> do not lose me'))
+  await waitFor(() => lastFrame().includes('> do not lose me█'))
+  stdin.write('\x1B[1;3D') // ⌥←
+  await waitFor(() => lastFrame().includes('> do not lose █me'))
   stdin.write(RIGHT)
-  await waitFor(() => !lastFrame().includes('> do not lose me'))
+  await waitFor(() => lastFrame().includes('> do not lose m█e'))
   await tick()
   expect(onAction.mock.calls.filter(([a]: any) => a?.type === 'enter')).toEqual([])
 
   // With the draft cleared, the right arrow attaches as documented.
+  stdin.write('\x1B') // esc clears the draft
+  await waitFor(() => lastFrame().includes('reply · ! runs a shell command'))
   stdin.write(RIGHT)
   await waitFor(() => onAction.mock.calls.some(([a]: any) => a?.type === 'enter'))
   expect(onAction.mock.calls.find(([a]: any) => a?.type === 'enter')![0].sessionId).toBe('s1')

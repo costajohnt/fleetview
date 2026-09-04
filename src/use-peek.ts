@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useInput } from 'ink'
-import { graphemes } from './text-utils.ts'
+import { EMPTY, atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, type TextCursor } from './text-cursor.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
 import { questionOptions, suggestedReply } from './ui/peek.ts'
 import { OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
@@ -74,7 +74,11 @@ export function usePeek({
   // onto the wrong session (the failure race is real: navigation clears this to null immediately,
   // but the async .catch() can still resolve afterward with a stale closure over the old target).
   const [peekError, setPeekError] = useState<{ id: string; message: string } | null>(null)
-  const [peekReply, setPeekReply] = useState('') // the peek panel's own input, separate from dispatch
+  // The peek panel's own input, separate from dispatch. Text plus caret (#134); the string form is
+  // what the rest of the hook reads, and setPeekReply replaces it whole with the caret at the end.
+  const [peekEdit, setPeekEdit] = useState<TextCursor>(EMPTY)
+  const peekReply = peekEdit.text
+  const setPeekReply = (text: string) => setPeekEdit(atEnd(text))
 
   // Fetch on open/selection-change; the cleanup's `cancelled` flag is the latest-wins guard —
   // a superseded effect instance's resolution can never write over a newer target's state.
@@ -223,6 +227,13 @@ export function usePeek({
         setPeekError(null)
         return
       }
+      // #134: with a draft, the arrows move its caret (⌥/ctrl+arrow and ESC b/f by word). This
+      // sits above the escape/attach branches so a ← or → with text never closes the panel or
+      // attaches — the #61 guarantee that a draft cannot be thrown away by a navigation key.
+      if (!replyEmpty) {
+        const motion = motionOf(input, key)
+        if (motion) return setPeekEdit((s) => move(s, motion))
+      }
       if (key.escape || (replyEmpty && (key.leftArrow || input === ' '))) {
         if (!replyEmpty) return setPeekReply('')
         setMode('roster')
@@ -232,8 +243,10 @@ export function usePeek({
         setPeekError(null)
       } else if (!replyEmpty && key.return && peekTarget) {
         void sendReply(peekReply.trim(), peekTarget)
-      } else if (!replyEmpty && (key.backspace || key.delete)) {
-        setPeekReply((t) => graphemes(t).slice(0, -1).join(''))
+      } else if (!replyEmpty && key.backspace) {
+        setPeekEdit(backspaceAt)
+      } else if (!replyEmpty && key.delete) {
+        setPeekEdit(deleteForwardAt)
       } else if (key.tab) {
         // "Tab fills the input with a suggested reply." Only ever the session's own words — the
         // first option of the question it asked.
@@ -262,11 +275,9 @@ export function usePeek({
           setPeekTarget(nr.session)
           setPeekError(null)
         }
-      } else if (!replyEmpty && key.rightArrow) {
-        // #61: ⏎ with a draft is consumed above as "send", but → fell through to attach and threw
-        // the draft away silently. Same treatment as the arrows: clear it first, attach second.
-        return setPeekReply('')
       } else if ((key.return || key.rightArrow) && peekTarget) {
+        // #61: → with a draft used to fall through here and throw the draft away; since #134 the
+        // motion branch above consumes it, so only an empty reply reaches attach.
         attach(peekTarget)
       } else if (
         replyEmpty &&
@@ -317,10 +328,10 @@ export function usePeek({
             })
           })
       } else if (key.backspace || key.delete) {
-        setPeekReply((t) => graphemes(t).slice(0, -1).join(''))
+        return // an empty reply has nothing to delete, and the key must not type anything
       } else if (input && !key.ctrl && !key.meta) {
         const text = input.replace(/[\r\n]+/g, ' ').replace(/[\u0000-\u001F\u007F]/g, '')
-        if (text) setPeekReply((t) => t + text)
+        if (text) setPeekEdit((s) => insertAt(s, text))
       }
     },
     { isActive: mode === 'peek' && serverReady && !attached },
@@ -334,6 +345,7 @@ export function usePeek({
     peekTarget,
     peekMessages,
     peekReply,
+    peekReplyCursor: peekEdit.cursor,
     peekPending,
     peekPendingQuestions,
     peekErrorMessage,

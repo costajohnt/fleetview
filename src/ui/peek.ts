@@ -2,6 +2,7 @@ import React from 'react'
 import { basename } from 'node:path'
 import { Box, Text } from 'ink'
 import { graphemes, truncateGraphemes, osc8, stripControl } from '../text-utils.ts'
+import { withCaret } from '../text-cursor.ts'
 import { prStatus, prColor } from '../pull-requests.ts'
 import { permissionLabel, questionLabel, messageBody, errorLabel } from '../session-store.ts'
 import { theme } from './theme.ts'
@@ -106,6 +107,8 @@ export type PeekProps = {
   maxRows?: number
   columns?: number
   reply?: string
+  // Caret offset into `reply` (#134); defaults to the end.
+  replyCursor?: number
   savedReply?: string | null
   now?: number
   prReason?: string | null
@@ -126,6 +129,7 @@ export function Peek({
   maxRows = Infinity,
   columns = 80,
   reply = '',
+  replyCursor,
   savedReply = null,
   now,
   prReason = null,
@@ -265,7 +269,7 @@ export function Peek({
     React.createElement(
       Text,
       { dimColor: reply.length === 0 },
-      reply.length === 0 ? '> █ reply · ! runs a shell command · ← back' : `> ${reply}█`,
+      reply.length === 0 ? '> █ reply · ! runs a shell command · ← back' : `> ${withCaret({ text: reply, cursor: replyCursor ?? reply.length })}`,
     ),
   )
 }
