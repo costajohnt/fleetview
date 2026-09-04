@@ -1,6 +1,7 @@
 // The on-disk mechanics every state store shares (registry, roster-store, seen-store). Extracted
 // verbatim from the three copies each carried — a fix to how fleetview writes a file must land once.
-import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, chmodSync, renameSync, existsSync } from 'node:fs'
+import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, chmodSync, renameSync, existsSync, appendFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 // Prefer the fleetview dir under `parent`, but keep reading an existing pre-rename roost one until
@@ -10,6 +11,24 @@ export const fleetviewDir = (parent: string) => {
   const fresh = join(parent, 'fleetview')
   const legacy = join(parent, 'roost')
   return existsSync(fresh) || !existsSync(legacy) ? fresh : legacy
+}
+
+// Where the watermarks and the exit log live. One definition, because the override env vars are
+// part of the contract and a second spelling of them drifts.
+export const stateDir = () =>
+  (process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? fleetviewDir(join(homedir(), '.local', 'state'))
+
+export const defaultExitLogFile = () => join(stateDir(), 'exit.log')
+
+// Why fleetview went away, for the times stderr cannot say so: a dropped SSH session HUPs the
+// process with the tty already gone, so the only place the reason can survive is disk. Best effort
+// by design — a crash path that throws while reporting a crash reports nothing at all.
+// ponytail: appends and never rotates. Only signals and crashes write here, one short line each.
+export function noteExit(reason: string, file = defaultExitLogFile(), now = () => new Date()) {
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    appendFileSync(file, `${now().toISOString()} pid ${process.pid} ${reason}\n`, { mode: 0o600 })
+  } catch {}
 }
 
 // mkdir-chmod-tmp-rename-0600, the way every state file is written:
