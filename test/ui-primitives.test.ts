@@ -116,3 +116,21 @@ test('summarise ignores pull requests — the counts line is status only', () =>
   // went, same call).
   expect(summarise([{ status: 'idle', prs: [open] }])).toBe('0 awaiting input · 0 working · 1 completed')
 })
+
+// #134: the caret is drawn where the cursor is, and the line scrolls to keep it on screen.
+test('DispatchInput draws the caret at `cursor` and keeps it visible on a long line', () => {
+  const mid = render(React.createElement(DispatchInput, { value: 'fix the parser', cursor: 8, view: 'main' })).lastFrame()
+  expect(mid).toContain('fix the █parser')
+  // cursor omitted: the caret sits at the end, as every preview and screenshot expects
+  expect(render(React.createElement(DispatchInput, { value: 'fix the parser', view: 'main' })).lastFrame()).toContain('fix the parser█')
+  // A line wider than the box with the caret near its start shows the head, not the tail.
+  const long = 'a'.repeat(200) + ' tail'
+  const head = render(React.createElement(DispatchInput, { value: long, cursor: 3, view: 'main', columns: 40 })).lastFrame()
+  expect(head).toContain('aaa█aaa')
+  expect(head).not.toContain('tail')
+  // With the caret at the end of a multi-line prompt's first line, that line is the one shown.
+  const two = render(React.createElement(DispatchInput, { value: 'one\ntwo', cursor: 3, view: 'main' })).lastFrame()
+  expect(two).toContain('one█')
+  expect(two).toContain('two')
+  expect(two).not.toContain('two█')
+})

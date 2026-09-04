@@ -7,7 +7,8 @@
 [36my / a / d[39m [2min peek, allow once / always allow / deny a permission[22m
 [36m! cmd    [39m [2min peek, run a shell command in that session instead of prompting[22m
 [36mtab      [39m [2min peek, fill the reply with the choice the session offered[22m
-[36m→        [39m [2mattach to the selected session[22m
+[36m→        [39m [2mattach to the selected session (with text in the input, ← → move its caret)[22m
+[36m⌥← ⌥→    [39m [2mmove the caret a word at a time in any text input (ctrl+arrow works too)[22m
 [36m^z       [39m [2mdetach from an attached session and come back here[22m
 [36m⌥1..9    [39m [2mwhile attached, jump to that row (best-effort; see FLEETVIEW_NO_ALT_SWITCH)[22m
 [36m←        [39m [2mwhile attached, back on empty prompt (opencode app_exit keybind, see docs/guide.md)[22m
@@ -26,5 +27,4 @@
 [36m@backend [39m [2mdispatch on a backend — @claude, @copilot (a subagent or repo of the same name wins)[22m
 [36m/command [39m [2mrun one of opencode's commands as the session's first prompt[22m
 [36m! cmd    [39m [2mrun a shell command as a job instead of starting a session[22m
-[36ms:working[39m [2mfilter the list by state (also s:blocked, s:failed, s:idle)[22m
 [2many key to close · ↓ more (1/2)[22m

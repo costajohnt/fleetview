@@ -3,7 +3,8 @@ import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
 import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
-import { graphemes, stripEscapeResidue } from './text-utils.ts'
+import { stripEscapeResidue } from './text-utils.ts'
+import { EMPTY, atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, withCaret, type TextCursor } from './text-cursor.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
@@ -292,7 +293,17 @@ export function App({
   // The dispatch input is always mounted in roster mode and owns every printable key. Enter,
   // space and `?` are disambiguated by whether it holds text, exactly as agent view does:
   // "Attach to the selected session, or dispatch if there's text in the input."
-  const [input, setInput] = useState('')
+  // The dispatch prompt: text plus caret (#134). `input` is the string the rest of the app reads;
+  // setInput keeps its old string contract (replace, or map the string) and parks the caret at the
+  // end, so every caller that replaces the prompt whole (clear, tab-complete, $EDITOR) stays as
+  // it was. Only the key handler edits at the caret, through setEdit.
+  const [edit, setEdit] = useState<TextCursor>(EMPTY)
+  const input = edit.text
+  const setInput = useCallback(
+    (value: string | ((current: string) => string)) =>
+      setEdit((s) => atEnd(typeof value === 'function' ? value(s.text) : value)),
+    [],
+  )
   const [notice, setNotice] = useState<string | null>(null) // transient one-liner above the input (stop-arm, dispatch failure)
   // Ctrl+X is a two-stage destructive action ("Stop the session; press again within two seconds to
   // delete it"), so the arm has to survive re-renders without triggering them — a ref, not state.
@@ -913,6 +924,7 @@ export function App({
     peekTarget,
     peekMessages,
     peekReply,
+    peekReplyCursor,
     peekPending,
     peekPendingQuestions,
     peekErrorMessage,
@@ -1330,6 +1342,15 @@ export function App({
       }
       const empty = input.length === 0
 
+      // #134: with text in the prompt the arrows move its caret — ⌥/ctrl+arrow and ESC b/f by
+      // word, plain arrows by character. Before the ctrl branch because ctrl+arrow arrives with
+      // `key.ctrl`; before the roster arrows because → on a non-empty prompt is a caret move, not
+      // attach. An empty prompt keeps every arrow for the roster.
+      if (!empty) {
+        const motion = motionOf(ch, key)
+        if (motion) return setEdit((s) => move(s, motion))
+      }
+
       if (key.ctrl) {
         if (ch === 'c') {
           // "Clear the input; press twice to exit." Quitting on the first press meant a user
@@ -1375,7 +1396,7 @@ export function App({
         // "Ctrl+J inserts a newline in the dispatch input." Terminals that report it as a plain
         // Return are indistinguishable here, which is why agent view documents it as needing
         // extended key reporting too.
-        if (ch === 'j') return setInput((t) => t + '\n')
+        if (ch === 'j') return setEdit((s) => insertAt(s, '\n'))
         // "Ctrl+G opens the dispatch prompt in $VISUAL or $EDITOR." The host owns the terminal
         // handover, exactly as it does for attach, so this only asks and applies the result.
         if (ch === 'g') {
@@ -1450,7 +1471,7 @@ export function App({
         const first = suggestions.matches[0]
         return setInput((t) => t.slice(0, t.length - suggestions.partial.length) + first.name + ' ')
       }
-      if (key.rightArrow && current) return attach(current)
+      if (key.rightArrow && empty && current) return attach(current)
       if (key.escape) {
         // #47: the whole branch is gated, not just the quit. `^G` hands the terminal to $EDITOR
         // via a blocking spawnSync, so Ink never suspends and never drains — the editor's leftover
@@ -1484,7 +1505,8 @@ export function App({
         onAction({ type: 'quit' })
         return exit()
       }
-      if (key.backspace || key.delete) return setInput((t) => graphemes(t).slice(0, -1).join(''))
+      if (key.backspace) return setEdit(backspaceAt)
+      if (key.delete) return setEdit(deleteForwardAt)
       // #35: a group header has no `current`, so this used to fall through to the text handler and
       // silently type a leading space into the dispatch input — nothing on screen distinguishes
       // that from a peek that failed to open, so the next keystrokes joined a prompt the user
@@ -1510,9 +1532,9 @@ export function App({
           // "Expands again if the same text is pasted a second time" — the same text is the same
           // attachment, so it keeps its number instead of accumulating duplicates.
           const index = existing >= 0 ? existing : pastes.current.push(text) - 1
-          return setInput((t) => t + `[Pasted text #${index + 1}]`)
+          return setEdit((s) => insertAt(s, `[Pasted text #${index + 1}]`))
         }
-        setInput((t) => t + text)
+        setEdit((s) => insertAt(s, text))
       }
     },
     { isActive: mode === 'roster' && serverReady && !attached },
@@ -1619,6 +1641,7 @@ export function App({
           pending: peekPending,
           pendingQuestions: peekPendingQuestions,
           reply: peekReply,
+          replyCursor: peekReplyCursor,
           savedReply,
           error: peekErrorMessage,
           maxRows,
@@ -1667,7 +1690,7 @@ export function App({
           { dimColor: true },
           '↑↓ next/prev · ⏎ send, or attach when the reply is empty · → attach · ← back',
         )
-      : React.createElement(DispatchInput, { value: input, view, notice, kind: parsed.kind, suggestions, columns, focused: mode === 'roster' }),
+      : React.createElement(DispatchInput, { value: input, cursor: edit.cursor, view, notice, kind: parsed.kind, suggestions, columns, focused: mode === 'roster' }),
     serverDown
       ? React.createElement(
           Text,
@@ -1679,18 +1702,22 @@ export function App({
 }
 
 function RenameInput({ initial, onSubmit, onCancel }: { initial: string; onSubmit: (title: string) => void; onCancel: () => void }): React.ReactElement {
-  const [text, setText] = useState(initial)
+  const [edit, setEdit] = useState<TextCursor>(() => atEnd(initial))
+  const text = edit.text
   useInput((input, key) => {
     if (key.escape || (key.ctrl && input === 'c')) return onCancel()
     if (key.return) return text.trim() && onSubmit(text.trim())
     if (parseMouseEvents(input).length) return // mouse sequences are not text
-    if (key.backspace || key.delete) setText((t) => graphemes(t).slice(0, -1).join(''))
+    const motion = motionOf(input, key) // #134: same caret and word motion as the prompt
+    if (motion) return setEdit((s) => move(s, motion))
+    if (key.backspace) setEdit(backspaceAt)
+    else if (key.delete) setEdit(deleteForwardAt)
     else if (input && !key.ctrl && !key.meta) {
       // #112.3: strip control bytes / escape residue the same way the dispatch input does, so a
       // paste can't land C0 bytes verbatim in the title sent to the server.
       const text = stripEscapeResidue(input.replace(/[\r\n]+/g, ' ').replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, ''))
-      if (text) setText((t) => t + text)
+      if (text) setEdit((s) => insertAt(s, text))
     }
   })
-  return React.createElement(Text, null, `Rename: ${text}█ (⏎ save · esc cancel)`)
+  return React.createElement(Text, null, `Rename: ${withCaret(edit)} (⏎ save · esc cancel)`)
 }
