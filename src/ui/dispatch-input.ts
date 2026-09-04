@@ -1,6 +1,7 @@
 import React from 'react'
 import { Box, Text } from 'ink'
 import { graphemes, truncateGraphemes } from '../text-utils.ts'
+import { CARET } from '../text-cursor.ts'
 import { theme } from './theme.ts'
 import type { SuggestionList } from './view-types.ts'
 
@@ -47,17 +48,24 @@ export type DispatchInputProps = {
   suggestions?: SuggestionList | null
   columns?: number
   focused?: boolean
+  // Caret offset into `value` in code units (#134). Defaults to the end, which is where every
+  // caller that has no caret of its own (previews, screenshots) wants it drawn.
+  cursor?: number
 }
 
-export function DispatchInput({ value, view, notice, kind, suggestions, columns = 80, focused = true }: DispatchInputProps) {
+export function DispatchInput({ value, view, notice, kind, suggestions, columns = 80, focused = true, cursor }: DispatchInputProps) {
   const empty = value.length === 0
   // A solid block caret, no blink (John's polish pass — the animation earned nothing).
-  const caret = focused ? '█' : ''
+  const caret = focused ? CARET : ''
   const fit = (text: string) => truncateGraphemes(text, Math.max(8, columns))
-  // The last MAX_INPUT_ROWS lines: a long pasted or hand-written prompt scrolls, exactly as the
-  // single-line version scrolls horizontally, and the caret stays visible either way.
+  // MAX_INPUT_ROWS lines around the caret: a long pasted or hand-written prompt scrolls, exactly
+  // as the single-line version scrolls horizontally, and the caret stays visible either way.
   const lines = value.split('\n')
-  const shown = lines.slice(-MAX_INPUT_ROWS)
+  const at = Math.max(0, Math.min(value.length, cursor ?? value.length))
+  const caretLine = value.slice(0, at).split('\n').length - 1
+  const caretCol = at - (value.lastIndexOf('\n', at - 1) + 1)
+  const first = Math.min(Math.max(0, lines.length - MAX_INPUT_ROWS), caretLine)
+  const shown = lines.slice(first, first + MAX_INPUT_ROWS)
   return React.createElement(
     Box,
     { flexDirection: 'column' },
@@ -93,8 +101,8 @@ export function DispatchInput({ value, view, notice, kind, suggestions, columns 
             React.createElement(Text, { dimColor: true }, '❯ '),
             React.createElement(Text, { dimColor: true }, `${caret ? `${caret} ` : ''}describe a task and press ⏎`),
           )
-        : // Keep the caret visible on a long prompt by showing the tail, not the head. Only the last
-          // line carries the caret; earlier lines are ordinary text.
+        : // Keep the caret visible on a long prompt by scrolling the caret's line around it. Only
+          // the caret's line carries the caret; the other lines are ordinary text showing their tail.
           React.createElement(
             Box,
             { flexDirection: 'column' },
@@ -106,7 +114,9 @@ export function DispatchInput({ value, view, notice, kind, suggestions, columns 
                 React.createElement(
                   Text,
                   null,
-                  `${tailOf(line, Math.max(8, columns - 5))}${i === shown.length - 1 ? caret : ''}`,
+                  first + i === caretLine
+                    ? aroundCaret(line, caretCol, caret, Math.max(8, columns - 5))
+                    : tailOf(line, Math.max(8, columns - 5)),
                 ),
               ),
             ),
@@ -127,4 +137,15 @@ export function tailOf(text: string, width: number) {
   const candidate = text.slice(-width * 8)
   const g = graphemes(candidate)
   return g.length <= width ? candidate : g.slice(g.length - width).join('')
+}
+
+// `width` graphemes of `line` with the caret drawn at code-unit offset `col`, scrolled so the
+// caret is always on screen: the head while the caret fits, otherwise the window ending at the
+// caret plus whatever follows it fits. With the caret at the end this is exactly tailOf.
+export function aroundCaret(line: string, col: number, caret: string, width: number) {
+  const before = graphemes(line.slice(0, col))
+  const after = graphemes(line.slice(col))
+  const all = caret ? [...before, caret, ...after] : [...before, ...after]
+  const start = Math.max(0, before.length + (caret ? 1 : 0) - width)
+  return all.slice(start, start + width).join('')
 }

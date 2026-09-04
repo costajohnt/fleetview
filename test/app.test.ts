@@ -3917,3 +3917,68 @@ test('#44: a member REMOVED from roster.json externally stays in the running TUI
   expect(lastFrame()).toContain('fix tests')
   expect(lastFrame()).toContain('bg dispatch')
 })
+
+// #134: Option+Arrow moves the caret a word at a time, and the caret is a real position, not
+// "the end of the text". Every sequence a macOS terminal can send for Option+Arrow is driven
+// through Ink's own parser here, so the test proves the wiring and not just the word rule.
+test('#134: Option+Arrow moves the caret by word in the dispatch input, plain arrows by character, and typing lands at the caret', async () => {
+  const deps = makeDeps()
+  const onAction = vi.fn()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the parser')
+  await waitFor(() => lastFrame().includes('fix the parser█'))
+  stdin.write('\x1B[1;3D') // ⌥← in xterm modifier form (iTerm2, Ghostty, kitty, WezTerm)
+  await waitFor(() => lastFrame().includes('fix the █parser'))
+  stdin.write('\x1Bb') // ⌥← as ESC b (Terminal.app / iTerm2 default)
+  await waitFor(() => lastFrame().includes('fix █the parser'))
+  stdin.write('\x1B\x1B[D') // ⌥← as ESC ESC [ D (Terminal.app "Option as Meta")
+  await waitFor(() => lastFrame().includes('█fix the parser'))
+  stdin.write('\x1B[1;3D') // at the start it stays put
+  await tick()
+  expect(lastFrame()).toContain('█fix the parser')
+  stdin.write('\x1B[1;3C') // ⌥→
+  await waitFor(() => lastFrame().includes('fix █the parser'))
+  stdin.write('\x1Bf') // ⌥→ as ESC f
+  await waitFor(() => lastFrame().includes('fix the █parser'))
+  stdin.write('\x1B[D') // plain ← steps one character
+  await waitFor(() => lastFrame().includes('fix the█ parser'))
+  stdin.write('\x1B[C') // plain → with text moves the caret; it does not attach
+  await waitFor(() => lastFrame().includes('fix the █parser'))
+  expect(onAction.mock.calls.filter((c: any) => c[0].type === 'enter')).toEqual([])
+  stdin.write('old ')
+  await waitFor(() => lastFrame().includes('fix the old █parser'))
+  stdin.write('\x7f') // backspace removes the character before the caret
+  await waitFor(() => lastFrame().includes('fix the old█parser'))
+  stdin.write('\x1B[3~') // forward delete removes the character after it
+  await waitFor(() => lastFrame().includes('fix the old█arser'))
+  stdin.write('\x1B\x1B[C') // ⌥→ from the last word goes to the end
+  await waitFor(() => lastFrame().includes('fix the oldarser█'))
+  // Enter sends the text, not the caret.
+  stdin.write('\r')
+  await waitFor(() => deps.client.promptAsync.mock.calls.length > 0)
+  expect(deps.client.promptAsync.mock.calls[0][1]).toBe('fix the oldarser')
+})
+
+test('#134: → on an empty input still attaches', async () => {
+  const deps = makeDeps()
+  const onAction = vi.fn()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  await pressUntil(stdin, '\x1B[C', () => onAction.mock.calls.some((c: any) => c[0].type === 'enter'))
+})
+
+test('#134: the rename dialog has the same caret and word motion', async () => {
+  const deps = makeDeps()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('\x12') // ^r opens rename on s1, prefilled with its title
+  await waitFor(() => lastFrame().includes('Rename: fix tests█'))
+  stdin.write('\x1B[1;3D')
+  await waitFor(() => lastFrame().includes('Rename: fix █tests'))
+  stdin.write('the ')
+  await waitFor(() => lastFrame().includes('Rename: fix the █tests'))
+  stdin.write('\r')
+  await waitFor(() => deps.client.renameSession.mock.calls.length > 0)
+  expect(deps.client.renameSession.mock.calls[0][1]).toBe('fix the tests')
+})
