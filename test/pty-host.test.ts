@@ -354,7 +354,7 @@ test('ROOST_NO_ALT_SWITCH passes Escape and digits through, but still detaches',
   const chords: any[] = []
   const bytes: any[] = []
   const r = makeChordReader({ onChord: (c) => chords.push(c), onBytes: (b) => bytes.push(b), altSwitch: false })
-  r.feed(Buffer.from('\x1b')) // not held: no chord to wait for
+  r.feed(Buffer.from('\x1b')) // held for the kitty spelling of ^z (#133), flushed by the next read
   r.feed(Buffer.from('1'))
   r.feed(Buffer.from('\x1b1')) // the coalesced form a slow link produces
   expect(chords).toEqual([])
@@ -541,4 +541,65 @@ test('stdin keeps a reader for the drain window after a detach, then lets go', a
   expect(drainMs).toBe(RESUME_DRAIN_MS)
   fire!()
   expect(stdin.listenerCount('data')).toBe(0)
+})
+
+// --- #133: the chords as the kitty keyboard protocol spells them ---
+//
+// opencode's TUI asks the terminal whether it speaks the kitty keyboard protocol (CSI ? u) and
+// pushes it on where it does (CSI > 5 u — observed from a real `opencode attach` 1.18.5 in a pty).
+// Under it Ctrl+Z is no longer the byte 0x1a but `ESC [ 122 ; 5 u`, so the detach chord was
+// forwarded into opencode, whose own default binds ctrl+z to "suspend terminal" — it left the
+// alternate screen, put the tty back into cooked mode and stopped, and only a SECOND ^z (sent as
+// 0x1a again, opencode having popped the mode on its way down) reached fleetview.
+
+test('kitty-encoded Ctrl+Z is the detach chord, and kitty-encoded Alt+N is a switch', () => {
+  expect(chordFor(Buffer.from('\x1b[122;5u'))).toEqual({ type: 'detach' })
+  expect(chordFor(Buffer.from('\x1b[122;5:1u'))).toEqual({ type: 'detach' }) // with event type: press
+  expect(chordFor(Buffer.from('\x1b[122;5:2u'))).toEqual({ type: 'detach' }) // …and repeat
+  expect(chordFor(Buffer.from('\x1b[122;69u'))).toEqual({ type: 'detach' }) // caps lock held (64) is not a modifier
+  expect(chordFor(Buffer.from('\x1b[122;133u'))).toEqual({ type: 'detach' }) // num lock (128) neither
+  expect(chordFor(Buffer.from('\x1b[51;3u'))).toEqual({ type: 'switch', index: 2 }) // Alt+3
+  expect(chordFor(Buffer.from('\x1b[122;5:3u'))).toBe(null) // a key RELEASE is not a press
+  expect(chordFor(Buffer.from('\x1b[122;6u'))).toBe(null) // ctrl+shift+z is somebody else's key
+  expect(chordFor(Buffer.from('\x1b[122;7u'))).toBe(null) // ctrl+alt+z too
+  expect(chordFor(Buffer.from('\x1b[122u'))).toBe(null) // a bare z
+  expect(chordFor(Buffer.from('\x1b[97;5u'))).toBe(null) // ctrl+a belongs to opencode
+  expect(chordFor(Buffer.from('\x1b[48;3u'))).toBe(null) // Alt+0: there is no row 0
+})
+
+test('kitty-encoded Ctrl+Z detaches when ESC and the rest arrive in separate reads', () => {
+  const { r, chords, bytes } = reader()
+  r.feed(Buffer.from('\x1b'))
+  r.feed(Buffer.from('[122;5u'))
+  expect(chords).toEqual([{ type: 'detach' }])
+  expect(bytes).toEqual([])
+})
+
+test('kitty-encoded Ctrl+Z detaches with alt-switch off, split or whole', () => {
+  const { r, chords, bytes } = reader({ altSwitch: false })
+  r.feed(Buffer.from('\x1b'))
+  r.feed(Buffer.from('[122;5u'))
+  r.feed(Buffer.from('\x1b[122;5u'))
+  expect(chords).toEqual([{ type: 'detach' }, { type: 'detach' }])
+  expect(bytes).toEqual([])
+})
+
+test('bytes trailing a kitty-encoded chord still reach the session; a kitty Alt+N with alt-switch off does not switch', () => {
+  const { r, chords, bytes } = reader()
+  r.feed(Buffer.from('\x1b[50;3urest'))
+  expect(chords).toEqual([{ type: 'switch', index: 1 }])
+  expect(bytes).toEqual(['rest'])
+  const off = reader({ altSwitch: false })
+  off.r.feed(Buffer.from('\x1b[50;3u'))
+  expect(off.chords).toEqual([])
+  expect(off.bytes).toEqual(['\x1b[50;3u'])
+})
+
+test('a kitty-encoded Ctrl+Z ends the attachment on the first press and never reaches the child', async () => {
+  const { child, stdin, stdout, spawn } = harness()
+  const done = attachPty({ command: 'opencode', args: [], spawn, stdin, stdout })
+  stdin.emit('data', Buffer.from('\x1b[122;5u'))
+  expect(await done).toEqual({ type: 'detach' })
+  expect(child.written).toEqual([]) // forwarded, it would have been opencode's "suspend terminal"
+  expect(child.killed).toBe(true)
 })
