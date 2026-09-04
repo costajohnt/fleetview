@@ -192,7 +192,9 @@ it sits in front of opencode's TUI and can't tell whether its prompt is empty ‚Ä
 like any other key unless you set `FLEETVIEW_BACK_ARROW=1`, which trades **every** left-arrow for a
 way back. And `alt+1..9` is best-effort: it's byte-indistinguishable from Escape-then-digit, so a
 laggy link can misread an Escape in opencode as a switch; `FLEETVIEW_NO_ALT_SWITCH=1` turns it off.
-`^z` is one unambiguous byte, unaffected either way.
+`^z` is unaffected either way: one unambiguous byte, or under the kitty keyboard protocol (which
+opencode's TUI switches on in terminals that speak it) one complete `CSI u` sequence, and fleetview
+reads both.
 
 ### `‚Üê` back on an empty prompt (recommended)
 

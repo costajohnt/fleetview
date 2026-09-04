@@ -96,6 +96,30 @@ const ALT_DIGIT = /^\x1b([1-9])$/
 // the chord worked when tested with injected bytes and died on a real keyboard inside a session.
 const BACK_ARROWS = ['\x1b[D', '\x1bOD']
 
+// The chords as the kitty keyboard protocol spells them (#133). opencode's TUI asks the terminal
+// whether it speaks the protocol (CSI ? u) and pushes it on wherever the answer is yes — Ghostty,
+// kitty, WezTerm, iTerm2, foot — with "disambiguate escape codes" set, under which no Ctrl+ or
+// Alt+ key is its legacy byte any more: Ctrl+Z arrives as `ESC [ 122 ; 5 u`, Alt+1 as
+// `ESC [ 49 ; 3 u`. Matching only 0x1a forwarded the detach chord into opencode, whose own default
+// binds ctrl+z to "suspend terminal": it left the alternate screen, put the tty back into cooked
+// mode and stopped, so typed text echoed onto the shell's buffer and arrows printed `^[[A` — and
+// only a SECOND ^z, sent as plain 0x1a now that opencode had popped the mode on its way down,
+// reached fleetview. Shape: `ESC [ key[:shifted[:base]] ; modifiers[:event] u`. Modifiers are
+// 1 + (shift 1 | alt 2 | ctrl 4 | super 8 | hyper 16 | meta 32 | caps 64 | num 128); the lock
+// bits do not make a key a different key. Event 3 is a release, which is not a press.
+const CSI_U = /^\x1b\[(\d+)(?::\d*)*;(\d+)(?::(\d))?u/
+function csiUChord(text: string): { chord: Chord; length: number } | null {
+  const m = CSI_U.exec(text)
+  if (!m) return null
+  if (m[3] === '3') return null
+  const key = Number(m[1])
+  const mods = (Number(m[2]) - 1) & 63
+  const length = m[0].length
+  if (key === 0x7a && mods === 4) return { chord: { type: 'detach' }, length } // Ctrl+Z
+  if (key >= 0x31 && key <= 0x39 && mods === 2) return { chord: { type: 'switch', index: key - 0x31 }, length } // Alt+1..9
+  return null
+}
+
 // Reads a chord out of a chunk of stdin. Returns null when the bytes are just input for the child.
 export function chordFor(
   chunk: StdinChunk,
@@ -103,6 +127,8 @@ export function chordFor(
 ): Chord | null {
   const text = chunk.toString('utf8')
   if (text === DETACH) return { type: 'detach' }
+  const csiU = csiUChord(text)
+  if (csiU && csiU.length === text.length) return csiU.chord
   if (backArrow && BACK_ARROWS.includes(text)) return { type: 'detach' }
   const alt = ALT_DIGIT.exec(text)
   if (alt) return { type: 'switch', index: Number(alt[1]) - 1 }
@@ -126,7 +152,8 @@ export const ESC_WINDOW_MS = 40
 //
 // FLEETVIEW_NO_ALT_SWITCH=1 turns the chord off for anyone who would rather never risk it — Escape is
 // heavily used in a TUI, and losing a quick-switch beats losing the view you were looking at.
-// Ctrl+Z detach is unaffected: one byte, no prefix, unambiguous everywhere.
+// Ctrl+Z detach is unaffected: one byte with no prefix — or, under the kitty keyboard protocol, a
+// complete CSI u sequence that nothing a human types can be mistaken for (#133).
 export function makeChordReader({
   onChord,
   onBytes,
@@ -153,12 +180,26 @@ export function makeChordReader({
     onBytes('\x1b')
   }
 
+  // A chord in kitty spelling (#133), with whatever followed it in the same read passed on. The
+  // switch half honours the alt-switch opt-out exactly as the legacy spelling does.
+  const takeCsiU = (text: string) => {
+    const csiU = csiUChord(text)
+    if (!csiU || !(altSwitch || csiU.chord.type === 'detach')) return false
+    onChord(csiU.chord)
+    const rest = text.slice(csiU.length)
+    if (rest) onBytes(rest)
+    return true
+  }
+
   return {
     feed(chunk: StdinChunk) {
       const text = chunk.toString('utf8')
       if (pendingEsc) {
         clearTimer(pendingEsc)
         pendingEsc = null
+        // A held ESC followed by `[122;5u` is a split kitty-encoded Ctrl+Z (or Alt+N), the same
+        // way a held ESC + digit is a split Alt+N.
+        if (text.startsWith('[') && takeCsiU('\x1b' + text)) return
         const digit = altSwitch ? /^([1-9])/.exec(text) : null
         if (digit) {
           onChord({ type: 'switch', index: Number(digit[1]) - 1 })
@@ -179,15 +220,17 @@ export function makeChordReader({
         }
         onBytes('\x1b') // it was a real Escape after all
       }
-      // Hold a lone ESC when either chord that begins with one is armed: alt+N (ESC + digit) or,
-      // now, back-arrow (ESC + `[D`). Holding is what lets a split escape sequence reassemble.
-      if (text === '\x1b' && (altSwitch || backArrow)) {
+      // Hold a lone ESC: every chord but the legacy Ctrl+Z byte begins with one — alt+N (ESC +
+      // digit), back-arrow (ESC + `[D`) and, always armed, the kitty spelling of Ctrl+Z itself
+      // (ESC + `[122;5u`, #133). Holding is what lets a split escape sequence reassemble.
+      if (text === '\x1b') {
         pendingEsc = setTimer(() => {
           pendingEsc = null
           onBytes('\x1b')
         }, windowMs)
         return
       }
+      if (takeCsiU(text)) return
       const chord = chordFor(text, { backArrow })
       if (chord && (altSwitch || chord.type === 'detach')) return onChord(chord)
       onBytes(text)
