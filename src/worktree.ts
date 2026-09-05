@@ -195,6 +195,10 @@ export function worktreeSafety(dir: string, parentDir: string | null | undefined
 // repository; the caller supplies the branch lookup.
 export function mergeBackCommand(worktree: string, repo: string | null | undefined, branch: string | null | undefined) {
   if (!repo || !branch || repo === worktree) return null
-  return `git -C '${repo.replace(/'/g, "'\\''")}' merge ${branch}`
+  // Both halves are quoted: paths carry spaces, and branch names may legally carry `$`, backticks,
+  // `;`, `&`, `|` and quotes (check-ref-format bans only space, ~^:?*[\ and control characters) —
+  // and the branch is whatever the session checked out, so this copy-paste line must not trust it.
+  const sq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`
+  return `git -C ${sq(repo)} merge ${sq(branch)}`
 }
 
