@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { defineConfig, configDefaults } from 'vitest/config'
 
 export default defineConfig({
@@ -10,6 +13,10 @@ export default defineConfig({
       // Selection is a background highlight now — tests that assert it need the ANSI codes CI
       // otherwise strips. Files that match on plain text keep their stripAnsi wrappers.
       FORCE_COLOR: '3',
+      // Anything that writes state during a test (the #128 dispatch-debug log, seen.json) lands in
+      // a per-run temp dir, not the developer's real ~/.local/state/fleetview — where every test
+      // run was appending a fabricated collision row to the very log #128 is waiting on.
+      FLEETVIEW_STATE_DIR: mkdtempSync(join(tmpdir(), 'fleetview-test-state-')),
     },
   },
 })
