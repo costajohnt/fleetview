@@ -237,3 +237,16 @@ test('removeWorktree names the worktree in the body and the repository in the qu
   expect(init.method).toBe('DELETE')
   expect(JSON.parse(init.body)).toEqual({ directory: '/wt/fix-tests' })
 })
+
+// An adopted, passwordless server is attacker-controlled (SECURITY.md), and the CLI verbs print a
+// thrown error straight to the terminal. Its body gets the same stripControl every other foreign
+// string does, and a cap, so an error page cannot drive the terminal or flood it.
+test('a failed request\'s error carries the body without control bytes, capped', async () => {
+  const body = `boom \x1b]52;c;ZXZpbA==\x07 ${'x'.repeat(5000)}`
+  const fetchImpl = vi.fn(() => Promise.resolve({ ok: false, status: 500, text: () => Promise.resolve(body) }))
+  const c = new OpencodeClient('http://127.0.0.1:4801', fetchImpl as any)
+  const err: any = await c.abortSession('s1').catch((e) => e)
+  expect(err.message.startsWith('POST /session/s1/abort → 500: boom ]52;c;ZXZpbA== ')).toBe(true)
+  expect(err.message).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f]/)
+  expect(err.message.length).toBeLessThan(600)
+})

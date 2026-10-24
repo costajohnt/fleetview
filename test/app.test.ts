@@ -2608,6 +2608,34 @@ test('a dispatch runs in its own worktree, and the row still says the repository
   expect(lastFrame()).not.toContain('/wt/alpha')
 })
 
+// The worktree exists but no session was ever created in it, so nothing in the UI could reach it:
+// the sandbox is hidden from browse and `@repo`, and removeWorktreeFor only runs on session delete.
+// It is empty by construction, so it goes without a safety check.
+test('a dispatch whose session creation fails removes the worktree it just made', async () => {
+  const { deps, wt } = isolatingDeps()
+  deps.client.createSession = vi.fn(() => Promise.reject(new Error('POST /session → 500')))
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('dispatch failed'))
+  expect(deps.client.removeWorktree).toHaveBeenCalledWith(wt, '/x/alpha')
+})
+
+// Once the session exists the worktree is its directory, and removing it would strand the session.
+test('a dispatch whose prompt fails after the session exists keeps the worktree', async () => {
+  const { deps } = isolatingDeps()
+  deps.client.promptAsync = vi.fn(() => Promise.reject(new Error('POST /prompt_async → 500')))
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('dispatch failed'))
+  expect(deps.client.removeWorktree).not.toHaveBeenCalled()
+})
+
 // GET /experimental/worktree answers with objects, not directory strings — so a repository that
 // already has one worktree is the ordinary case, not an edge one. Passing the objects straight into
 // worktreeName threw into the silent isolation catch, and every dispatch after the first ran in the

@@ -228,7 +228,14 @@ export function useDispatch({
           // overwrite a few milliseconds later — a warning nobody can read is not a warning.
         }
       }
-      const session = await client.createSession({ agent: effectiveAgent, model: dispatchModel }, worktree)
+      const session = await client.createSession({ agent: effectiveAgent, model: dispatchModel }, worktree).catch(async (e) => {
+        // The worktree was made for this session and nothing else: with no session in it, nothing
+        // in the UI can reach it again (sandboxes are hidden from browse and `@repo`, and
+        // removeWorktreeFor runs only on session delete). It is empty by construction, so it goes
+        // without worktreeSafety. Best-effort: the dispatch has already failed either way.
+        if (isolated) await client.removeWorktree?.(worktree, target).catch(() => {})
+        throw e
+      })
       // opencode names the session itself once the first turn lands; until then the row would read
       // "New session - <timestamp>", so show what was asked for.
       store.setProvisionalTitle(worktree, session.id, shell ? `! ${text}` : text)
