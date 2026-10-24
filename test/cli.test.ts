@@ -967,9 +967,14 @@ test('server status reads fleetview\'s own server as healthy under a different u
 test('a retry under the saved password that fails restores the user\'s password', async () => {
   const h = passwordedHarness({ OPENCODE_SERVER_PASSWORD: 'set-by-user' })
   h.deps.probeServerImpl = () => Promise.resolve('unauthorized' as const)
+  const saved: any[] = []
+  ;(h.deps as any).saveServerImpl = (file: any, s: any) => saved.push([file, s])
   await runServer({ command: 'server', serverAction: 'status' }, h.deps)
   expect(h.out).toContain('healthy  no')
   expect(h.env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user')
+  // That listener has now seen the saved password and rejected it, so it is burned exactly as the
+  // adopted path burns it; otherwise every later `server` run would present it again.
+  expect(saved).toEqual([['/tmp/s.json', { host: '127.0.0.1', port: 4900, pid: 4242 }]])
 })
 
 // `server` is the one command that must never spawn: `status` answers about the world as it is.

@@ -523,6 +523,11 @@ export async function runServer(
     env.OPENCODE_SERVER_PASSWORD = server.password
     state = await probeServerImpl(server)
     if (state !== 'healthy') {
+      // Rejected too, so this listener is not the server the password was saved for and has now
+      // seen it: burned, as on the adopted path above. Nothing here spawns a replacement to
+      // overwrite server.json, so without this every later `server` run would present it again.
+      // The burn clears env, so the user's value goes back after it.
+      burnSavedPassword(server, { serverFile, saveServerImpl, env })
       if (userPassword === undefined) delete env.OPENCODE_SERVER_PASSWORD
       else env.OPENCODE_SERVER_PASSWORD = userPassword
     }
