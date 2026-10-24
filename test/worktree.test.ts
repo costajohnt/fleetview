@@ -129,10 +129,25 @@ test('worktreeName: distinct prompts get distinct names, a shared 32-char prefix
 })
 
 test('worktreeName: falls back to a counter when the longer name is taken too, or adds nothing', () => {
-  // The same prompt again: the longer cut is the same name, so only a counter tells them apart.
+  // A short prompt again: its slug fits in 32 chars, so the longer cut adds nothing and only a
+  // counter tells them apart.
   expect(worktreeName('fix tests', ['/wt/x/fix-tests'])).toBe('fix-tests-2')
   const existing = ['/wt/x/find-some-jira-cards-to-work-on', '/wt/x/find-some-jira-cards-to-work-on-today']
   expect(worktreeName('find some jira cards to work on today', existing)).toBe('find-some-jira-cards-to-work-on-2')
+})
+
+// Only directory names are known, not the prompts behind them, so an identical prompt longer than
+// 32 chars can't be told apart from a different one with the same opening: its second dispatch
+// takes the 48-char cut, and only the third gets a counter.
+test('worktreeName: an identical long prompt repeated takes the longer cut, then a counter', () => {
+  const prompt = 'find some jira cards to work on today'
+  const names: string[] = []
+  for (let i = 0; i < 3; i++) names.push(worktreeName(prompt, names.map((n) => `/wt/x/${n}`)))
+  expect(names).toEqual([
+    'find-some-jira-cards-to-work-on',
+    'find-some-jira-cards-to-work-on-today',
+    'find-some-jira-cards-to-work-on-2',
+  ])
 })
 
 test('logNameCollision appends an NDJSON line with the prompt capped, and never throws', () => {
