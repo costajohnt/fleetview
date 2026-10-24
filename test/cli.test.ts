@@ -815,7 +815,8 @@ test('server status burns a saved password the port occupant rejected', async ()
 })
 
 // The counterpart: a password the user set in the environment is theirs, not an adopted one — a 401
-// under it is not fleetview's to burn, and server.json is left alone.
+// under it is not fleetview's to burn. The saved one is another matter: the M4 retry presented it to
+// the same listener, which rejected it too, so that one is burned (and only that one).
 test('server status does not burn a user-set password on a 401', async () => {
   const saved: any[] = []
   const env: any = { OPENCODE_SERVER_PASSWORD: 'users-own' }
@@ -833,7 +834,7 @@ test('server status does not burn a user-set password on a 401', async () => {
     },
   )
   expect(env.OPENCODE_SERVER_PASSWORD).toBe('users-own')
-  expect(saved).toEqual([])
+  expect(saved).toEqual([{ host: '127.0.0.1', port: 4900, pid: 4242 }])
 })
 
 test('server status prints host/port/pid/health and exits 0 while the server answers', async () => {
