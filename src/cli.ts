@@ -131,6 +131,17 @@ type RunAnswerDeps = {
   setExitCode?(code: number): void
 }
 
+type RunRmDeps = {
+  ensureServer: EnsureServer
+  serverFile: string
+  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'deleteSession' | 'removeWorktree'>
+  rosterFile?: string
+  worktreeSafetyImpl?(dir: string, parentDir: string): { removable: boolean; reason: string | null }
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
+
 type RunWatchDeps = {
   ensureServer: EnsureServer
   serverFile: string
@@ -623,7 +634,56 @@ async function resolveSession(
     setExitCode(1)
     return null
   }
-  return { client, server: r.server, session: matches[0].session, worktree: matches[0].worktree }
+  const { session, worktree } = matches[0]
+  return { client, server: r.server, session, worktree, repo: displayProject(sandboxParents(projects), worktree) }
+}
+
+// `fleetview rm <id>`: delete the session, drop it from the roster, and clean up its worktree when
+// nothing in it would be lost.
+export async function runRm(
+  args: ParsedArgs,
+  {
+    ensureServer,
+    serverFile,
+    createClient = (url: string) => new OpencodeClient(url),
+    rosterFile = defaultRosterFile(),
+    worktreeSafetyImpl = worktreeSafety,
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: RunRmDeps,
+) {
+  const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
+  if (!found) return
+  const client = found.client as ReturnType<NonNullable<RunRmDeps['createClient']>>
+  await client.deleteSession(found.session.id, found.worktree)
+  // #105: the session is gone server-side, but the roster still lists it — the next TUI shows a
+  // ghost completed row for a session that no longer exists. Drop the member (matched by the same
+  // worktree+id key the store uses) from roster.json. A missing/corrupt roster is nothing to
+  // prune, so failures here are swallowed — the delete already succeeded.
+  try {
+    withRosterLock(rosterFile, () => {
+      const roster = loadRoster(rosterFile)
+      const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.session.id))
+      if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
+    })
+  } catch {}
+  // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
+  // commits that exist nowhere else, which is the case that actually loses work. Reported either
+  // way, because a worktree left behind is something the user should know about.
+  if (found.worktree !== found.repo) {
+    const safety = worktreeSafetyImpl(found.worktree, found.repo)
+    if (safety.removable) {
+      await client.removeWorktree?.(found.worktree, found.repo).catch(() => {})
+      log(`removed ${found.session.id} and its worktree`)
+    } else {
+      log(`removed ${found.session.id} — kept its worktree (${safety.reason}): ${found.worktree}`)
+    }
+    return
+  }
+  log(`removed ${found.session.id}`)
 }
 
 // `fleetview add <id>`: adopt an existing opencode session into the roster without opening the TUI.
@@ -1082,38 +1142,7 @@ export async function main() {
     return
   }
 
-  if (args.command === 'rm') {
-    const found = await withSession(args.id!, ensureServerForCommands, serverFile)
-    if (!found) return
-    await found.client.deleteSession(found.session.id, found.worktree)
-    // #105: the session is gone server-side, but the roster still lists it — the next TUI shows a
-    // ghost completed row for a session that no longer exists. Drop the member (matched by the same
-    // worktree+id key the store uses) from roster.json. A missing/corrupt roster is nothing to
-    // prune, so failures here are swallowed — the delete already succeeded.
-    try {
-      const rosterFile = defaultRosterFile()
-      withRosterLock(rosterFile, () => {
-        const roster = loadRoster(rosterFile)
-        const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.session.id))
-        if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
-      })
-    } catch {}
-    // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
-    // commits that exist nowhere else, which is the case that actually loses work. Reported either
-    // way, because a worktree left behind is something the user should know about.
-    if (found.worktree !== found.repo) {
-      const safety = worktreeSafety(found.worktree, found.repo)
-      if (safety.removable) {
-        await found.client.removeWorktree(found.worktree, found.repo).catch(() => {})
-        console.log(`removed ${found.session.id} and its worktree`)
-      } else {
-        console.log(`removed ${found.session.id} — kept its worktree (${safety.reason}): ${found.worktree}`)
-      }
-      return
-    }
-    console.log(`removed ${found.session.id}`)
-    return
-  }
+  if (args.command === 'rm') return runRm(args, { ensureServer: ensureServerForCommands, serverFile })
 
   // --model / --agent given to the bare command set the defaults every dispatch from this run
   // inherits (agent view seeds them the same way when the view opens). Validate --model here, before

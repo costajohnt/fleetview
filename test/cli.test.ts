@@ -4,7 +4,7 @@ import { mkdtempSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSy
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
-import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
+import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
 
 // #57: the exit/signal path (restoreScreen, registered on `exit` and reached from SIGTERM/HUP/INT)
@@ -615,6 +615,80 @@ test('a failure with no reason still says something rather than exiting silently
   h.deps.ensureServer = (() => Promise.resolve({ ok: false, server: {} })) as any
   await runBg({ command: 'bg', prompt: 'ship it', cwd: '/x' }, h.deps)
   expect(h.errs).toEqual(['opencode server unreachable'])
+})
+
+// --- `fleetview rm`: delete a session, prune it from the roster, clean up its worktree ---
+
+const rmHarness = ({ safety = { removable: true, reason: null }, sandbox = false }: any = {}) => {
+  const out: any[] = []
+  const errs: any[] = []
+  const codes: any[] = []
+  const worktree = sandbox ? '/x/wt/ses-abc' : '/x/repo'
+  const rosterFile = join(mkdtempSync(join(tmpdir(), 'fleetview-rm-')), 'roster.json')
+  writeFileSync(
+    rosterFile,
+    JSON.stringify({
+      groupBy: 'state',
+      collapsed: [],
+      sessions: [
+        { worktree, id: 'ses_abc123', addedAt: 1 },
+        { worktree: '/x/repo', id: 'ses_other', addedAt: 2 },
+      ],
+    }),
+  )
+  const client = {
+    listProjects: vi.fn(() => Promise.resolve([{ id: '/x/repo', worktree: '/x/repo', repoPath: '/x/repo', sandboxes: sandbox ? [worktree] : [] }])),
+    listSessions: vi.fn((dir: string) => Promise.resolve(dir === worktree ? [{ id: 'ses_abc123', createdAt: 0 }] : [])),
+    deleteSession: vi.fn(() => Promise.resolve(true)),
+    removeWorktree: vi.fn(() => Promise.resolve(true)),
+  }
+  const deps = {
+    ensureServer: vi.fn(() => Promise.resolve({ ok: true, server: { host: '127.0.0.1', port: 4900 } })),
+    serverFile: '/tmp/s.json',
+    createClient: vi.fn(() => client),
+    rosterFile,
+    worktreeSafetyImpl: vi.fn(() => safety),
+    log: (m: any) => out.push(m),
+    error: (m: any) => errs.push(m),
+    setExitCode: (c: any) => codes.push(c),
+  }
+  const roster = () => JSON.parse(readFileSync(rosterFile, 'utf8'))
+  return { out, errs, codes, client, deps, worktree, roster }
+}
+
+// #105: the session is gone server-side, so a roster member left behind renders a ghost row.
+test('rm deletes the session and prunes only that member from the roster', async () => {
+  const h = rmHarness()
+  await runRm({ command: 'rm', id: 'ses_abc1' }, h.deps)
+  expect(h.client.deleteSession).toHaveBeenCalledWith('ses_abc123', '/x/repo')
+  expect(h.roster().sessions).toEqual([{ worktree: '/x/repo', id: 'ses_other', addedAt: 2 }])
+  expect(h.out).toEqual(['removed ses_abc123'])
+  expect(h.client.removeWorktree).not.toHaveBeenCalled()
+})
+
+test('rm removes an isolated session\'s worktree when nothing in it would be lost', async () => {
+  const h = rmHarness({ sandbox: true })
+  await runRm({ command: 'rm', id: 'ses_abc1' }, h.deps)
+  expect(h.deps.worktreeSafetyImpl).toHaveBeenCalledWith(h.worktree, '/x/repo')
+  expect(h.client.removeWorktree).toHaveBeenCalledWith(h.worktree, '/x/repo')
+  expect(h.roster().sessions.map((m: any) => m.id)).toEqual(['ses_other'])
+  expect(h.out).toEqual(['removed ses_abc123 and its worktree'])
+})
+
+test('rm keeps a worktree with unpushed commits and says why', async () => {
+  const h = rmHarness({ sandbox: true, safety: { removable: false, reason: '2 unpushed commits' } })
+  await runRm({ command: 'rm', id: 'ses_abc1' }, h.deps)
+  expect(h.client.removeWorktree).not.toHaveBeenCalled()
+  expect(h.out).toEqual([`removed ses_abc123 — kept its worktree (2 unpushed commits): ${h.worktree}`])
+})
+
+test('rm of an id that matches nothing deletes nothing and leaves the roster alone', async () => {
+  const h = rmHarness()
+  await runRm({ command: 'rm', id: 'ses_nope' }, h.deps)
+  expect(h.client.deleteSession).not.toHaveBeenCalled()
+  expect(h.roster().sessions).toHaveLength(2)
+  expect(h.errs).toEqual(['no session matching ses_nope'])
+  expect(h.codes).toEqual([1])
 })
 
 // --- `fleetview add`: adopt an existing session into the roster ---
