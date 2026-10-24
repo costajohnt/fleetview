@@ -195,6 +195,7 @@ export function useDispatch({
     // session into its own worktree "before editing files", and this is fleetview's version of that.
     let worktree = target
     let isolated = false
+    let worktreeRemoved = false
     try {
       // isolate=false (FLEETVIEW_NO_ISOLATE) skips the worktree entirely — the session edits the
       // checkout directly, agent view's `bgIsolation: "none"`. Isolation stays the default.
@@ -233,7 +234,9 @@ export function useDispatch({
         // in the UI can reach it again (sandboxes are hidden from browse and `@repo`, and
         // removeWorktreeFor runs only on session delete). It is empty by construction, so it goes
         // without worktreeSafety. Best-effort: the dispatch has already failed either way.
-        if (isolated) await client.removeWorktree?.(worktree, target).catch(() => {})
+        if (isolated) {
+          worktreeRemoved = await client.removeWorktree?.(worktree, target).then(() => true, () => false) ?? false
+        }
         throw e
       })
       // opencode names the session itself once the first turn lands; until then the row would read
@@ -276,13 +279,15 @@ export function useDispatch({
         flash(`dispatched into ${basename(target) || target} — ${why}`, 5000)
       } else flash(`dispatched into ${basename(target) || target}`)
     } catch {
-      setOfflineProjects((s) => new Set(s).add(worktree))
+      // A removed worktree is a directory that no longer exists: the offline flag belongs on the
+      // repository the user chose, which is the header they can see.
+      setOfflineProjects((s) => new Set(s).add(worktreeRemoved ? target : worktree))
       if (dispatched) return flash('session started, but the project list is stale')
       // Only restore into an input the user hasn't started refilling: a dispatch can be in flight
       // for up to the client's 10s timeout, and overwriting a half-typed prompt with the failed
       // one is worse than losing it.
       setInput((current) => (current === '' ? typed : current))
-      flash('dispatch failed — project marked offline')
+      flash(worktreeRemoved ? 'dispatch failed — worktree removed, project marked offline' : 'dispatch failed — project marked offline')
     }
   }
 

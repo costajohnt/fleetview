@@ -2621,6 +2621,11 @@ test('a dispatch whose session creation fails removes the worktree it just made'
   stdin.write('\r')
   await waitFor(() => lastFrame().includes('dispatch failed'))
   expect(deps.client.removeWorktree).toHaveBeenCalledWith(wt, '/x/alpha')
+  // The failure names what happened, and the offline flag lands on the repository the user chose,
+  // not on the directory that was just deleted (a hidden sandbox key nothing renders).
+  expect(lastFrame()).toContain('worktree removed')
+  stdin.write('\x02')
+  await waitFor(() => lastFrame().includes('offline'))
 })
 
 // Once the session exists the worktree is its directory, and removing it would strand the session.
