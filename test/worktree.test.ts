@@ -113,12 +113,25 @@ test('worktreeName slugs the prompt and never collides with an existing director
   expect(worktreeName('some words that run right up to the cut here').endsWith('-')).toBe(false)
 })
 
-// #128: two genuinely different prompts must never share a name — pins the behavior the bug report
-// disputes, and documents the one legitimate suffix case: prompts identical through the 32-char cut.
-test('worktreeName: distinct prompts get distinct names; only a shared 32-char prefix collides', () => {
+// #128: two genuinely different prompts must never share a name, and a prompt that only shares the
+// 32-char cut with an existing worktree is named from its own words, not the other session's name
+// plus a counter.
+test('worktreeName: distinct prompts get distinct names, a shared 32-char prefix keeps its own tail', () => {
   const existing = ['/wt/x/find-some-jira-cards-to-work-on']
   expect(worktreeName('review the open pull requests', existing)).toBe('review-the-open-pull-requests')
-  // Same first 32 chars, different tails — this suffix is the false-positive path, not the bug.
+  expect(worktreeName('find some jira cards to work on today', existing)).toBe('find-some-jira-cards-to-work-on-today')
+  // The tail is cut at 48 chars, without a trailing dash, same as the base cut.
+  const long = worktreeName('find some jira cards to work on in the morpheus ui repo please', existing)
+  expect(long).toBe('find-some-jira-cards-to-work-on-in-the-morpheus')
+  expect(long.length).toBeLessThanOrEqual(48)
+  // Without a cut there's nothing to collide on: an uncontested prompt keeps the 32-char name.
+  expect(worktreeName('find some jira cards to work on today')).toBe('find-some-jira-cards-to-work-on')
+})
+
+test('worktreeName: falls back to a counter when the longer name is taken too, or adds nothing', () => {
+  // The same prompt again: the longer cut is the same name, so only a counter tells them apart.
+  expect(worktreeName('fix tests', ['/wt/x/fix-tests'])).toBe('fix-tests-2')
+  const existing = ['/wt/x/find-some-jira-cards-to-work-on', '/wt/x/find-some-jira-cards-to-work-on-today']
   expect(worktreeName('find some jira cards to work on today', existing)).toBe('find-some-jira-cards-to-work-on-2')
 })
 

@@ -105,15 +105,19 @@ export function gitKindOf(dir: string, statImpl = statSync) {
 // is the only thing available at dispatch time that means anything to a human — the session doesn't
 // exist yet and opencode hasn't named it.
 export function worktreeName(prompt: string, existing: string[] = []) {
-  const base =
-    prompt
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 32)
-      .replace(/-+$/, '') || 'session'
+  const slug = prompt
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const cut = (n: number) => slug.slice(0, n).replace(/-+$/, '')
+  const base = cut(32) || 'session'
   const taken = new Set(existing.map((dir) => dir.slice(dir.lastIndexOf('/') + 1)))
   if (!taken.has(base)) return base
+  // #128: two prompts that open the same way ("find some jira cards to work on ...") share the
+  // 32-char cut, and a counter on that cut reads as the new session inheriting the other one's
+  // name. Its own next words are what tell it apart, so try a longer cut before counting.
+  const longer = cut(48)
+  if (longer.length > base.length && !taken.has(longer)) return longer
   // Collisions are ordinary: "fix the tests" twice in a day is not a mistake worth reporting.
   for (let n = 2; ; n++) {
     const candidate = `${base}-${n}`
