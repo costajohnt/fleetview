@@ -509,12 +509,29 @@ export async function runServer(
   // unauthenticated first and only presents the credential to a listener that answered 401.
   const adoptedSaved = Boolean(server.password) && !env.OPENCODE_SERVER_PASSWORD
   if (adoptedSaved) env.OPENCODE_SERVER_PASSWORD = server.password
-  const state = await probeServerImpl(server)
+  let state = await probeServerImpl(server)
   // A 401 after the adoption means the port's occupant is not the server the password was saved
   // for, and it has now seen that password — the same burn rule as makeEnsureServer's, which used
   // to live only there, so `server status` against a port squatter leaked the credential and then
   // left it on disk for the next run to leak again.
   if (state === 'unauthorized' && adoptedSaved) burnSavedPassword(server, { serverFile, saveServerImpl, env })
+  else if (state === 'unauthorized' && server.password && env.OPENCODE_SERVER_PASSWORD !== server.password) {
+    // makeEnsureServer's M4 retry: the user set their own password over a server fleetview spawned
+    // with a generated one. Without this, `server stop` (which that path's warning tells them to
+    // run) reported fleetview's own server "not running" and never reached the kill.
+    const userPassword = env.OPENCODE_SERVER_PASSWORD
+    env.OPENCODE_SERVER_PASSWORD = server.password
+    state = await probeServerImpl(server)
+    if (state !== 'healthy') {
+      // Rejected too, so this listener is not the server the password was saved for and has now
+      // seen it: burned, as on the adopted path above. Nothing here spawns a replacement to
+      // overwrite server.json, so without this every later `server` run would present it again.
+      // The burn clears env, so the user's value goes back after it.
+      burnSavedPassword(server, { serverFile, saveServerImpl, env })
+      if (userPassword === undefined) delete env.OPENCODE_SERVER_PASSWORD
+      else env.OPENCODE_SERVER_PASSWORD = userPassword
+    }
+  }
   const healthy = state === 'healthy'
   if (args.serverAction === 'status') {
     log(`host     ${server.host}`)
