@@ -293,6 +293,16 @@ export function createClaudeBackend({
       // exited but whose tool children lived on; the guard gives that up, and such children fall to
       // the run's own teardown instead.
       if (!sameRun(psImpl(meta.pid), id)) return { aborted: false }
+      // A SIGTERM'd `claude -p` writes no `result` (verified: exit 143, nothing after init), and the
+      // exit listener that writes one lives only in the fleetview that spawned the run. So the stop
+      // writes its own terminal line, before the kill so it is the first result and wins over the
+      // spawner's synthetic failure. On a run that had already finished, the run's own result is
+      // already first and this line is ignored by the fold.
+      try {
+        appendFileSync(logPath(id), `${JSON.stringify({ type: 'result', is_error: true, subtype: 'aborted', session_id: id })}\n`)
+      } catch {
+        // the log is gone; the session is unreadable either way
+      }
       try {
         killImpl(-meta.pid, 'SIGTERM')
         return { aborted: true }
