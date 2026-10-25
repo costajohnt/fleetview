@@ -131,6 +131,17 @@ type RunAnswerDeps = {
   setExitCode?(code: number): void
 }
 
+type RunRmDeps = {
+  ensureServer: EnsureServer
+  serverFile: string
+  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'deleteSession' | 'removeWorktree'>
+  rosterFile?: string
+  worktreeSafetyImpl?(dir: string, parentDir: string): { removable: boolean; reason: string | null }
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
+
 type RunWatchDeps = {
   ensureServer: EnsureServer
   serverFile: string
@@ -509,12 +520,29 @@ export async function runServer(
   // unauthenticated first and only presents the credential to a listener that answered 401.
   const adoptedSaved = Boolean(server.password) && !env.OPENCODE_SERVER_PASSWORD
   if (adoptedSaved) env.OPENCODE_SERVER_PASSWORD = server.password
-  const state = await probeServerImpl(server)
+  let state = await probeServerImpl(server)
   // A 401 after the adoption means the port's occupant is not the server the password was saved
   // for, and it has now seen that password — the same burn rule as makeEnsureServer's, which used
   // to live only there, so `server status` against a port squatter leaked the credential and then
   // left it on disk for the next run to leak again.
   if (state === 'unauthorized' && adoptedSaved) burnSavedPassword(server, { serverFile, saveServerImpl, env })
+  else if (state === 'unauthorized' && server.password && env.OPENCODE_SERVER_PASSWORD !== server.password) {
+    // makeEnsureServer's M4 retry: the user set their own password over a server fleetview spawned
+    // with a generated one. Without this, `server stop` (which that path's warning tells them to
+    // run) reported fleetview's own server "not running" and never reached the kill.
+    const userPassword = env.OPENCODE_SERVER_PASSWORD
+    env.OPENCODE_SERVER_PASSWORD = server.password
+    state = await probeServerImpl(server)
+    if (state !== 'healthy') {
+      // Rejected too, so this listener is not the server the password was saved for and has now
+      // seen it: burned, as on the adopted path above. Nothing here spawns a replacement to
+      // overwrite server.json, so without this every later `server` run would present it again.
+      // The burn clears env, so the user's value goes back after it.
+      burnSavedPassword(server, { serverFile, saveServerImpl, env })
+      if (userPassword === undefined) delete env.OPENCODE_SERVER_PASSWORD
+      else env.OPENCODE_SERVER_PASSWORD = userPassword
+    }
+  }
   const healthy = state === 'healthy'
   if (args.serverAction === 'status') {
     log(`host     ${server.host}`)
@@ -623,7 +651,56 @@ async function resolveSession(
     setExitCode(1)
     return null
   }
-  return { client, server: r.server, session: matches[0].session, worktree: matches[0].worktree }
+  const { session, worktree } = matches[0]
+  return { client, server: r.server, session, worktree, repo: displayProject(sandboxParents(projects), worktree) }
+}
+
+// `fleetview rm <id>`: delete the session, drop it from the roster, and clean up its worktree when
+// nothing in it would be lost.
+export async function runRm(
+  args: ParsedArgs,
+  {
+    ensureServer,
+    serverFile,
+    createClient = (url: string) => new OpencodeClient(url),
+    rosterFile = defaultRosterFile(),
+    worktreeSafetyImpl = worktreeSafety,
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: RunRmDeps,
+) {
+  const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
+  if (!found) return
+  const client = found.client as ReturnType<NonNullable<RunRmDeps['createClient']>>
+  await client.deleteSession(found.session.id, found.worktree)
+  // #105: the session is gone server-side, but the roster still lists it — the next TUI shows a
+  // ghost completed row for a session that no longer exists. Drop the member (matched by the same
+  // worktree+id key the store uses) from roster.json. A missing/corrupt roster is nothing to
+  // prune, so failures here are swallowed — the delete already succeeded.
+  try {
+    withRosterLock(rosterFile, () => {
+      const roster = loadRoster(rosterFile)
+      const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.session.id))
+      if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
+    })
+  } catch {}
+  // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
+  // commits that exist nowhere else, which is the case that actually loses work. Reported either
+  // way, because a worktree left behind is something the user should know about.
+  if (found.worktree !== found.repo) {
+    const safety = worktreeSafetyImpl(found.worktree, found.repo)
+    if (safety.removable) {
+      await client.removeWorktree?.(found.worktree, found.repo).catch(() => {})
+      log(`removed ${found.session.id} and its worktree`)
+    } else {
+      log(`removed ${found.session.id} — kept its worktree (${safety.reason}): ${found.worktree}`)
+    }
+    return
+  }
+  log(`removed ${found.session.id}`)
 }
 
 // `fleetview add <id>`: adopt an existing opencode session into the roster without opening the TUI.
@@ -1082,38 +1159,7 @@ export async function main() {
     return
   }
 
-  if (args.command === 'rm') {
-    const found = await withSession(args.id!, ensureServerForCommands, serverFile)
-    if (!found) return
-    await found.client.deleteSession(found.session.id, found.worktree)
-    // #105: the session is gone server-side, but the roster still lists it — the next TUI shows a
-    // ghost completed row for a session that no longer exists. Drop the member (matched by the same
-    // worktree+id key the store uses) from roster.json. A missing/corrupt roster is nothing to
-    // prune, so failures here are swallowed — the delete already succeeded.
-    try {
-      const rosterFile = defaultRosterFile()
-      withRosterLock(rosterFile, () => {
-        const roster = loadRoster(rosterFile)
-        const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.session.id))
-        if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
-      })
-    } catch {}
-    // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
-    // commits that exist nowhere else, which is the case that actually loses work. Reported either
-    // way, because a worktree left behind is something the user should know about.
-    if (found.worktree !== found.repo) {
-      const safety = worktreeSafety(found.worktree, found.repo)
-      if (safety.removable) {
-        await found.client.removeWorktree(found.worktree, found.repo).catch(() => {})
-        console.log(`removed ${found.session.id} and its worktree`)
-      } else {
-        console.log(`removed ${found.session.id} — kept its worktree (${safety.reason}): ${found.worktree}`)
-      }
-      return
-    }
-    console.log(`removed ${found.session.id}`)
-    return
-  }
+  if (args.command === 'rm') return runRm(args, { ensureServer: ensureServerForCommands, serverFile })
 
   // --model / --agent given to the bare command set the defaults every dispatch from this run
   // inherits (agent view seeds them the same way when the view opens). Validate --model here, before
@@ -1403,6 +1449,12 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
   // The cwd the pty host uses is the session's directory either way, which is what `claude --resume`
   // needs to find the session at all — copilot names it a second time with its own `-C`.
   const backendFor = (target: AttachRequest): Backend => backends[target.backend ?? DEFAULT_BACKEND] ?? backends[DEFAULT_BACKEND]
+  // A process-backed child gets the scoped env the dispatch path already uses: it must not inherit
+  // the opencode server password (an attached `claude --resume` runs the same attacker-influenced
+  // history with the same tool access as a dispatch) nor this process's Claude Code session
+  // markers, which silently turn transcript saving off in the child. opencode's attach is excluded:
+  // it authenticates with that password. Both the pty and the no-pty paths spawn through this.
+  const envFor = (target: AttachRequest) => ((target.backend ?? DEFAULT_BACKEND) === DEFAULT_BACKEND ? process.env : childEnv())
   // Without a working PTY there is no way to sit between the terminal and opencode, so fleetview hands
   // the terminal over wholesale and waits. Streams stop for the duration, exactly as they did
   // before the resident host existed; detaching means exiting opencode.
@@ -1411,7 +1463,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
     const [command, ...argv] = backendFor(action).attach({ id: action.sessionId, directory: action.worktree })
     // cwd matches the pty path below: a process-backed resume is cwd-scoped, so without it
     // `claude --resume` fails "No conversation found" from fleetview's directory.
-    const result = spawnSync(command, argv, { stdio: 'inherit', cwd: action.worktree })
+    const result = spawnSync(command, argv, { stdio: 'inherit', cwd: action.worktree, env: envFor(action) })
     reclaimTerminal(out, instance)
     return result.error ? { message: `couldn't launch opencode: ${result.error.message}` } : undefined
   }
@@ -1423,12 +1475,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
       args: argv,
       cwd: target.worktree,
       spawn: pty.spawn,
-      // A process-backed child gets the scoped env the dispatch path already uses: it must not
-      // inherit the opencode server password (an attached `claude --resume` runs the same
-      // attacker-influenced history with the same tool access as a dispatch) nor this process's
-      // Claude Code session markers, which silently turn transcript saving off in the child.
-      // opencode's attach is excluded — it authenticates with that password.
-      env: (target.backend ?? DEFAULT_BACKEND) === DEFAULT_BACKEND ? process.env : childEnv(),
+      env: envFor(target),
       // Detaching mid-turn kills a process-backed child's in-flight work, so claude/copilot get the
       // double-press guard. opencode sessions live on the server — detach loses nothing there.
       busyDetachGuard: (target.backend ?? DEFAULT_BACKEND) !== DEFAULT_BACKEND,

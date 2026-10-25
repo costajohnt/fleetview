@@ -4,7 +4,7 @@ import { mkdtempSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSy
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
-import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
+import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
 
 // #57: the exit/signal path (restoreScreen, registered on `exit` and reached from SIGTERM/HUP/INT)
@@ -617,6 +617,80 @@ test('a failure with no reason still says something rather than exiting silently
   expect(h.errs).toEqual(['opencode server unreachable'])
 })
 
+// --- `fleetview rm`: delete a session, prune it from the roster, clean up its worktree ---
+
+const rmHarness = ({ safety = { removable: true, reason: null }, sandbox = false }: any = {}) => {
+  const out: any[] = []
+  const errs: any[] = []
+  const codes: any[] = []
+  const worktree = sandbox ? '/x/wt/ses-abc' : '/x/repo'
+  const rosterFile = join(mkdtempSync(join(tmpdir(), 'fleetview-rm-')), 'roster.json')
+  writeFileSync(
+    rosterFile,
+    JSON.stringify({
+      groupBy: 'state',
+      collapsed: [],
+      sessions: [
+        { worktree, id: 'ses_abc123', addedAt: 1 },
+        { worktree: '/x/repo', id: 'ses_other', addedAt: 2 },
+      ],
+    }),
+  )
+  const client = {
+    listProjects: vi.fn(() => Promise.resolve([{ id: '/x/repo', worktree: '/x/repo', repoPath: '/x/repo', sandboxes: sandbox ? [worktree] : [] }])),
+    listSessions: vi.fn((dir: string) => Promise.resolve(dir === worktree ? [{ id: 'ses_abc123', createdAt: 0 }] : [])),
+    deleteSession: vi.fn(() => Promise.resolve(true)),
+    removeWorktree: vi.fn(() => Promise.resolve(true)),
+  }
+  const deps = {
+    ensureServer: vi.fn(() => Promise.resolve({ ok: true, server: { host: '127.0.0.1', port: 4900 } })),
+    serverFile: '/tmp/s.json',
+    createClient: vi.fn(() => client),
+    rosterFile,
+    worktreeSafetyImpl: vi.fn(() => safety),
+    log: (m: any) => out.push(m),
+    error: (m: any) => errs.push(m),
+    setExitCode: (c: any) => codes.push(c),
+  }
+  const roster = () => JSON.parse(readFileSync(rosterFile, 'utf8'))
+  return { out, errs, codes, client, deps, worktree, roster }
+}
+
+// #105: the session is gone server-side, so a roster member left behind renders a ghost row.
+test('rm deletes the session and prunes only that member from the roster', async () => {
+  const h = rmHarness()
+  await runRm({ command: 'rm', id: 'ses_abc1' }, h.deps)
+  expect(h.client.deleteSession).toHaveBeenCalledWith('ses_abc123', '/x/repo')
+  expect(h.roster().sessions).toEqual([{ worktree: '/x/repo', id: 'ses_other', addedAt: 2 }])
+  expect(h.out).toEqual(['removed ses_abc123'])
+  expect(h.client.removeWorktree).not.toHaveBeenCalled()
+})
+
+test('rm removes an isolated session\'s worktree when nothing in it would be lost', async () => {
+  const h = rmHarness({ sandbox: true })
+  await runRm({ command: 'rm', id: 'ses_abc1' }, h.deps)
+  expect(h.deps.worktreeSafetyImpl).toHaveBeenCalledWith(h.worktree, '/x/repo')
+  expect(h.client.removeWorktree).toHaveBeenCalledWith(h.worktree, '/x/repo')
+  expect(h.roster().sessions.map((m: any) => m.id)).toEqual(['ses_other'])
+  expect(h.out).toEqual(['removed ses_abc123 and its worktree'])
+})
+
+test('rm keeps a worktree with unpushed commits and says why', async () => {
+  const h = rmHarness({ sandbox: true, safety: { removable: false, reason: '2 unpushed commits' } })
+  await runRm({ command: 'rm', id: 'ses_abc1' }, h.deps)
+  expect(h.client.removeWorktree).not.toHaveBeenCalled()
+  expect(h.out).toEqual([`removed ses_abc123 — kept its worktree (2 unpushed commits): ${h.worktree}`])
+})
+
+test('rm of an id that matches nothing deletes nothing and leaves the roster alone', async () => {
+  const h = rmHarness()
+  await runRm({ command: 'rm', id: 'ses_nope' }, h.deps)
+  expect(h.client.deleteSession).not.toHaveBeenCalled()
+  expect(h.roster().sessions).toHaveLength(2)
+  expect(h.errs).toEqual(['no session matching ses_nope'])
+  expect(h.codes).toEqual([1])
+})
+
 // --- `fleetview add`: adopt an existing session into the roster ---
 
 const addHarness = ({ sessions = [{ id: 'ses_abc123', createdAt: 0 }], projects = [{ id: '/x/repo', worktree: '/x/repo', repoPath: '/x/repo' }], existingRoster = { groupBy: 'state', sessions: [], collapsed: [] } }: any = {}) => {
@@ -815,7 +889,8 @@ test('server status burns a saved password the port occupant rejected', async ()
 })
 
 // The counterpart: a password the user set in the environment is theirs, not an adopted one — a 401
-// under it is not fleetview's to burn, and server.json is left alone.
+// under it is not fleetview's to burn. The saved one is another matter: the M4 retry presented it to
+// the same listener, which rejected it too, so that one is burned (and only that one).
 test('server status does not burn a user-set password on a 401', async () => {
   const saved: any[] = []
   const env: any = { OPENCODE_SERVER_PASSWORD: 'users-own' }
@@ -833,7 +908,7 @@ test('server status does not burn a user-set password on a 401', async () => {
     },
   )
   expect(env.OPENCODE_SERVER_PASSWORD).toBe('users-own')
-  expect(saved).toEqual([])
+  expect(saved).toEqual([{ host: '127.0.0.1', port: 4900, pid: 4242 }])
 })
 
 test('server status prints host/port/pid/health and exits 0 while the server answers', async () => {
@@ -906,17 +981,19 @@ test('a kill that throws (pid gone between the check and the signal) is reported
 // H1: the probe authenticates through authHeader(), which reads the env var and nothing else. A
 // password fleetview generated lives in server.json and never in a fresh shell's env, so without the
 // adoption `server status` calls fleetview's own server dead and `server stop` no-ops.
-const passwordedHarness = () => {
+const passwordedHarness = (env: NodeJS.ProcessEnv = {}) => {
   const out: any[] = []
   const errs: any[] = []
   const killed: any[] = []
-  const env: NodeJS.ProcessEnv = {}
+  const codes: any[] = []
   let running = true
   const deps = {
     serverFile: '/tmp/s.json',
     loadServerImpl: () => ({ host: '127.0.0.1', port: 4900, pid: 4242, password: 'from-server-json' }),
     // Stands in for the real probe: 401 (read as unhealthy) unless the request carries the password.
     isServerHealthyImpl: () => Promise.resolve(running && env.OPENCODE_SERVER_PASSWORD === 'from-server-json'),
+    probeServerImpl: (): Promise<'healthy' | 'unauthorized' | 'unreachable'> =>
+      Promise.resolve(!running ? 'unreachable' : env.OPENCODE_SERVER_PASSWORD === 'from-server-json' ? 'healthy' : 'unauthorized'),
     identifyServer: () => ({ ok: true, command: 'opencode serve' }),
     processKill: (p: any, sig: any) => {
       killed.push([p, sig])
@@ -925,10 +1002,10 @@ const passwordedHarness = () => {
     pollMs: 1,
     log: (m: any) => out.push(m),
     error: (m: any) => errs.push(m),
-    setExitCode: () => {},
+    setExitCode: (c: any) => codes.push(c),
     env,
   }
-  return { out, errs, killed, deps }
+  return { out, errs, killed, codes, env, deps }
 }
 
 test('server status adopts the password out of server.json, so fleetview\'s own server reads as healthy', async () => {
@@ -942,6 +1019,37 @@ test('server stop reaches the kill on a password-protected server fleetview spaw
   await runServer({ command: 'server', serverAction: 'stop' }, h.deps)
   expect(h.killed).toEqual([[4242, 'SIGTERM']])
   expect(h.out).toEqual(['stopped opencode server on :4900'])
+})
+
+// M4's retry, which makeEnsureServer has: a user who exported their own password over a server
+// fleetview spawned with a generated one was told "not running" by the very command fleetview's
+// own warning sends them to.
+test('server stop reaches the kill when the user\'s OPENCODE_SERVER_PASSWORD differs from the saved one', async () => {
+  const h = passwordedHarness({ OPENCODE_SERVER_PASSWORD: 'set-by-user' })
+  await runServer({ command: 'server', serverAction: 'stop' }, h.deps)
+  expect(h.killed).toEqual([[4242, 'SIGTERM']])
+  expect(h.out).toEqual(['stopped opencode server on :4900'])
+})
+
+test('server status reads fleetview\'s own server as healthy under a different user password', async () => {
+  const h = passwordedHarness({ OPENCODE_SERVER_PASSWORD: 'set-by-user' })
+  await runServer({ command: 'server', serverAction: 'status' }, h.deps)
+  expect(h.out).toContain('healthy  yes')
+  expect(h.codes).toEqual([0])
+})
+
+// The saved password did not open this listener either, so the user's own value goes back.
+test('a retry under the saved password that fails restores the user\'s password', async () => {
+  const h = passwordedHarness({ OPENCODE_SERVER_PASSWORD: 'set-by-user' })
+  h.deps.probeServerImpl = () => Promise.resolve('unauthorized' as const)
+  const saved: any[] = []
+  ;(h.deps as any).saveServerImpl = (file: any, s: any) => saved.push([file, s])
+  await runServer({ command: 'server', serverAction: 'status' }, h.deps)
+  expect(h.out).toContain('healthy  no')
+  expect(h.env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user')
+  // That listener has now seen the saved password and rejected it, so it is burned exactly as the
+  // adopted path burns it; otherwise every later `server` run would present it again.
+  expect(saved).toEqual([['/tmp/s.json', { host: '127.0.0.1', port: 4900, pid: 4242 }]])
 })
 
 // `server` is the one command that must never spawn: `status` answers about the world as it is.
