@@ -1403,6 +1403,12 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
   // The cwd the pty host uses is the session's directory either way, which is what `claude --resume`
   // needs to find the session at all — copilot names it a second time with its own `-C`.
   const backendFor = (target: AttachRequest): Backend => backends[target.backend ?? DEFAULT_BACKEND] ?? backends[DEFAULT_BACKEND]
+  // A process-backed child gets the scoped env the dispatch path already uses: it must not inherit
+  // the opencode server password (an attached `claude --resume` runs the same attacker-influenced
+  // history with the same tool access as a dispatch) nor this process's Claude Code session
+  // markers, which silently turn transcript saving off in the child. opencode's attach is excluded:
+  // it authenticates with that password. Both the pty and the no-pty paths spawn through this.
+  const envFor = (target: AttachRequest) => ((target.backend ?? DEFAULT_BACKEND) === DEFAULT_BACKEND ? process.env : childEnv())
   // Without a working PTY there is no way to sit between the terminal and opencode, so fleetview hands
   // the terminal over wholesale and waits. Streams stop for the duration, exactly as they did
   // before the resident host existed; detaching means exiting opencode.
@@ -1411,7 +1417,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
     const [command, ...argv] = backendFor(action).attach({ id: action.sessionId, directory: action.worktree })
     // cwd matches the pty path below: a process-backed resume is cwd-scoped, so without it
     // `claude --resume` fails "No conversation found" from fleetview's directory.
-    const result = spawnSync(command, argv, { stdio: 'inherit', cwd: action.worktree })
+    const result = spawnSync(command, argv, { stdio: 'inherit', cwd: action.worktree, env: envFor(action) })
     reclaimTerminal(out, instance)
     return result.error ? { message: `couldn't launch opencode: ${result.error.message}` } : undefined
   }
@@ -1423,12 +1429,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
       args: argv,
       cwd: target.worktree,
       spawn: pty.spawn,
-      // A process-backed child gets the scoped env the dispatch path already uses: it must not
-      // inherit the opencode server password (an attached `claude --resume` runs the same
-      // attacker-influenced history with the same tool access as a dispatch) nor this process's
-      // Claude Code session markers, which silently turn transcript saving off in the child.
-      // opencode's attach is excluded — it authenticates with that password.
-      env: (target.backend ?? DEFAULT_BACKEND) === DEFAULT_BACKEND ? process.env : childEnv(),
+      env: envFor(target),
       // Detaching mid-turn kills a process-backed child's in-flight work, so claude/copilot get the
       // double-press guard. opencode sessions live on the server — detach loses nothing there.
       busyDetachGuard: (target.backend ?? DEFAULT_BACKEND) !== DEFAULT_BACKEND,
