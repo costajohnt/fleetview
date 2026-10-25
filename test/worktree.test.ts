@@ -256,6 +256,19 @@ test('a parent on a detached HEAD is not a base, so real commits are not approve
   expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: false, unpushed: true, reason: 'no branch to compare against' })
 })
 
+// The count is the one thing standing between ^x^x and a branch's only copy. Output git did not
+// mean as a number (a warning on stdout, a localized message) parses to NaN, and `NaN > 0` is
+// false, so without the guard an unread count read as "nothing unpushed" and approved the delete.
+test('worktreeSafety refuses when the unpushed count cannot be parsed', () => {
+  const run = ((cmd: any, args: string[]) => {
+    if (args.includes('status')) return ''
+    if (args.includes('rev-parse')) return 'origin/main'
+    if (args.includes('rev-list')) return 'warning: refname is ambiguous'
+    throw new Error(`unexpected git ${args.join(' ')}`)
+  }) as any
+  expect(worktreeSafety('/wt', '/repo', run)).toEqual({ removable: false, dirty: false, unpushed: true, reason: 'could not count unpushed commits' })
+})
+
 // --- issue #71: `dir` and `parentDir` are paths the unauthenticated opencode server named, so the
 // `.git/config` and `.git/hooks` under them are attacker-controlled. The issue only named
 // pull-requests.ts, but `worktreeSafety` runs `status`/`rev-parse`/`rev-list` on the same class of
