@@ -113,13 +113,41 @@ test('worktreeName slugs the prompt and never collides with an existing director
   expect(worktreeName('some words that run right up to the cut here').endsWith('-')).toBe(false)
 })
 
-// #128: two genuinely different prompts must never share a name — pins the behavior the bug report
-// disputes, and documents the one legitimate suffix case: prompts identical through the 32-char cut.
-test('worktreeName: distinct prompts get distinct names; only a shared 32-char prefix collides', () => {
+// #128: two genuinely different prompts must never share a name, and a prompt that only shares the
+// 32-char cut with an existing worktree is named from its own words, not the other session's name
+// plus a counter.
+test('worktreeName: distinct prompts get distinct names, a shared 32-char prefix keeps its own tail', () => {
   const existing = ['/wt/x/find-some-jira-cards-to-work-on']
   expect(worktreeName('review the open pull requests', existing)).toBe('review-the-open-pull-requests')
-  // Same first 32 chars, different tails — this suffix is the false-positive path, not the bug.
+  expect(worktreeName('find some jira cards to work on today', existing)).toBe('find-some-jira-cards-to-work-on-today')
+  // The tail is cut at 48 chars, without a trailing dash, same as the base cut.
+  const long = worktreeName('find some jira cards to work on in the morpheus ui repo please', existing)
+  expect(long).toBe('find-some-jira-cards-to-work-on-in-the-morpheus')
+  expect(long.length).toBeLessThanOrEqual(48)
+  // Without a cut there's nothing to collide on: an uncontested prompt keeps the 32-char name.
+  expect(worktreeName('find some jira cards to work on today')).toBe('find-some-jira-cards-to-work-on')
+})
+
+test('worktreeName: falls back to a counter when the longer name is taken too, or adds nothing', () => {
+  // A short prompt again: its slug fits in 32 chars, so the longer cut adds nothing and only a
+  // counter tells them apart.
+  expect(worktreeName('fix tests', ['/wt/x/fix-tests'])).toBe('fix-tests-2')
+  const existing = ['/wt/x/find-some-jira-cards-to-work-on', '/wt/x/find-some-jira-cards-to-work-on-today']
   expect(worktreeName('find some jira cards to work on today', existing)).toBe('find-some-jira-cards-to-work-on-2')
+})
+
+// Only directory names are known, not the prompts behind them, so an identical prompt longer than
+// 32 chars can't be told apart from a different one with the same opening: its second dispatch
+// takes the 48-char cut, and only the third gets a counter.
+test('worktreeName: an identical long prompt repeated takes the longer cut, then a counter', () => {
+  const prompt = 'find some jira cards to work on today'
+  const names: string[] = []
+  for (let i = 0; i < 3; i++) names.push(worktreeName(prompt, names.map((n) => `/wt/x/${n}`)))
+  expect(names).toEqual([
+    'find-some-jira-cards-to-work-on',
+    'find-some-jira-cards-to-work-on-today',
+    'find-some-jira-cards-to-work-on-2',
+  ])
 })
 
 test('logNameCollision appends an NDJSON line with the prompt capped, and never throws', () => {
@@ -226,6 +254,19 @@ test('a parent on a detached HEAD is not a base, so real commits are not approve
   execFileSync('git', ['-C', wt, 'add', '-A'], { stdio: 'ignore' })
   execFileSync('git', ['-C', wt, 'commit', '-qm', 'real work'], { stdio: 'ignore' })
   expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: false, unpushed: true, reason: 'no branch to compare against' })
+})
+
+// The count is the one thing standing between ^x^x and a branch's only copy. Output git did not
+// mean as a number (a warning on stdout, a localized message) parses to NaN, and `NaN > 0` is
+// false, so without the guard an unread count read as "nothing unpushed" and approved the delete.
+test('worktreeSafety refuses when the unpushed count cannot be parsed', () => {
+  const run = ((cmd: any, args: string[]) => {
+    if (args.includes('status')) return ''
+    if (args.includes('rev-parse')) return 'origin/main'
+    if (args.includes('rev-list')) return 'warning: refname is ambiguous'
+    throw new Error(`unexpected git ${args.join(' ')}`)
+  }) as any
+  expect(worktreeSafety('/wt', '/repo', run)).toEqual({ removable: false, dirty: false, unpushed: true, reason: 'could not count unpushed commits' })
 })
 
 // --- issue #71: `dir` and `parentDir` are paths the unauthenticated opencode server named, so the

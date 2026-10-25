@@ -889,7 +889,8 @@ test('server status burns a saved password the port occupant rejected', async ()
 })
 
 // The counterpart: a password the user set in the environment is theirs, not an adopted one — a 401
-// under it is not fleetview's to burn, and server.json is left alone.
+// under it is not fleetview's to burn. The saved one is another matter: the M4 retry presented it to
+// the same listener, which rejected it too, so that one is burned (and only that one).
 test('server status does not burn a user-set password on a 401', async () => {
   const saved: any[] = []
   const env: any = { OPENCODE_SERVER_PASSWORD: 'users-own' }
@@ -907,7 +908,7 @@ test('server status does not burn a user-set password on a 401', async () => {
     },
   )
   expect(env.OPENCODE_SERVER_PASSWORD).toBe('users-own')
-  expect(saved).toEqual([])
+  expect(saved).toEqual([{ host: '127.0.0.1', port: 4900, pid: 4242 }])
 })
 
 test('server status prints host/port/pid/health and exits 0 while the server answers', async () => {
@@ -980,17 +981,19 @@ test('a kill that throws (pid gone between the check and the signal) is reported
 // H1: the probe authenticates through authHeader(), which reads the env var and nothing else. A
 // password fleetview generated lives in server.json and never in a fresh shell's env, so without the
 // adoption `server status` calls fleetview's own server dead and `server stop` no-ops.
-const passwordedHarness = () => {
+const passwordedHarness = (env: NodeJS.ProcessEnv = {}) => {
   const out: any[] = []
   const errs: any[] = []
   const killed: any[] = []
-  const env: NodeJS.ProcessEnv = {}
+  const codes: any[] = []
   let running = true
   const deps = {
     serverFile: '/tmp/s.json',
     loadServerImpl: () => ({ host: '127.0.0.1', port: 4900, pid: 4242, password: 'from-server-json' }),
     // Stands in for the real probe: 401 (read as unhealthy) unless the request carries the password.
     isServerHealthyImpl: () => Promise.resolve(running && env.OPENCODE_SERVER_PASSWORD === 'from-server-json'),
+    probeServerImpl: (): Promise<'healthy' | 'unauthorized' | 'unreachable'> =>
+      Promise.resolve(!running ? 'unreachable' : env.OPENCODE_SERVER_PASSWORD === 'from-server-json' ? 'healthy' : 'unauthorized'),
     identifyServer: () => ({ ok: true, command: 'opencode serve' }),
     processKill: (p: any, sig: any) => {
       killed.push([p, sig])
@@ -999,10 +1002,10 @@ const passwordedHarness = () => {
     pollMs: 1,
     log: (m: any) => out.push(m),
     error: (m: any) => errs.push(m),
-    setExitCode: () => {},
+    setExitCode: (c: any) => codes.push(c),
     env,
   }
-  return { out, errs, killed, deps }
+  return { out, errs, killed, codes, env, deps }
 }
 
 test('server status adopts the password out of server.json, so fleetview\'s own server reads as healthy', async () => {
@@ -1016,6 +1019,37 @@ test('server stop reaches the kill on a password-protected server fleetview spaw
   await runServer({ command: 'server', serverAction: 'stop' }, h.deps)
   expect(h.killed).toEqual([[4242, 'SIGTERM']])
   expect(h.out).toEqual(['stopped opencode server on :4900'])
+})
+
+// M4's retry, which makeEnsureServer has: a user who exported their own password over a server
+// fleetview spawned with a generated one was told "not running" by the very command fleetview's
+// own warning sends them to.
+test('server stop reaches the kill when the user\'s OPENCODE_SERVER_PASSWORD differs from the saved one', async () => {
+  const h = passwordedHarness({ OPENCODE_SERVER_PASSWORD: 'set-by-user' })
+  await runServer({ command: 'server', serverAction: 'stop' }, h.deps)
+  expect(h.killed).toEqual([[4242, 'SIGTERM']])
+  expect(h.out).toEqual(['stopped opencode server on :4900'])
+})
+
+test('server status reads fleetview\'s own server as healthy under a different user password', async () => {
+  const h = passwordedHarness({ OPENCODE_SERVER_PASSWORD: 'set-by-user' })
+  await runServer({ command: 'server', serverAction: 'status' }, h.deps)
+  expect(h.out).toContain('healthy  yes')
+  expect(h.codes).toEqual([0])
+})
+
+// The saved password did not open this listener either, so the user's own value goes back.
+test('a retry under the saved password that fails restores the user\'s password', async () => {
+  const h = passwordedHarness({ OPENCODE_SERVER_PASSWORD: 'set-by-user' })
+  h.deps.probeServerImpl = () => Promise.resolve('unauthorized' as const)
+  const saved: any[] = []
+  ;(h.deps as any).saveServerImpl = (file: any, s: any) => saved.push([file, s])
+  await runServer({ command: 'server', serverAction: 'status' }, h.deps)
+  expect(h.out).toContain('healthy  no')
+  expect(h.env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user')
+  // That listener has now seen the saved password and rejected it, so it is burned exactly as the
+  // adopted path burns it; otherwise every later `server` run would present it again.
+  expect(saved).toEqual([['/tmp/s.json', { host: '127.0.0.1', port: 4900, pid: 4242 }]])
 })
 
 // `server` is the one command that must never spawn: `status` answers about the world as it is.
