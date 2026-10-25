@@ -76,6 +76,9 @@ function statusEvents(sessionID: string, status: string, error: string | undefin
     ]
   }
   if (status === 'failed') return [idle, { type: 'session.error', properties: { sessionID, error: error ?? true } }]
+  // The name opencode gives an aborted turn, which the store already turns into `stopped` (#21)
+  // rather than an error. Spoken here so a process-backed stop lands the same way.
+  if (status === 'aborted') return [idle, { type: 'session.error', properties: { sessionID, error: { name: 'MessageAbortedError' } } }]
   if (status === 'needs-input') {
     return [
       idle,

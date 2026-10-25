@@ -25,7 +25,7 @@ export const parseJsonlChunk = (buffer: string) => parseNdjsonChunk<CopilotEvent
 // `working` until the run says otherwise. There is no `needs input` here: a headless copilot run
 // cannot ask — a tool it lacks permission for fails with `code: "denied"` and the model carries on
 // unaware — so a status meaning "waiting for you" would never be true.
-export type CopilotStatus = 'working' | 'completed' | 'failed'
+export type CopilotStatus = 'working' | 'completed' | 'failed' | 'aborted'
 
 export type RunState = {
   status: CopilotStatus
@@ -53,7 +53,8 @@ export function applyEvent(run: RunState, event: CopilotEvent): RunState {
     // produced no assistant text at all did not complete anything, whatever it exited with — and an
     // aborted one exits 0 too (verified: SIGTERM writes abort events then result with exitCode 0),
     // so an interrupted run with earlier output would otherwise go green.
-    const status: CopilotStatus = exitCode !== 0 || !run.lastOutput || run.aborted ? 'failed' : 'completed'
+    // An aborted run is a stop the user asked for, not a failure (#21), so it gets its own status.
+    const status: CopilotStatus = run.aborted ? 'aborted' : exitCode !== 0 || !run.lastOutput ? 'failed' : 'completed'
     return { ...run, status, exitCode }
   }
 
@@ -68,7 +69,7 @@ export function applyEvent(run: RunState, event: CopilotEvent): RunState {
   // shutdownType says "routine" even for an aborted run, so the abort mark above is the tiebreak.
   if (event.type === 'session.shutdown') {
     if (run.exitCode !== null) return run // a result already settled this run
-    const status: CopilotStatus = run.aborted || !run.lastOutput ? 'failed' : 'completed'
+    const status: CopilotStatus = run.aborted ? 'aborted' : !run.lastOutput ? 'failed' : 'completed'
     return { ...run, status, exitCode: 0 }
   }
 

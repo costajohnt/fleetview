@@ -105,23 +105,23 @@ test('a shutdown with no assistant output is failed', () => {
 
 // SIGTERM writes abort events and then a shutdown whose shutdownType still says "routine"
 // (verified) — the abort mark is the only thing separating interrupted from finished.
-test('an aborted run is failed even though its shutdown looks routine', () => {
+test('an aborted run is aborted, not completed, even though its shutdown looks routine', () => {
   const run = foldEvents(initialRun(), [
     { type: 'assistant.message', data: { content: 'partway there' } },
     { type: 'abort', data: { reason: 'user_initiated' } },
     { type: 'session.shutdown', data: { shutdownType: 'routine' } },
   ])
-  expect(run).toMatchObject({ status: 'failed', aborted: true })
+  expect(run).toMatchObject({ status: 'aborted', aborted: true })
 })
 
 // The captured-stream flavour of the same interruption: abort events then a result with exitCode 0.
-test('an aborted run with a result is failed despite exit 0 and earlier output', () => {
+test('an aborted run with a result is aborted despite exit 0 and earlier output', () => {
   const run = foldEvents(initialRun(), [
     { type: 'assistant.message', data: { content: 'partway there' } },
     { type: 'abort', data: { reason: 'user_initiated' } },
     { type: 'result', exitCode: 0 },
   ])
-  expect(run).toMatchObject({ status: 'failed', exitCode: 0 })
+  expect(run).toMatchObject({ status: 'aborted', exitCode: 0 })
 })
 
 // A result that already settled the run wins over the shutdown that follows in a captured stream.
