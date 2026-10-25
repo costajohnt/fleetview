@@ -20,7 +20,34 @@ test('the no-pty attach fallback runs the resume in the session’s worktree', a
   const backends = { claude: { attach: ({ id }: any) => ['claude', '--resume', id] } } as any
   const result = await attachLoop({ backend: 'claude', sessionId: 'c1', worktree: '/repo/alpha' }, out, null, backends)
   expect(result).toBeUndefined()
-  expect(spawnSync).toHaveBeenCalledWith('claude', ['--resume', 'c1'], { stdio: 'inherit', cwd: '/repo/alpha' })
+  expect(spawnSync).toHaveBeenCalledWith('claude', ['--resume', 'c1'], expect.objectContaining({ stdio: 'inherit', cwd: '/repo/alpha' }))
+})
+
+// Same scoping the pty path already applies (#50): a resumed claude/copilot must not inherit the
+// opencode server password nor this process's Claude Code session markers. opencode's own attach
+// authenticates with that password, so it keeps the full environment.
+test('the no-pty attach fallback hands a process-backed resume the scoped env', async () => {
+  vi.stubEnv('OPENCODE_SERVER_PASSWORD', 'minted-for-the-server')
+  vi.stubEnv('CLAUDECODE', '1')
+  try {
+    spawnSync.mockClear()
+    const out = { close: vi.fn(), open: vi.fn(), write: vi.fn() }
+    const backends = {
+      claude: { attach: ({ id }: any) => ['claude', '--resume', id] },
+      opencode: { attach: ({ id }: any) => ['opencode', 'attach', '-s', id] },
+    } as any
+    await attachLoop({ backend: 'claude', sessionId: 'c1', worktree: '/repo/alpha' }, out, null, backends)
+    const [, , claudeOptions] = spawnSync.mock.calls[0] as any
+    expect(claudeOptions.env).toBeDefined()
+    expect(claudeOptions.env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+    expect(claudeOptions.env.CLAUDECODE).toBeUndefined()
+    expect(claudeOptions.env.PATH).toBe(process.env.PATH)
+    await attachLoop({ sessionId: 'o1', worktree: '/repo/alpha' }, out, null, backends)
+    const [, , opencodeOptions] = spawnSync.mock.calls[1] as any
+    expect(opencodeOptions.env.OPENCODE_SERVER_PASSWORD).toBe('minted-for-the-server')
+  } finally {
+    vi.unstubAllEnvs()
+  }
 })
 
 // The no-pty fallback hands the terminal over wholesale, so it comes back to exactly the mess the

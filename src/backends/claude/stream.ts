@@ -13,7 +13,7 @@ import { isRecord } from '../../types.ts'
 // transcript rather than out of a run fleetview captured. Those transcripts have no `result` record
 // (see the wire notes), so whether the session finished, failed or is still going cannot be known
 // from the file; 'idle' says that, where seeding such a session as 'working' would claim it.
-export type ClaudeRunStatus = 'working' | 'completed' | 'failed' | 'needs-input' | 'idle'
+export type ClaudeRunStatus = 'working' | 'completed' | 'failed' | 'aborted' | 'needs-input' | 'idle'
 
 export type ClaudeRunState = {
   status: ClaudeRunStatus
@@ -78,7 +78,10 @@ export function applyEvent(state: ClaudeRunState, event: unknown): ClaudeRunStat
     // must not overwrite what the run itself reported. Mirrors copilot's `if (run.exitCode !==
     // null) return run` in events.ts. An `init` (a resume) puts the state back to 'working', so a
     // follow-up prompt's own result still lands.
-    if (state.status === 'completed' || state.status === 'failed' || state.status === 'needs-input') return state
+    if (state.status === 'completed' || state.status === 'failed' || state.status === 'aborted' || state.status === 'needs-input') return state
+    // fleetview's own stop line (the backend's abort writes it before the kill). A SIGTERM'd run
+    // writes no result of its own, and a stop the user asked for is not a failure (#21).
+    if (e.subtype === 'aborted') return { ...state, status: 'aborted', denials: [], error: undefined }
     const denials = Array.isArray(e.permission_denials) ? e.permission_denials : []
     const errors = Array.isArray(e.errors) ? e.errors.filter((x: unknown) => typeof x === 'string') : []
     // The child exits 0 whether the run worked or not (a resume against an unknown session exits 0

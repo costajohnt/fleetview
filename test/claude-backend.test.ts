@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, re
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createClaudeBackend } from '../src/backends/claude/index.ts'
+import { createStore } from '../src/session-store.ts'
 
 const tmp = (prefix: string) => mkdtempSync(join(tmpdir(), `fleetview-claude-${prefix}-`))
 
@@ -185,6 +186,59 @@ test('abort signals the run’s whole process group', async () => {
   const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
   expect(await b.abort(ref.id, '/repo/alpha')).toEqual({ aborted: true })
   expect(killImpl).toHaveBeenCalledWith(-4242, 'SIGTERM')
+})
+
+// What a row reads once a run's log has been folded through the same normaliser and store the
+// roster uses.
+const rowAfter = (b: any, runDir: string, id: string) => {
+  const store = createStore()
+  const normalise = b.createNormaliser()
+  const lines = readFileSync(join(runDir, `${id}.jsonl`), 'utf8').split('\n').filter(Boolean)
+  for (const line of lines) for (const e of normalise(JSON.parse(line))) store.apply('/repo/alpha', e)
+  return store.byProject()[0]?.sessions[0]
+}
+const initLine = (id: string) => `${JSON.stringify({ type: 'system', subtype: 'init', session_id: id })}\n`
+
+// A SIGTERM'd `claude -p` writes no `result` line (verified: exit 143, stream ends at init). The
+// exit listener that writes one lives only in the fleetview that spawned the run, so a stop from
+// any other fleetview (a restarted roster, a second instance) left a log with no terminal line and
+// the row read `working` until the log was reaped.
+test('a stop from a fleetview that did not spawn the run ends the row stopped', async () => {
+  const { b: spawner, runDir } = backend()
+  const ref = await spawner.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
+  appendFileSync(join(runDir, `${ref.id}.jsonl`), initLine(ref.id))
+  const killImpl = vi.fn()
+  const psImpl = () => ({ startedAt: Date.now(), command: `claude -p --session-id ${ref.id}` })
+  const { b: other } = backend({ runDir, killImpl, psImpl })
+  expect(await other.abort(ref.id, '/repo/alpha')).toEqual({ aborted: true })
+  expect(killImpl).toHaveBeenCalledWith(-4242, 'SIGTERM')
+  expect(rowAfter(other, runDir, ref.id)?.status).toBe('stopped')
+})
+
+// The spawning process also sees the child exit 143 and writes its synthetic failure. A stop the
+// user asked for is not a failure (#21): the abort's own line comes first and wins.
+test('a stop from the spawning fleetview ends the row stopped, not failed', async () => {
+  const listeners: Record<string, (code: number | null) => void> = {}
+  const spawnImpl: any = (command: string, argv: string[], options: any) => {
+    spawnImpl.calls.push({ command, argv, options })
+    return { pid: 4242, on: (name: string, fn: any) => (listeners[name] = fn), unref: vi.fn() }
+  }
+  spawnImpl.calls = []
+  const { b, runDir } = backend({ spawnImpl, killImpl: vi.fn() })
+  const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
+  appendFileSync(join(runDir, `${ref.id}.jsonl`), initLine(ref.id))
+  expect(await b.abort(ref.id, '/repo/alpha')).toEqual({ aborted: true })
+  listeners.exit?.(143)
+  expect(rowAfter(b, runDir, ref.id)?.status).toBe('stopped')
+})
+
+// A refused abort must not leave a terminal line behind: the run is still going.
+test('an abort that signals nothing writes nothing into the log', async () => {
+  const { b, runDir } = backend({ killImpl: vi.fn(), psImpl: () => null })
+  const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
+  appendFileSync(join(runDir, `${ref.id}.jsonl`), initLine(ref.id))
+  expect(await b.abort(ref.id, '/repo/alpha')).toEqual({ aborted: false })
+  expect(readFileSync(join(runDir, `${ref.id}.jsonl`), 'utf8')).toBe(initLine(ref.id))
 })
 
 // The regression this pins: abort() read the meta through a cache that a resume never refreshed,

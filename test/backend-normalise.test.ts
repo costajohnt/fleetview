@@ -216,3 +216,23 @@ test('resuming a denied claude session clears the denial and reads as running ag
   const resumed = rowsFrom('claude', '/x/alpha', [...denied, resume])[0]
   expect(resumed).toMatchObject({ status: 'running', pendingRequest: false })
 })
+
+// #21 for process-backed rows: a stop the user asked for renders `stopped`, never `failed`, and
+// so never fires agent_failed or counts in the header's failures.
+test('a claude run ended by fleetview\'s abort line is stopped, not failed', () => {
+  const rows = rowsFrom('claude', '/repo/alpha', [
+    { type: 'system', subtype: 'init', session_id: 's1' },
+    { type: 'result', is_error: true, subtype: 'aborted', session_id: 's1' },
+    // the spawning process's exit handler still writes its failure after the kill
+    { type: 'result', is_error: true, subtype: 'error_during_execution', session_id: 's1' },
+  ])
+  expect(rows[0]).toMatchObject({ id: 's1', status: 'stopped' })
+})
+
+test('an aborted copilot run is stopped, not failed', () => {
+  const rows = rowsFrom('copilot', '/repo/alpha', [
+    { type: 'copilot.session', sessionId: 'c1', status: 'working', lastOutput: '' },
+    { type: 'copilot.session', sessionId: 'c1', status: 'aborted', lastOutput: 'partway there' },
+  ])
+  expect(rows[0]).toMatchObject({ id: 'c1', status: 'stopped' })
+})
