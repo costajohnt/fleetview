@@ -107,7 +107,9 @@ export function loadServer(file: string): ServerRef | null {
     setAside(file)
     return null
   }
-  if (typeof parsed?.host !== 'string' || typeof parsed?.port !== 'number') {
+  // A port no server can listen on can never come healthy, and the fallback walk from it is nonsense
+  // (port 0 walks 1..10), so it is as damaged as a missing one.
+  if (typeof parsed?.host !== 'string' || !Number.isInteger(parsed?.port) || parsed.port < 1 || parsed.port > 65535) {
     setAside(file)
     return null
   }

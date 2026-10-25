@@ -1,4 +1,5 @@
 import type { Session, ListedSession, OpencodeMessage, Project, PermissionAsked, QuestionAsked, OpencodeSessionStatus, Worktree } from '../../types.ts'
+import { stripControl } from '../../text-utils.ts'
 
 // The three catalogue endpoints, named for the one field each caller reads off them (an agent's or
 // command's name, a provider's id and its model map). Same convention as types.ts: only what
@@ -88,7 +89,10 @@ export class OpencodeClient {
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(10_000),
     })
-    if (!res.ok) throw new Error(`${method} ${path} → ${res.status}: ${await res.text()}`)
+    // The body is the server's words, and an adopted server is untrusted (SECURITY.md); the CLI
+    // verbs print this message straight to the terminal, so it gets the same stripControl as every
+    // other foreign string, and a cap so an error page cannot flood it.
+    if (!res.ok) throw new Error(`${method} ${path} → ${res.status}: ${stripControl(await res.text()).slice(0, 500)}`)
     const text = await res.text()
     return (text.trim() ? JSON.parse(text) : null) as T
   }

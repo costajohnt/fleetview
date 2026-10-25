@@ -86,6 +86,17 @@ test('a non-loopback host is rejected so the RCE-capable server never binds to t
   expect(existsSync(`${file}.corrupt`)).toBe(true) // set aside, not trusted
 })
 
+// A port no server can listen on can never come healthy, and the fallback walk from it is nonsense
+// (port 0 walks 1..10). Set aside like any other damaged pointer so the next run starts clean.
+test('a port outside 1..65535 or not an integer is set aside', () => {
+  for (const port of [0, -1, 4900.5, 70000]) {
+    const file = tmpFile()
+    writeFileSync(file, JSON.stringify({ host: '127.0.0.1', port, pid: 1 }))
+    expect(loadServer(file)).toBe(null)
+    expect(existsSync(`${file}.corrupt`)).toBe(true)
+  }
+})
+
 test('loopback hosts still load', () => {
   for (const host of ['127.0.0.1', '::1', 'localhost']) {
     const file = tmpFile()
