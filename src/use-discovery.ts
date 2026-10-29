@@ -61,6 +61,7 @@ export function useDiscovery({
   // App-side roster removal (updateRoster + withoutMember): explicit delete evidence from the
   // stream is the only path allowed to prune members — see the onEvent handler below.
   onSessionDeleted,
+  attachedRef,
 }: {
   serverReady: boolean
   client: RosterClient
@@ -91,11 +92,14 @@ export function useDiscovery({
   setProjects: (updater: (prev: Project[]) => Project[]) => void
   setPullRequests: (prs: { byBranch: Map<string, PullRequest[]>; branches: Map<string, string>; reasons: Map<string, string> }) => void
   onSessionDeleted: (directory: string, id: string) => void
+  // True while a pty child owns the terminal; a fallback-port remount waits for it to hand back.
+  attachedRef?: { current: boolean }
 }) {
   const conns = useRef(new Map<string, EventSubscription>()) // worktree -> stream handle, for unmount cleanup
   useEffect(() => {
     let cancelled = false
     let polling = false
+    let pendingReconnect = false
     let intervalId: ReturnType<typeof setInterval> | undefined
 
     // Live-state reconciliation: GET /session/status + GET /permission + GET /question catch a
@@ -383,6 +387,11 @@ export function useDiscovery({
 
     const refreshProjects = async () => {
       if (polling) return
+      // A fallback-port remount deferred by an attach (below) runs on the first poll after detach.
+      if (pendingReconnect && !attachedRef?.current) {
+        onAction({ type: 'reconnect' })
+        return exit()
+      }
       polling = true
       flushSavedReplies.current() // anything queued by a failed peek reply gets another go
       // Before listProjects, not after: #43 ghosts a member whose worktree is in no project record,
@@ -440,6 +449,11 @@ export function useDiscovery({
             setServerDown(true)
           } else if (r.server.port === server.port) {
             setServerDown(false) // same port came back healthy — streams self-recover
+          } else if (attachedRef?.current) {
+            // Remounting Ink now would fight the pty child that owns the terminal. server.json
+            // already names the new port; remount on the first poll after the user detaches.
+            pendingReconnect = true
+            setServerDown(true)
           } else {
             // ensureServer fell back to a different port and already persisted it to server.json —
             // remount on it rather than performing live client/stream surgery here.

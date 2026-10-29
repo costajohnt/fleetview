@@ -6,8 +6,8 @@ import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { stripEscapeResidue } from './text-utils.ts'
 import { EMPTY, atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, withCaret, type TextCursor } from './text-cursor.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
-import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
-import { DEFAULT_BACKEND } from './backends/index.ts'
+import { createOpencodeBackend } from './backends/opencode/index.ts'
+import { DEFAULT_BACKEND, resolveBackend } from './backends/index.ts'
 import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { hasSession, type Roster as RosterType, type RosterSession as RosterMember } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
@@ -92,6 +92,8 @@ export function foldCompleted<G extends FoldGroup>(
   groups: G[],
   maxRows: number,
   sel?: { projectKey: string; id: string } | null,
+  // Collapsed groups draw their header alone (buildLines), so they are counted as one row.
+  collapsed: { has(key: string): boolean } = new Set(),
   // `hidden` is added by the fold, so it is announced here rather than being required of a caller
   // that has never folded anything.
 ): Array<G & { hidden?: number }> {
@@ -99,10 +101,13 @@ export function foldCompleted<G extends FoldGroup>(
   // "no items" placeholder row in place of sessions. Counting those placeholders keeps the fold
   // honest now that needs-input/working are shown even when empty.
   const used =
-    groups.reduce((n, g) => n + 1 + g.sessions.length + (g.sessions.length === 0 && g.empty ? 1 : 0), 0) +
-    Math.max(0, groups.length - 1) // one spacer row between adjacent groups
+    groups.reduce(
+      (n, g) => n + 1 + (collapsed.has(g.projectKey) ? 0 : g.sessions.length + (g.sessions.length === 0 && g.empty ? 1 : 0)),
+      0,
+    ) + Math.max(0, groups.length - 1) // one spacer row between adjacent groups
   const completed = groups.find((g) => g.projectKey === 'state:completed')
-  if (!completed || used <= maxRows) return groups
+  // A collapsed `completed` shows none of its rows, so there is nothing to fold.
+  if (!completed || collapsed.has(completed.projectKey) || used <= maxRows) return groups
   const isSelected = (s: FoldRow) => !!sel && s.id === sel.id && s.projectKey === sel.projectKey
   const protectedCount = completed.sessions.filter((s) => isProtectedFromFold(s) || isSelected(s)).length
   // The fold costs a row of its own — the `… N more` line — so dropping k sessions only recovers
@@ -188,6 +193,7 @@ type AppProps = {
   initialBackend?: string
   isolate?: boolean
   projectPollMs?: number
+  stopArmMs?: number
   fetchPullRequestsImpl?: (dir: string) => Promise<{ prs: PullRequest[]; reason: string | null }>
   branchOfImpl?: (dir: string) => string | null
   cwd?: string
@@ -231,6 +237,9 @@ export function App({
   // false (FLEETVIEW_NO_ISOLATE=1) dispatches into the checkout instead of a per-session worktree.
   isolate = true,
   projectPollMs = 30000,
+  // The two-press ^x window (stop, then delete). A prop so a test can let it lapse without racing
+  // real time (M4).
+  stopArmMs = 2000,
   fetchPullRequestsImpl = fetchPullRequests,
   branchOfImpl = branchOf,
   cwd = process.cwd(),
@@ -273,8 +282,8 @@ export function App({
   // mapping onto OpencodeClient and nothing more), so routing opencode rows through it changes no
   // call shape. Falls back to the default adapter when a row's backend can't be resolved: a missing
   // adapter must not make a row inert or silently hide keys that have always worked.
-  const backendFor = (row: AttachTarget) => backendRegistry[backendNameOf(row)] ?? backendRegistry[DEFAULT_BACKEND]
-  const capabilitiesOf = (row: AttachTarget): BackendCapabilities => backendFor(row)?.capabilities ?? OPENCODE_CAPABILITIES
+  const backendFor = (row: AttachTarget) => resolveBackend(backendRegistry, backendNameOf(row))
+  const capabilitiesOf = (row: AttachTarget): BackendCapabilities => backendFor(row).capabilities
   // The two verbs ^x drives, through the row's adapter — the only thing that knows whether stopping
   // means an HTTP abort or signalling a detached CLI's process group.
   const abortRow = (row: AttachTarget) => backendFor(row).abort(row.id, row.projectKey)
@@ -589,26 +598,29 @@ export function App({
   // Shell jobs clean up after themselves ~5 minutes after finishing, agent view's rule — the
   // session is deleted (a job's output is ephemeral by contract; `fleetview logs` reads it before
   // the window closes) and the row goes with it. In-flight guard: the effect runs per render and
-  // a delete takes longer than one.
-  const cleaningJobs = useRef(new Set())
+  // a delete takes longer than one. Keyed to "not before" times: Infinity while a delete is in
+  // flight, and after a failure the next project poll (M13) — the rollback re-renders, which re-runs
+  // this effect, so clearing the key on failure retried a persistently failing delete in a tight
+  // loop of HTTP calls and roster rewrites.
+  const cleaningJobs = useRef(new Map<string, number>())
   useEffect(() => {
     const sessionsById = new Map([...byProjectSessions.values()].flat().map((s) => [`${s.projectKey}:${s.id}`, s]))
     for (const m of expiredShellJobs(rosterState, sessionsById)) {
       const key = `${m.worktree}:${m.id}`
-      if (cleaningJobs.current.has(key)) continue
-      cleaningJobs.current.add(key)
+      if ((cleaningJobs.current.get(key) ?? 0) > Date.now()) continue
+      cleaningJobs.current.set(key, Infinity)
       ;(async () => {
         try {
           updateRoster((prev) => withoutMember(prev, m.worktree, m.id))
           await client.deleteSession(m.id, m.worktree)
           store.apply(m.worktree, { type: 'session.deleted', properties: { info: { id: m.id } } })
+          cleaningJobs.current.delete(key)
         } catch {
+          cleaningJobs.current.set(key, Date.now() + projectPollMs)
           // Put it back: a failed delete must not orphan a running server-side session invisibly.
           // The whole member, not a `{ shell: true }` stand-in — same reason as deleteGroup's
           // rollback: a rebuilt member loses the row's pin, rank and prompt.
           updateRoster((prev) => withMember(prev, m.worktree, m.id, m))
-        } finally {
-          cleaningJobs.current.delete(key)
         }
       })()
     }
@@ -628,7 +640,7 @@ export function App({
     // moving it there while the confirming second press is still pending makes the user chase the
     // row down the board. While the arm is live the row keeps the section and sort position it had
     // when armed; by the time the arm lapses the row is either deleted or no longer armed.
-    const held = stopArm.current?.held && Date.now() - stopArm.current.at < 2000 ? stopArm.current : null
+    const held = stopArm.current?.held && Date.now() - stopArm.current.at < stopArmMs ? stopArm.current : null
     const isHeld = (s: RosterSession) => held?.key === `${s.projectKey}:${s.id}`
     const groupFor = (s: RosterSession) => (isHeld(s) ? held!.held!.group : STATE_GROUPS.find((g) => g.match(s))?.key)
     const sortTime = (s: RosterSession) => (isHeld(s) ? held!.held!.updatedAt : s.updatedAt ?? 0)
@@ -699,7 +711,7 @@ export function App({
         ? projectMemberGroups()
         : // #49: the fold must know what is selected, or it drops that row and the next key acts
           // on whatever the fallback below lands on — a running session the user never picked.
-          foldCompleted(stateGroups(), maxRows, selectedSessionRef.current)
+          foldCompleted(stateGroups(), maxRows, selectedSessionRef.current, new Set(rosterState.collapsed ?? []))
   // The same groups without the fold/slice that fit them to the screen. deleteGroup ("^x on a header
   // deletes every session in the group") must act on all of them, not just the rows currently drawn:
   // the state view folds `completed` to `… N more` and browse caps each project at
@@ -877,9 +889,10 @@ export function App({
       // an opencode-only roster hands over exactly the payload it always did.
       ...(backendNameOf(row) === DEFAULT_BACKEND ? {} : { backend: backendNameOf(row) }),
       // #34: ghost rows are dropped from the sibling list — Alt+1..9 hands the host a session to
-      // resume, and a session that no longer exists is not one.
-      siblings: flat
-        .filter((s) => !s.ghost)
+      // resume, and a session that no longer exists is not one. From navRows, not flat: flat still
+      // carries rows inside collapsed groups, so Alt+N could land on a session that isn't on screen.
+      siblings: navRows
+        .flatMap((l) => (l.type === 'session' && !l.session.ghost ? [l.session] : []))
         .map((s): AttachSibling => ({ id: s.id, projectKey: s.projectKey, ...(asString(s.backend) ? { backend: asString(s.backend) } : {}) })),
     })
     if (isThenable(done)) {
@@ -987,6 +1000,7 @@ export function App({
     setProjects,
     setPullRequests,
     onSessionDeleted: (directory, id) => updateRoster((prev) => withoutMember(prev, directory, id)),
+    attachedRef,
   })
 
   // Extracted from the deleted two-stage Launcher. The prompt is the whole interaction now:
@@ -1074,14 +1088,22 @@ export function App({
         }
         const row = current
         ;(async () => {
+          let forkedId: string | null = null
+          let done = false
           try {
             const forked = await client.forkSession(row.id, row.projectKey)
+            forkedId = forked.id
             updateRoster((prev) => withMember(prev, row.projectKey, forked.id, parsed.args ? { prompt: parsed.args.slice(0, 2000) } : {}))
             if (parsed.args) await client.promptAsync(forked.id, parsed.args, row.projectKey)
-            store.setSessions(row.projectKey, await client.listSessions(row.projectKey), seen)
+            done = true
             flash(`forked → ${forked.id.slice(0, 12)}${parsed.args ? ' (prompt sent)' : ''}`)
+            store.setSessions(row.projectKey, await client.listSessions(row.projectKey), seen)
           } catch {
-            flash("couldn't fork — server refused")
+            // Only the refresh failed: the fork and its prompt landed, and the next poll relists.
+            if (done) return
+            // The fork exists once forkSession answered: "couldn't fork" would invite a retry that
+            // makes a second one. Say which half failed.
+            flash(forkedId ? `forked → ${forkedId.slice(0, 12)}, but the prompt was not sent` : "couldn't fork — server refused", 4000)
           }
         })()
         setInput('')
@@ -1117,11 +1139,12 @@ export function App({
 
   // Ctrl+X: stop, then delete on a second press within 2s. Replaces the old y/d/n and y/n modal
   // confirms — agent view has no dialog here, and the arm window is its own confirmation.
-  // Deleting an isolated session takes its worktree with it — agent view's "Ctrl+X twice removes
-  // the worktree and uncommitted changes (commit first)". The exception is the one it also makes:
-  // "neither removes a worktree with unpushed commits", which is kept rather than silently taking
-  // work with it. opencode's DELETE enforces none of this — it will remove a worktree holding
-  // uncommitted changes, and its branch, without complaint — so the check has to happen here.
+  // Deleting an isolated session takes its worktree with it, but only when worktreeSafety finds no
+  // uncommitted changes and no unpushed commits there; otherwise the worktree is kept rather than
+  // silently taking work with it. Stricter than agent view, whose "Ctrl+X twice removes the worktree
+  // and uncommitted changes (commit first)" only spares unpushed commits. opencode's DELETE enforces
+  // none of this — it will remove a worktree holding uncommitted changes, and its branch, without
+  // complaint — so the check has to happen here.
   const removeWorktreeFor = async (projectKey: string, deletedId: string) => {
     if (!isSandbox(parents, projectKey)) return
     const repo = parents.get(projectKey)
@@ -1171,10 +1194,10 @@ export function App({
     const rows: RosterSession[] = group?.sessions ?? []
     if (rows.length === 0) return
     const armKey = `group:${projectKey}`
-    const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < 2000
+    const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < stopArmMs
     if (!armed) {
       stopArm.current = { key: armKey, at: Date.now() }
-      return flash(`^x again to delete ${rows.length} session${rows.length === 1 ? '' : 's'} in ${group?.repoName}`, 2000)
+      return flash(`^x again to delete ${rows.length} session${rows.length === 1 ? '' : 's'} in ${group?.repoName}`, stopArmMs)
     }
     stopArm.current = null
     setNotice(null)
@@ -1221,7 +1244,7 @@ export function App({
       return flash(`removed "${row.title}"`)
     }
     const armKey = `${row.projectKey}:${row.id}`
-    const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < 2000
+    const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < stopArmMs
     if (armed) {
       stopArm.current = null
       setNotice(null)
@@ -1254,7 +1277,7 @@ export function App({
     // until the arm lapses so the confirming press targets a row that hasn't moved (#15).
     stopArm.current = { key: armKey, at: armedAt, held: { group: STATE_GROUPS.find((g) => g.match(row))?.key, updatedAt: row.updatedAt ?? 0 } }
     if (armTimer.current) clearTimeout(armTimer.current)
-    armTimer.current = setTimeout(rerender, 2050) // just past the window, so the released row repaints
+    armTimer.current = setTimeout(rerender, stopArmMs + 50) // just past the window, so the released row repaints
     // The arm is immediate — the two-press window must not wait on the network — but the notice
     // reports the outcome, not the intention. It used to say `stopped "<title>"` before the abort
     // had even been sent, and never corrected itself when the abort threw: a session that is still
@@ -1264,11 +1287,15 @@ export function App({
     // live, so it is repeated only for whatever is left of that window — a notice that outlived the
     // arm would invite a second press that arms again instead of deleting.
     const report = (message: string) => {
-      const left = 2000 - (Date.now() - armedAt)
+      const left = stopArmMs - (Date.now() - armedAt)
       return left > 0 ? flash(`${message} · ^x again to delete`, left) : flash(message)
     }
     try {
-      await abortRow(row)
+      const result = await abortRow(row)
+      // M14: a process backend answers {aborted:false} when there was nothing of this run left to
+      // signal (no pid, a recycled one, already exited). Marking that "stopped" would label a row
+      // whose run may still be going — or that finished on its own — with a stop that never happened.
+      if (isRecord(result) && result.aborted === false) return report('nothing running to stop')
       // M4: a session whose "waiting" came only from the ?-heuristic (idle underneath, no real
       // pending permission/question) won't get a session.status SSE event from this abort —
       // nothing else would ever clear the heuristic, so the row would stay stuck showing waiting.
@@ -1614,8 +1641,11 @@ export function App({
             next.delete(target.projectKey)
             return next
           })
-        } catch {
-          setOfflineProjects((s) => new Set(s).add(target.projectKey))
+        } catch (e) {
+          // Only an unreachable server makes the project "(offline)"; a server that answered with
+          // an HTTP refusal is plainly online, and the rename just didn't happen.
+          if (!(isRecord(e) && typeof e.status === 'number')) setOfflineProjects((s) => new Set(s).add(target.projectKey))
+          flash("couldn't rename")
         } finally {
           setTarget(null)
         }

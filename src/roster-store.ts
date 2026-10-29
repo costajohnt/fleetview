@@ -1,4 +1,4 @@
-import { readFileSync, renameSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs'
+import { readFileSync, renameSync, statSync, openSync, closeSync, unlinkSync, linkSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWrite } from './paths.ts'
 import { configDir } from './registry.ts'
@@ -90,17 +90,24 @@ export type PersistRoster = ((snap: Roster) => void) & {
 // other's append, so one is lost. An exclusive lockfile serialises the read-merge-write across
 // processes: whoever creates `${file}.lock` (open 'wx' — fails if it exists) holds it for one
 // persist. A lock older than STALE_LOCK_MS is a crashed holder's leftover and is broken.
-// ponytail: busy-wait spin, since persist is fully synchronous anyway; best-effort — if locking
-// can't be had (foreign error, or the spin times out) the write falls through unlocked rather than
-// throwing, keeping the pre-#106 behaviour as the floor.
+// ponytail: a blocking wait (Atomics.wait, so waiters yield the CPU instead of spinning), since
+// persist is fully synchronous anyway; best-effort — if locking can't be had (foreign error, or the
+// wait outlives a stale holder) the write falls through unlocked rather than throwing, keeping the
+// pre-#106 behaviour as the floor.
 // Exported because the TUI's persist is only one side of the race: `fleetview bg`, `add` and `rm`
 // each do their own read-modify-write of the same file from a separate process, and a lock only one
 // writer takes serialises nothing.
 const STALE_LOCK_MS = 5000
+const sleepCell = new Int32Array(new SharedArrayBuffer(4))
+const sleepMs = (ms: number) => Atomics.wait(sleepCell, 0, 0, ms)
 export function withRosterLock<T>(file: string, fn: () => T): T {
   const lock = `${file}.lock`
   let fd: number | null = null
-  for (let i = 0; i < 100; i++) {
+  // Waited out until a live holder would have gone stale (plus a margin to notice it), not a fixed
+  // count: a holder starved past the old ~1s budget is still a live holder, and writing unlocked
+  // under it loses an append (M5).
+  const deadline = Date.now() + STALE_LOCK_MS + 1000
+  while (Date.now() < deadline) {
     try {
       fd = openSync(lock, 'wx')
       break
@@ -108,12 +115,21 @@ export function withRosterLock<T>(file: string, fn: () => T): T {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') break // undirectory/permission — give up, write unlocked
       try {
         if (Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS) {
-          unlinkSync(lock) // crashed holder — break it and retry immediately
+          // Crashed holder. Broken by renaming it aside rather than check-then-unlink: two waiters
+          // that both saw it stale could otherwise each unlink — the second one deleting the fresh
+          // lock the first had just created. rename is atomic, so only one waiter moves any given
+          // lock; and the one that moved it re-checks what it actually took, putting back a fresh
+          // lock it raced onto (link fails rather than clobbering if the path is taken again).
+          const aside = `${lock}.stale.${process.pid}.${Date.now()}`
+          renameSync(lock, aside)
+          if (Date.now() - statSync(aside).mtimeMs <= STALE_LOCK_MS) {
+            try { linkSync(aside, lock) } catch {}
+          }
+          unlinkSync(aside)
           continue
         }
-      } catch {} // lock vanished between open and stat — retry
-      const until = Date.now() + 10 // brief spin before the next attempt
-      while (Date.now() < until) {}
+      } catch {} // lock vanished (or was moved by another waiter) between open and stat — retry
+      sleepMs(10)
     }
   }
   try {
@@ -150,10 +166,12 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
     // then the members only the snapshot has — makePersistSeen's `{ ...base, ...snap }` in list form.
     const seen = new Set()
     const sessions = []
+    let keptForeign = false
     for (const m of disk.sessions) {
       const k = memberKey(m)
       if (removedHere.has(k) || seen.has(k)) continue
       seen.add(k)
+      if (!mine.has(k)) keptForeign = true
       sessions.push(mine.get(k) ?? m)
     }
     for (const m of snap.sessions) {
@@ -169,7 +187,11 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
     // in-flight removal as done while it never reached disk, and the next successful persist
     // would merge the row back from disk — resurrecting what the user deleted.
     prev = snap
-    lastStamp = stamp()
+    // M12: a write that carried someone else's members (a `fleetview bg` append landed since the
+    // last reload) is NOT stamped as seen — stamping it made the next reload answer "unchanged", so
+    // those members reached the file but never this instance's state. Left unstamped, the next
+    // reload re-reads the file and the caller unions them in.
+    if (!keptForeign) lastStamp = stamp()
   })
   persist.reload = () => {
     const now = stamp()

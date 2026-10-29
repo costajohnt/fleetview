@@ -1,5 +1,6 @@
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
+import { waitFor } from './helpers.ts'
 import { render } from 'ink-testing-library'
 import { App } from '../src/app.ts'
 
@@ -11,13 +12,6 @@ afterEach(() => {
   for (const instance of live.splice(0)) instance.unmount()
 })
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '')
-const waitFor = async (fn: () => any, timeoutMs = 4000) => {
-  const start = Date.now()
-  while (!fn()) {
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((r) => setTimeout(r, 10))
-  }
-}
 
 const server = { host: '127.0.0.1', port: 4900 }
 const repo = '/x/alpha'

@@ -62,3 +62,14 @@ export function psInfo(pid: number): PidInfo {
 // unverifiable is not verified-stale, and refusing would make every abort on such a host a silent
 // no-op forever.
 export const sameRun = (info: PidInfo, id: string): boolean => info !== null && (info === 'unavailable' || info.command.includes(id))
+
+// M15: a follow-up to a process-backed session is a second `--resume` spawn, and two of them on one
+// session are two writers on one transcript with the first run un-abortable (its pid is overwritten).
+// prompt() refuses while the recorded run is demonstrably alive. Stricter than sameRun on purpose:
+// 'unavailable' must not refuse, or a host without a usable ps could never send a follow-up again.
+export const STILL_WORKING = 'still working — wait for it to finish, or ^x to stop it'
+export const isLiveRun = (pid: number | null | undefined, id: string, psImpl: (pid: number) => PidInfo): boolean => {
+  if (!pid) return false
+  const info = psImpl(pid)
+  return info !== 'unavailable' && sameRun(info, id)
+}

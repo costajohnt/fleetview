@@ -1,5 +1,6 @@
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
+import { waitFor } from './helpers.ts'
 import { render as inkRender } from 'ink-testing-library'
 import { parseMouseEvents, MOUSE_ON, MOUSE_OFF } from '../src/ui/mouse.ts'
 import { gatedStdout } from '../src/gated-stdout.ts'
@@ -62,14 +63,6 @@ afterEach(() => {
 
 const server = { host: '127.0.0.1', port: 4900 }
 const project = { id: 'a-1', worktree: '/x/alpha', vcs: 'git', time: { created: 1, updated: 1000 } }
-const waitFor = async (fn: any, timeoutMs = 3000) => {
-  const start = Date.now()
-  for (;;) {
-    if (fn()) return
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((r) => setTimeout(r, 10))
-  }
-}
 
 function makeDeps() {
   const client = {

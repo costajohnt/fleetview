@@ -244,14 +244,17 @@ test('an abort that signals nothing writes nothing into the log', async () => {
 // The regression this pins: abort() read the meta through a cache that a resume never refreshed,
 // so it signalled the first run's dead group and the live resume survived the abort.
 test('abort after a follow-up prompt signals the new run, not the first one', async () => {
-  const killImpl = vi.fn()
+  const live = new Set<number>()
+  const killImpl = vi.fn((pid: number) => live.delete(-pid)) // the stopped run is gone, so a follow-up is allowed
   const pids = [100, 200]
   const spawnImpl: any = (command: string, argv: string[], options: any) => {
     spawnImpl.calls.push({ command, argv, options })
+    live.add(pids[spawnImpl.calls.length - 1])
     return { pid: pids[spawnImpl.calls.length - 1], on: vi.fn(), unref: vi.fn() }
   }
   spawnImpl.calls = []
-  const { b } = backend({ killImpl, spawnImpl })
+  const psImpl = (pid: number) => (live.has(pid) ? { startedAt: Date.now(), command: `claude ${spawnImpl.calls.at(-1).argv.join(' ')}` } : null)
+  const { b } = backend({ killImpl, spawnImpl, psImpl })
   const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
   expect(await b.abort(ref.id, '/repo/alpha')).toEqual({ aborted: true }) // primes the cache
   await b.prompt(ref.id, 'now run the tests', '/repo/alpha')
@@ -570,7 +573,7 @@ test('prompt refuses a session id with flag syntax', async () => {
 // mode on open only applies when it creates, so a pre-existing (or pre-loosened) run log kept its
 // perms while receiving prompts and repo paths — every open re-tightens the file and its dir now.
 test('a pre-existing run log is re-tightened to 0600 on the next run', async () => {
-  const { b, runDir } = backend()
+  const { b, runDir } = backend({ psImpl: () => null }) // the first run has finished
   const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
   const log = join(runDir, `${ref.id}.jsonl`)
   const { chmodSync, statSync } = await import('node:fs')

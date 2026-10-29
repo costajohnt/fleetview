@@ -126,13 +126,13 @@ test('^x on a header asks first, then deletes every session in the group', async
 
 test('a header ^x that is not confirmed within the window deletes nothing', async () => {
   const deps = makeDeps()
-  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction: vi.fn() }))
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, stopArmMs: 300, onAction: vi.fn() }))
   await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write(UP)
   await waitFor(() => lastFrame().includes('▾ expanded')) // the selected expanded header says so at its right edge
   stdin.write(CTRL_X)
   await waitFor(() => lastFrame().includes('^x again to delete'))
-  await new Promise((r) => setTimeout(r, 2100)) // the arm expires
+  await new Promise((r) => setTimeout(r, 400)) // the 300ms arm expires
   stdin.write(CTRL_X)
   await tick()
   expect(deps.client.deleteSession).not.toHaveBeenCalled()

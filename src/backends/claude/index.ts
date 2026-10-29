@@ -13,7 +13,7 @@ import { claudeNormaliser, normaliseClaudeSessions } from '../../backend-normali
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
-import { psInfo, sameRun, type PidInfo } from '../ps.ts'
+import { isLiveRun, psInfo, sameRun, STILL_WORKING, type PidInfo } from '../ps.ts'
 import { reapRunLogs } from '../run-logs.ts'
 import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
 import { assertSessionId } from '../session-id.ts'
@@ -178,7 +178,13 @@ export function createClaudeBackend({
     // Resume is scoped by cwd: the same id from a sibling directory fails with "No conversation
     // found" before any API call, so `directory` here is load-bearing rather than a label.
     // The text rides behind `--` for the same leading-dash reason as dispatch.
-    prompt: async (id, text, directory) => run(['--resume', assertSessionId(id), '-p', '--output-format=stream-json', '--verbose', '--', text], id, directory),
+    // Refused while the recorded run is still alive (M15): a second resume would race the first on
+    // one transcript and overwrite the meta pid abort() needs.
+    prompt: async (id, text, directory) => {
+      assertSessionId(id) // before the meta read, which builds a path from it
+      if (isLiveRun(readMeta(id)?.pid, id, psImpl)) throw new Error(STILL_WORKING)
+      return run(['--resume', id,'-p', '--output-format=stream-json', '--verbose', '--', text], id, directory)
+    },
 
     // Same subscription contract as opencode's, satisfied by polling rather than by a socket:
     // stop() ends the loop, done resolves when the loop has actually finished.
