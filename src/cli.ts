@@ -27,7 +27,7 @@ import { OpencodeClient } from './backends/opencode/client.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, isBackendName } from './backends/index.ts'
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
-import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from './backends/opencode/server-manager.ts'
+import { spawnServer, isServerHealthy, isAuthEnforced, probeServer, OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
 import { noteExit } from './paths.ts'
 import { loadRoster, saveRoster, makePersistRoster, withRosterLock, defaultRosterFile } from './roster-store.ts'
@@ -352,6 +352,13 @@ export function makeEnsureServer({
       else env.OPENCODE_SERVER_PASSWORD = userPassword
       stalePassword = true // that server is gone; its password must not ride onto the replacement
     }
+    // M6: everything below spawns `opencode serve`. Without opencode on PATH that spawn fails
+    // asynchronously (server-manager swallows the ENOENT), so asking first saves a full poll window
+    // of blank waiting and lets the roster lead with the actual problem.
+    const probe = spawnSyncImpl('opencode', ['--version'])
+    if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+      return { ok: false, server, reason: OPENCODE_MISSING }
+    }
     // We're spawning the server ourselves, so we own its environment: an unauthenticated opencode
     // serve exposes POST /session/:id/shell (arbitrary shell) to anything on loopback, and it stays
     // up after fleetview exits. Mint a password when the user hasn't set one — the child inherits it
@@ -370,11 +377,6 @@ export function makeEnsureServer({
       if (spawned) return { ok: true, server: spawned }
     } else {
       warn(`fleetview: something on ${server.host}:${server.port} is answering but rejecting fleetview's password — leaving it alone and trying the next port.`)
-    }
-    // opencode missing entirely (ENOENT) — no fallback port will ever succeed either, fail fast.
-    const probe = spawnSyncImpl('opencode', ['--version'])
-    if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-      return { ok: false, server, reason: 'opencode not installed — see https://opencode.ai' }
     }
     // configured port never came healthy — a bind failure or a non-opencode squatter holding it.
     // v2 can use ANY healthy opencode server it finds (global db, one server serves all projects),
@@ -1234,6 +1236,12 @@ export const RESTORE_SCREEN = `${MOUSE_OFF}${RESET_INPUT_MODES}\x1b[?25h\x1b[?10
 async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = {}) {
   const rosterFile = defaultRosterFile()
   const ensureServer = makeEnsureServer({ isServerHealthy, isAuthEnforced, probeServer, spawnServer, saveServer, serverFile })
+  // The first connect runs on the normal screen, before the alternate one goes up: a cold opencode
+  // boot or a fallback-port walk can take many seconds, which used to be a blank alternate screen,
+  // and any warning ensureServer prints stays readable instead of vanishing with that screen. The
+  // status line only appears when the connect is slow enough to notice.
+  const slow = process.stdout.isTTY ? setTimeout(() => process.stderr.write('fleetview: starting the opencode server…\n'), 300) : undefined
+  const first = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER).finally(() => clearTimeout(slow))
 
   // The roster owns the whole screen (alternate buffer), like every full-screen TUI: no shell
   // scrollback bleeding above the header, and quitting restores the terminal exactly as it was.
@@ -1281,7 +1289,7 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
   }
 
   try {
-    await rosterLoop(args, { rosterFile, ensureServer, serverFile, launch })
+    await rosterLoop(args, { rosterFile, ensureServer, serverFile, launch, first })
   } finally {
     if (tty) {
       restoreScreen()
@@ -1292,11 +1300,20 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
 
 async function rosterLoop(
   args: ParsedArgs,
-  { rosterFile, ensureServer, serverFile, launch = {} }: { rosterFile: string; ensureServer: EnsureServer; serverFile: string; launch?: Launch },
+  {
+    rosterFile,
+    ensureServer,
+    serverFile,
+    launch = {},
+    first,
+  }: { rosterFile: string; ensureServer: EnsureServer; serverFile: string; launch?: Launch; first?: Awaited<ReturnType<EnsureServer>> },
 ) {
+  // `first` is runRoster's pre-alt-screen connect; every later iteration connects again here.
+  let pending = first
   for (;;) {
-    const server = loadServer(serverFile) ?? DEFAULT_SERVER // re-read each iteration — a reconnect action means server.json now points at a new port
-    const r = await ensureServer(server)
+    // server.json is re-read each iteration — a reconnect action means it now points at a new port
+    const r = pending ?? (await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER))
+    pending = undefined
     const client = new OpencodeClient(`http://${r.server.host}:${r.server.port}`)
     // Every adapter, not just the one being dispatched onto: the roster can hold rows from more than
     // one backend at once, so attach and the key handlers have to be able to reach any of them.

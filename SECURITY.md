@@ -19,17 +19,20 @@ fleetview is a local terminal UI. It **opens no network listener of its own.**
 What it does touch:
 
 - **It spawns a detached `opencode serve` bound to loopback** (`127.0.0.1`,
-  port 4900 or the next free port up to 4910). **That server is unauthenticated
-  by default and exposes a route that runs arbitrary shell commands**, so
-  anything able to reach `127.0.0.1` as your user — including a web page in your
-  browser, via DNS rebinding — can execute code. This is opencode's surface, not
-  fleetview's, but fleetview starts it, so: set `OPENCODE_SERVER_PASSWORD`
-  before launching to require HTTP basic auth on every request. fleetview uses
-  it for all requests and the event stream, the spawned server inherits it, and
-  fleetview **warns** if a password is set but an already-running server on the
-  port doesn't actually enforce it. The server host in `server.json` is
-  validated as loopback so a planted/legacy config can't rebind it to the
-  network. See the README's "The server is unauthenticated by default" section.
+  port 4900 or the next free port up to 4910). That server exposes a route that
+  runs arbitrary shell commands, so an unauthenticated one would let anything
+  able to reach `127.0.0.1` as your user (including a web page in your browser,
+  via DNS rebinding) execute code. fleetview therefore password-protects every
+  server it spawns: it generates a random password, passes it to the child as
+  `OPENCODE_SERVER_PASSWORD` (HTTP basic auth), and stores it in
+  `~/.config/fleetview/server.json` (mode 0600) so the next run can reach the
+  same still-running server. A password you set in `OPENCODE_SERVER_PASSWORD`
+  yourself is used instead and never written to disk. fleetview **says so** when
+  it adopts an already-running server on the port that does not enforce a
+  password, since that server is not one it spawned. The server host in
+  `server.json` is validated as loopback so a planted or legacy config can't
+  rebind it to the network. Details:
+  [the server fleetview spawns is password-protected](docs/reference.md#the-server-fleetview-spawns-is-password-protected).
 - **Process-backed backends spawn local CLIs** (`claude`, `copilot`) as headless
   runs, as your user. All spawns use argv arrays (no shell, no string
   concatenation), and `--resume`/`-C` carry ids and directories as discrete
@@ -47,5 +50,6 @@ What it does touch:
 
 ## Supported versions
 
-fleetview tracks `main`; fixes land there. There is no separate release train
-(version is a placeholder until the first npm publish).
+fleetview tracks `main`; fixes land there and ship in the next npm release.
+There is no separate release train, so only the latest published version gets
+fixes.

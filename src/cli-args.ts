@@ -8,14 +8,15 @@ import { resolve } from 'node:path'
 // Pure: parsing is separated from doing so the grammar can be tested without a server, a terminal,
 // or a process to kill.
 
-export const USAGE = `fleetview — a roster for opencode sessions
+export const USAGE = `fleetview: one roster for opencode, claude and copilot sessions
 
   fleetview                      open the roster
     --model <provider/model>     default model for every session dispatched this run
     --agent <name>               default subagent for an unprefixed dispatch
     --backend <name>             agent CLI to dispatch on: opencode, claude, copilot
                                  (default opencode, or $FLEETVIEW_BACKEND)
-  fleetview --cwd <path>         open it scoped to sessions under <path>
+  fleetview --cwd <path>         open it as if started in <path>: a bare dispatch
+                                 prefers it and @repo offers the repos inside it
 
   The shell commands below (ls/--json/attach/logs/add/answer/watch/status/
   stop/rm/bg) act on opencode sessions only; the roster TUI shows sessions
@@ -23,6 +24,7 @@ export const USAGE = `fleetview — a roster for opencode sessions
 
   fleetview --json [--all]       print sessions as JSON instead of opening the roster
   fleetview ls [--all]           the same list, one line per session
+                                 (with --cwd: only sessions under that path)
   fleetview attach <id>          attach to a session in this terminal
   fleetview logs <id> [--all]    print a session's recent output (--all for everything)
   fleetview add <id>             add an existing session to the roster
@@ -30,7 +32,7 @@ export const USAGE = `fleetview — a roster for opencode sessions
   fleetview watch <id>           stream a session's output until it finishes
   fleetview status               one line of counts; exits 0 when something awaits input
   fleetview stop <id>            stop a session, leaving it in the list
-  fleetview rm <id>              delete a session (keeps a worktree holding commits)
+  fleetview rm <id>              delete a session (keeps a worktree with uncommitted or unpushed work)
   fleetview bg "<prompt>"        dispatch a background session without opening the roster
     --cwd <path>                 dispatch in <path> instead of the current directory
     --name <title>               name the session instead of waiting for opencode's title
@@ -40,7 +42,11 @@ export const USAGE = `fleetview — a roster for opencode sessions
   fleetview server status        the opencode server fleetview talks to: host, port, pid, health
   fleetview server stop          stop that server (all sessions stop streaming until restart)
   fleetview --version            print the version (-v)
-  fleetview --help               this text`
+  fleetview --help               this text
+
+  Environment: FLEETVIEW_BACKEND, FLEETVIEW_DEFAULT_PROJECT, FLEETVIEW_NO_ISOLATE,
+  OPENCODE_SERVER_PASSWORD and more, all listed in the reference:
+  https://github.com/costajohnt/fleetview/blob/main/docs/reference.md`
 
 const SUBCOMMANDS = new Set(['attach', 'logs', 'stop', 'rm', 'ls', 'server', 'bg', 'add', 'answer', 'watch', 'status'])
 

@@ -8,6 +8,7 @@ import { EMPTY, atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, w
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend, OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
+import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { hasSession, type Roster as RosterType, type RosterSession as RosterMember } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
@@ -1570,6 +1571,15 @@ export function App({
   if (attached) return null
 
   if (!serverReady) {
+    // A missing opencode CLI is not something a restart fixes, so it is the headline on its own.
+    if (serverFailReason === OPENCODE_MISSING) {
+      return React.createElement(
+        Box,
+        { flexDirection: 'column' },
+        React.createElement(Text, null, OPENCODE_MISSING),
+        React.createElement(Text, { dimColor: true }, '(esc to quit)'),
+      )
+    }
     return React.createElement(
       Box,
       { flexDirection: 'column' },

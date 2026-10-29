@@ -6,7 +6,7 @@ screen-by-screen tour see the [guide](guide.md).
 ## From the shell
 
     fleetview                    open the roster
-    fleetview --cwd <path>       open it scoped to sessions under <path>
+    fleetview --cwd <path>       open it as if started in <path> (see below)
     fleetview ls [--all]         one line per session; --all includes finished ones
     fleetview --json [--all]     the same list as JSON
     fleetview attach <id>        attach in this terminal
@@ -16,7 +16,7 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview watch <id>         stream its output until it goes idle
     fleetview status             one counts line; exits 0 when something awaits input
     fleetview stop <id>          stop it, leave it in the list
-    fleetview rm <id>            delete it (keeps a worktree holding commits)
+    fleetview rm <id>            delete it (keeps a worktree with uncommitted or unpushed work)
     fleetview bg "<prompt>"      dispatch a background session from the shell
                                  (--name, --agent, --model provider/model, --exec for a ! job)
     fleetview server status      the opencode server: host, port, pid, health
@@ -26,9 +26,11 @@ These shell commands (`ls`, `--json`, `attach`, `logs`, `add`, `answer`, `watch`
 sessions only — they talk to the opencode server directly. The roster TUI is the only view that
 shows sessions from every backend (opencode, claude, copilot).
 
-Session ids can be abbreviated to any unique prefix. `--cwd` also fixes where a bare dispatch
-lands; a relative path (`--cwd .`) is resolved against the current directory before it is matched
-against opencode's project paths, so `--cwd .` means this repository.
+Session ids can be abbreviated to any unique prefix. In the roster, `--cwd` does not filter rows:
+it stands in for the directory fleetview was started in, so a bare dispatch prefers that repository
+and `@repo` also offers the repositories directly inside it. With `ls` and `--json` it lists only
+sessions under the path. A relative path (`--cwd .`) is resolved against the current directory
+before it is matched against opencode's project paths, so `--cwd .` means this repository.
 
 `answer` is the peek panel's answering from the shell, so a `FLEETVIEW_NOTIFY_CMD` notification or a
 tmux binding can act on a waiting session without opening the roster: `y`, `a` and `d` answer the
@@ -113,9 +115,6 @@ status, one stream per project. Attaching runs `opencode attach <url> -s <id> --
 - `~/.local/state/fleetview/logs/server.log` — the server's stdout/stderr
 - `~/.local/share/opencode/worktree/<repo>/<name>/` — one worktree per dispatched session
 
-`audits/` holds the review record — a parity audit against agent view plus independent security
-passes.
-
 ## Install notes
 
 fleetview is written in TypeScript that Node runs directly by stripping types at load — in a
@@ -131,7 +130,8 @@ else. (A postinstall step restores `spawn-helper`'s executable bit, which the np
 without it attaching fails with `posix_spawnp failed`.)
 
 The wire shapes are verified against opencode 1.18.4, so a much newer server may drift. The
-pre-rename `ROOST_*` variables and `roost` directories are still read for one more release.
+pre-rename `ROOST_*` variables and `roost` directories are still read for now; they will be removed
+in a future release.
 
 ## Developing
 

@@ -6,6 +6,10 @@ import type { ServerRef } from '../../types.ts'
 import { openPrivateAppend } from '../../registry.ts'
 import { authHeader } from './client.ts'
 
+// ensureServer's failure reason when `opencode` is not on PATH. Exported so the roster can tell this
+// case (install something, then run again) from a server that merely failed to come up.
+export const OPENCODE_MISSING = 'fleetview needs the opencode CLI. Install it from https://opencode.ai and run fleetview again.'
+
 const logDir = () => (process.env.FLEETVIEW_LOG_DIR ?? process.env.ROOST_LOG_DIR) ?? join(homedir(), '.local', 'state', 'fleetview', 'logs')
 
 export function spawnServer(

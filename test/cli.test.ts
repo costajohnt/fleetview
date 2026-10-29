@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
+import { OPENCODE_MISSING } from '../src/backends/opencode/server-manager.ts'
 
 // #57: the exit/signal path (restoreScreen, registered on `exit` and reached from SIGTERM/HUP/INT)
 // used to put back only the screen, leaving bracketed paste, focus reporting, DECCKM, modifyOtherKeys
@@ -70,6 +71,7 @@ test('dead server → spawn, save pid, poll until healthy → {ok:true, the ref 
     saveServer: (file: any, s: any) => saved.push([file, s]),
     serverFile: '/tmp/s.json',
     pollMs: 1,
+    spawnSyncImpl: () => ({}), // opencode --version succeeds
     env: { OPENCODE_SERVER_PASSWORD: 'set-by-user' },
   }
   // H2: the ref that comes back is the one that was spawned, pid and all — App re-invokes
@@ -95,6 +97,7 @@ test('spawning a server with no password set mints one, hands it to the child en
     saveServer: (file: any, s: any) => saved.push([file, s]),
     serverFile: '/tmp/s.json',
     pollMs: 1,
+    spawnSyncImpl: () => ({}), // opencode --version succeeds
     env,
   }
   await makeEnsureServer(deps as any)(server)
@@ -121,6 +124,7 @@ test('a recovery re-entry with the returned ref keeps the minted password on dis
     saveServer: (_file: any, s: any) => saved.push(s),
     serverFile: '/tmp/s.json',
     pollMs: 1,
+    spawnSyncImpl: () => ({}), // opencode --version succeeds
     env,
   }
   const ensureServer = makeEnsureServer(deps as any)
@@ -148,6 +152,7 @@ test('a spawn onto a server that does not enforce the minted password is persist
     saveServer: (_file: any, s: any) => saved.push(s),
     serverFile: '/tmp/s.json',
     pollMs: 1,
+    spawnSyncImpl: () => ({}), // opencode --version succeeds
     warn,
     env,
   }
@@ -188,6 +193,7 @@ test('a genuinely dead server with a stale saved password still respawns, under 
     saveServer: (_file: any, s: any) => saved.push(s),
     serverFile: '/tmp/s.json',
     pollMs: 1,
+    spawnSyncImpl: () => ({}), // opencode --version succeeds
     env,
   }
   const result = await makeEnsureServer(deps as any)({ ...server, password: 'generated-earlier' })
@@ -443,20 +449,25 @@ test('reap: processKill throwing (already-dead pid) does not crash ensureServer'
   await expect(makeEnsureServer(deps as any)(server)).resolves.toEqual({ ok: false, server, reason: 'server did not become healthy' })
 })
 
-test('ENOENT (opencode not installed) short-circuits the fallback walk (Minor 3)', async () => {
+// M6: the ENOENT probe runs before the first spawn, so a missing opencode fails at once instead of
+// after a whole poll window (20 x pollMs) spent on a child that could never start.
+test('ENOENT (opencode not installed) fails before any spawn or poll, with its own reason', async () => {
   let spawnCalls = 0
+  let healthChecks = 0
   const deps = {
-    isServerHealthy: () => Promise.resolve(false),
+    isServerHealthy: () => { healthChecks += 1; return Promise.resolve(false) },
     spawnServer: () => { spawnCalls += 1; return 777 },
-    saveServer: () => {},
+    saveServer: () => { throw new Error('should not save a record for a server that cannot exist') },
     serverFile: '/tmp/s.json',
     pollMs: 1,
-    spawnSyncImpl: () => ({ error: { code: 'ENOENT' } }),
+    spawnSyncImpl: vi.fn(() => ({ error: { code: 'ENOENT' } })),
   }
   const result = await makeEnsureServer(deps as any)(server)
-  expect(result.ok).toBe(false)
-  expect(result.reason).toMatch(/not installed/)
-  expect(spawnCalls).toBe(1) // only the initial spawn — no fallback candidates spawned
+  expect(result).toEqual({ ok: false, server, reason: OPENCODE_MISSING })
+  expect(OPENCODE_MISSING).toBe('fleetview needs the opencode CLI. Install it from https://opencode.ai and run fleetview again.')
+  expect(spawnCalls).toBe(0)
+  expect(healthChecks).toBe(1) // the initial probe of the configured port only, no poll window
+  expect(deps.spawnSyncImpl).toHaveBeenCalledWith('opencode', ['--version'])
 })
 
 // --- `server stop`: the pid in server.json is a claim, not a fact ---
@@ -602,9 +613,9 @@ test('the roster member caps the prompt at 2000 characters', async () => {
 
 test('an unreachable server reports the reason, exits 1, and creates nothing', async () => {
   const h = bgHarness()
-  h.deps.ensureServer = (() => Promise.resolve({ ok: false, server: {}, reason: 'opencode not installed — see https://opencode.ai' })) as any
+  h.deps.ensureServer = (() => Promise.resolve({ ok: false, server: {}, reason: OPENCODE_MISSING })) as any
   await runBg({ command: 'bg', prompt: 'ship it', cwd: '/x' }, h.deps)
-  expect(h.errs).toEqual(['opencode not installed — see https://opencode.ai'])
+  expect(h.errs).toEqual([OPENCODE_MISSING])
   expect(h.codes).toEqual([1])
   expect(h.calls).toEqual([])
   expect(h.saved).toEqual([])
@@ -1282,7 +1293,7 @@ test('runs through a symlink to the binary (npm link scenario)', () => {
   const out = execFileSync('node', [link, '--help'], {
     env: { ...process.env, ROOST_CONFIG_DIR: configDir },
   })
-  expect(out.toString()).toContain('fleetview — a roster for opencode sessions')
+  expect(out.toString()).toContain('fleetview: one roster for opencode, claude and copilot sessions')
 })
 
 // --- ^g: the $EDITOR handover (drives a real editor subprocess) ---
@@ -1724,9 +1735,9 @@ test('status exits 0 when a session awaits input and 1 when none does', async ()
 
 test('status says why rather than printing counts when the server is unreachable', async () => {
   const h = statusHarness()
-  h.deps.ensureServer = (() => Promise.resolve({ ok: false, server: {}, reason: 'opencode not installed' })) as any
+  h.deps.ensureServer = (() => Promise.resolve({ ok: false, server: {}, reason: OPENCODE_MISSING })) as any
   await runStatus({ command: 'status' }, h.deps as any)
-  expect(h.errs).toEqual(['opencode not installed'])
+  expect(h.errs).toEqual([OPENCODE_MISSING])
   expect(h.codes).toEqual([1])
   expect(h.out).toEqual([])
 })

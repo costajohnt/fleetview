@@ -213,7 +213,7 @@ test('no password means no authorization header, so an existing open server stil
   }
 })
 
-// Shapes verified live against opencode 1.18.4 — see docs/audits/2026-07-23 addendum.
+// Shapes verified live against opencode 1.18.4 — see docs/archive/audits/2026-07-23 addendum.
 test('createWorktree posts the name, scoped to the repository it belongs to', async () => {
   const fetchImpl = vi.fn(() =>
     ok({ name: 'fix-tests', branch: 'opencode/fix-tests', directory: '/wt/fix-tests' }),
