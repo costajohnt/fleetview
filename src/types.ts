@@ -10,6 +10,11 @@
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
 
+// "The host answered with something it will settle later." App's `onAction` returns `unknown`
+// because what comes back depends on the action: an attach host and an editor host both hand over a
+// promise, and a caller that has neither (a test stub, an older embedder) hands back nothing.
+export const isThenable = (value: unknown): value is PromiseLike<unknown> => isRecord(value) && typeof value.then === 'function'
+
 // The two field-level companions to `isRecord`: "this key is there and it is the right kind, or it
 // is not there at all". Shared rather than re-declared per module, because every reader of a dynamic
 // payload in this codebase asks exactly these two questions.

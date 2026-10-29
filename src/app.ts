@@ -9,7 +9,7 @@ import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND, NO_AGENT_CLI, resolveBackend } from './backends/index.ts'
 import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
-import { hasSession, type Roster as RosterType, type RosterSession as RosterMember } from './roster-store.ts'
+import { hasSession, withMember, withoutMember, type Roster as RosterType, type RosterSession as RosterMember } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
 import { DispatchInput, inputRows, INPUT_BOX_ROWS } from './ui/dispatch-input.ts'
@@ -20,12 +20,13 @@ import { Peek } from './ui/peek.ts'
 import { usePeek } from './use-peek.ts'
 import { useDiscovery } from './use-discovery.ts'
 import { useDispatch } from './use-dispatch.ts'
+import { useRosterKeys, RESUME_QUIET_MS } from './use-roster-keys.ts'
 import { pickTarget, repoChoices, defaultProjectFromEnv } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
 import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety, mergeBackCommand, isLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import { fetchPullRequests, branchOf, hasOpenPr } from './pull-requests.ts'
 import { theme } from './ui/theme.ts'
-import { asNumber, asString, isRecord } from './types.ts'
+import { asNumber, asString, isRecord, isThenable } from './types.ts'
 import type { AppAction, AttachSibling, AttachTarget, Backend, BackendCapabilities, ModelPair, MouseEvent as SgrMouseEvent, Project, PullRequest, SeedChain, ServerRef, StreamProject } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
@@ -132,14 +133,6 @@ export function foldCompleted<G extends FoldGroup>(
   )
 }
 
-// Pure roster-mutation helpers mirroring roster-store.ts's addSession/removeSession semantics —
-// duplicated rather than imported because those do file IO directly; App only persists via the
-// `persistRoster` callback and needs the updated object back to update local render state too.
-const withMember = (roster: RosterState, worktree: string, id: string, extra: Record<string, unknown> = {}): RosterState =>
-  hasSession(roster, worktree, id)
-    ? roster
-    : { ...roster, sessions: [...roster.sessions, { worktree, id, addedAt: Date.now(), ...extra }] }
-
 // "Cleanup ~5 minutes after completion" — agent view's shell jobs clean up after themselves, and
 // a finished `! cmd` row that sits forever is clutter the user has to ^x by hand.
 export const SHELL_JOB_TTL_MS = 5 * 60_000
@@ -164,11 +157,6 @@ export function expiredShellJobs(
     return settledAt > 0 && now - settledAt > SHELL_JOB_TTL_MS
   })
 }
-
-const withoutMember = (roster: RosterState, worktree: string, id: string): RosterState => ({
-  ...roster,
-  sessions: roster.sessions.filter((s) => !(s.worktree === worktree && s.id === id)),
-})
 
 // The host wiring, plus the impls the test corpus injects in place of the real thing. `onAction`
 // returns `unknown` because what a host hands back depends on the action (a promise for `enter` and
@@ -202,15 +190,6 @@ type AppProps = {
   worktreeSafetyImpl?: (dir: string, parentDir: string | null | undefined) => { removable: boolean; reason?: string | null }
   dirExistsImpl?: (dir: string) => boolean
 }
-// "The host answered with something it will settle later." `onAction` returns `unknown` because what
-// comes back depends on the action, and this is the one question App asks of it: an attach host and
-// an editor host both hand over a promise, and a caller that has neither (a test stub, an older
-// embedder) hands back nothing — which is exactly the branch that falls through to unmounting.
-const isThenable = (value: unknown): value is PromiseLike<unknown> => isRecord(value) && typeof value.then === 'function'
-
-// How long after a resume a bare Escape is treated as handoff residue rather than a quit.
-const RESUME_QUIET_MS = 50 // matches the pty host's stdin drain window
-
 export function App({
   server,
   client,
@@ -336,7 +315,6 @@ export function App({
   // placeholder." A wall of pasted text otherwise fills the prompt and pushes the roster off
   // screen; the placeholder keeps the input readable and the real text is restored on dispatch.
   const pastes = useRef<string[]>([])
-  const ctrlCArmed = useRef<number | null>(null) // timestamp of a first Ctrl+C on an empty input
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // The hold stateGroups applies while a ^x is armed is time-bound, and nothing else necessarily
   // repaints when it lapses — this repaints once, so the row settles into its real section instead
@@ -1373,228 +1351,47 @@ export function App({
     return attach(line.session)
   }
 
-  useInput(
-    (ch, key) => {
-      // #60: Ink (7 and 8: build/components/App.js handleReadable) splits one stdin read into
-      // several key events and dispatches them all in one synchronous pass, but `isActive: false`
-      // only takes effect at the next render — so a `→` and a `^X` arriving in the SAME chunk both
-      // reach the roster and the ^X stops the row being attached to. The ref is synchronous,
-      // mirroring the same guard in `attach` above.
-      if (attachedRef.current) return
-      if (mode !== 'roster') return
-      // The "moved to the background" state lasts exactly until the next interaction — any key or
-      // click dismisses it whole. The Esc branch below still sees this press's value through the
-      // render closure, which is what makes Esc-right-after-detach the undo and every later Esc a
-      // normal quit.
-      //
-      // #59: except inside the post-resume quiet window. Dismissing costs nothing when the user
-      // typed it, but a stray byte left over from the child's terminal destroys the Esc-undo with
-      // no way back — unlike clearing the input, this one is not recoverable.
-      if (backgrounded && Date.now() - resumedAt.current >= resumeQuietMs) setBackgrounded(null)
-      const mouse = parseMouseEvents(ch)
-      if (mouse.length) {
-        for (const ev of mouse) handleMouse(ev)
-        return
-      }
-      const empty = input.length === 0
-
-      // #134: with text in the prompt the arrows move its caret — ⌥/ctrl+arrow and ESC b/f by
-      // word, plain arrows by character. Before the ctrl branch because ctrl+arrow arrives with
-      // `key.ctrl`; before the roster arrows because → on a non-empty prompt is a caret move, not
-      // attach. An empty prompt keeps every arrow for the roster.
-      if (!empty) {
-        const motion = motionOf(ch, key)
-        if (motion) return setEdit((s) => move(s, motion))
-      }
-
-      if (key.ctrl) {
-        if (ch === 'c') {
-          // "Clear the input; press twice to exit." Quitting on the first press meant a user
-          // reaching for Ctrl+C to dismiss something lost the whole view instead.
-          if (!empty) return setInput('')
-          if (ctrlCArmed.current && Date.now() - ctrlCArmed.current < 2000) {
-            onAction({ type: 'quit' })
-            return exit()
-          }
-          ctrlCArmed.current = Date.now()
-          return flash('press ^c again to exit')
-        }
-        if (ch === 's') return updateRoster((prev) => ({ ...prev, groupBy: prev.groupBy === 'state' ? 'project' : 'state' }))
-        // "Ctrl+T pins: the session moves to a pinned group at the top and its name renders bold."
-        if (ch === 't' && current) {
-          return updateRoster((prev) => ({
-            ...prev,
-            sessions: prev.sessions.map((m) =>
-              m.worktree === current.projectKey && m.id === current.id ? { ...m, pinned: !m.pinned } : m,
-            ),
-          }))
-        }
-        if (ch === 'b') {
-          setView((v) => (v === 'main' ? 'browse' : 'main'))
-          return setSelectedKey(null)
-        }
-        if (ch === 'a' && current) {
-          return updateRoster((prev) =>
-            hasSession(prev, current.projectKey, current.id)
-              ? withoutMember(prev, current.projectKey, current.id)
-              : withMember(prev, current.projectKey, current.id),
-          )
-        }
-        if (ch === 'r' && current) {
-          // ^r opens nothing on a backend that cannot rename: the dialog would take a title, send it
-          // nowhere, and leave the row unchanged. The status line says which backend and why.
-          if (!capabilitiesOf(current).rename) return flash(`${backendNameOf(current)} can't rename a session`, 4000)
-          setTarget(current)
-          return setMode('rename')
-        }
-        if (ch === 'x' && selectedHeader) return void deleteGroup(selectedHeader)
-        if (ch === 'x' && current) return void stopOrDelete(current)
-        // "Ctrl+J inserts a newline in the dispatch input." Terminals that report it as a plain
-        // Return are indistinguishable here, which is why agent view documents it as needing
-        // extended key reporting too.
-        if (ch === 'j') return setEdit((s) => insertAt(s, '\n'))
-        // "Ctrl+G opens the dispatch prompt in $VISUAL or $EDITOR." The host owns the terminal
-        // handover, exactly as it does for attach, so this only asks and applies the result.
-        if (ch === 'g') {
-          const done = onAction({ type: 'edit', text: input })
-          if (isThenable(done)) {
-            attachedRef.current = true
-            setAttached(true)
-            done.then(
-              (edited) => {
-                resumedAt.current = Date.now()
-                attachedRef.current = false
-                setAttached(false)
-                if (typeof edited === 'string') setInput(edited)
-              },
-              () => {
-                resumedAt.current = Date.now()
-                attachedRef.current = false
-                setAttached(false)
-                flash('could not open an editor')
-              },
-            )
-          } else flash('no $EDITOR configured')
-          return
-        }
-        return
-      }
-
-      // Nothing to move between on an empty list; without this the selection key becomes a
-      // placeholder built from undefined.
-      if (key.shift && (key.upArrow || key.downArrow) && current) {
-        // Shift+↑/↓ moves the selected row within its group and materialises the whole group's
-        // order as ranks on the memberships — from then on that group's order is manual and
-        // persisted; sessions dispatched later arrive unranked below the ranked ones.
-        // unfoldedGroups, not groups, for the same reason deleteGroup uses it: the rendered groups are
-        // folded and sliced to the screen, so ranking off them writes ranks for the visible subset
-        // only and silently promotes it above the rows that were folded away.
-        const group = unfoldedGroups.find((g) =>
-          g.sessions.some((s) => s.id === current.id && s.projectKey === current.projectKey),
-        )
-        if (!group) return
-        const idx = group.sessions.findIndex((s) => s.id === current.id && s.projectKey === current.projectKey)
-        const target = key.upArrow ? idx - 1 : idx + 1
-        if (target < 0 || target >= group.sessions.length) return
-        const order = [...group.sessions]
-        ;[order[idx], order[target]] = [order[target], order[idx]]
-        return updateRoster((prev) => ({
-          ...prev,
-          sessions: prev.sessions.map((m) => {
-            const at = order.findIndex((s) => s.projectKey === m.worktree && s.id === m.id)
-            return at >= 0 ? { ...m, rank: at } : m
-          }),
-        }))
-      }
-      // Arrows live in the roster; the input needs no cursor stop — typing anything, any time,
-      // populates it (John's polish pass, reverting the input-as-arrow-stop experiment).
-      if (key.upArrow) return navRows.length ? setSelectedKey(navRows[Math.max(0, navSel - 1)].key) : undefined
-      if (key.downArrow)
-        return navRows.length ? setSelectedKey(navRows[Math.min(navRows.length - 1, navSel + 1)].key) : undefined
-      if (key.return) {
-        // On a group header Enter collapses instead of dispatching — but only with an empty input,
-        // because text in the prompt means the user is dispatching and the highlighted row is
-        // incidental.
-        if (selectedHeader && empty) return toggleCollapsed(selectedHeader)
-        // Shift+Enter is only distinguishable in terminals with extended key reporting; Alt+Enter
-        // (reported as meta) is the fallback the majority of terminals do send.
-        return submit({ thenAttach: Boolean(key.shift || key.meta) })
-      }
-      // "Tab: On an empty input, browse all subagents. Otherwise apply the highlighted suggestion"
-      if (key.tab && empty) return setInput('@')
-      if (key.tab) {
-        if (!suggestions) return // nothing to apply — never fall through and type a literal tab
-        const first = suggestions.matches[0]
-        return setInput((t) => t.slice(0, t.length - suggestions.partial.length) + first.name + ' ')
-      }
-      if (key.rightArrow && empty && current) return attach(current)
-      if (key.escape) {
-        // #47: the whole branch is gated, not just the quit. `^G` hands the terminal to $EDITOR
-        // via a blocking spawnSync, so Ink never suspends and never drains — the editor's leftover
-        // terminal-query bytes arrive as roster keystrokes, and a bare ESC among them hit
-        // `setInput('')` below and wiped the prompt that was just edited, after editPrompt's
-        // `finally` had already removed the temp file. Ignoring a genuinely-typed Escape within
-        // 50ms of a resume costs nothing against a human reaction window.
-        if (Date.now() - resumedAt.current < resumeQuietMs) return
-        if (!empty) return setInput('')
-        if (view === 'browse') {
-          setView('main')
-          return setSelectedKey(null)
-        }
-        // Esc while the "moved to the background" notice is still up undoes the switch and
-        // re-opens that conversation (agent view: "Press Esc to undo the switch and return to the
-        // conversation"). Attach through the LIVE row, not the remembered ref — if the session was
-        // stopped or deleted in between, fall through and let Esc quit as usual. Esc keeps
-        // clearing input / closing browse first; only the would-exit press in the undo window is
-        // repurposed.
-        if (backgrounded?.notice) {
-          // The full member set, not the drawn rows: the session the user just left may sit in a
-          // collapsed group or behind the `… N more` fold, and an Esc that promised an undo must
-          // not quit the app because of how the list happened to be folded. Only a session that
-          // is genuinely gone (stopped and removed) falls through to the normal quit.
-          const live = allMembers.find((s) => s.id === backgrounded.id && s.projectKey === backgrounded.projectKey)
-          if (live) return attach(live)
-        }
-        // Quitting is the one irreversible thing Esc does — the quiet-window guard that protects
-        // it now sits at the top of this branch (#47), because clearing a just-edited prompt is
-        // destructive too and the temp file backing it is already gone.
-        onAction({ type: 'quit' })
-        return exit()
-      }
-      if (key.backspace) return setEdit(backspaceAt)
-      if (key.delete) return setEdit(deleteForwardAt)
-      // #35: a group header has no `current`, so this used to fall through to the text handler and
-      // silently type a leading space into the dispatch input — nothing on screen distinguishes
-      // that from a peek that failed to open, so the next keystrokes joined a prompt the user
-      // never meant to start and Enter dispatched it. On a header, space means what Enter means
-      // there: collapse. Only with an empty input — text in the prompt means the user is typing,
-      // and a space inside a sentence is a space.
-      if (empty && ch === ' ' && selectedHeader) return toggleCollapsed(selectedHeader)
-      // #34: peek reads a conversation that isn't there any more.
-      if (empty && ch === ' ' && current?.ghost) return flash(`"${current.title}" is gone — ^x removes it from the roster`, 4000)
-      if (empty && ch === ' ' && current) return openPeek(current)
-      if (empty && ch === '?') return setMode('help')
-      // A paste arrives as one chunk, so `ch` can carry newlines and other control bytes. Newlines
-      // are kept now that `^j` makes the prompt multi-line; everything else non-printing is
-      // dropped rather than embedded in a prompt that gets sent to a model.
-      if (ch && !key.meta) {
-        // The residue strip runs after the control strip, not before: what makes a focus report or
-        // a paste marker read as typed text is exactly that its ESC has just been removed here.
-        const text = stripEscapeResidue(ch.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, ''))
-        if (!text) return
-        // "Pasted text over 800 characters or more than two lines collapses to a placeholder."
-        if (text.length > 800 || text.split('\n').length > 2) {
-          const existing = pastes.current.indexOf(text)
-          // "Expands again if the same text is pasted a second time" — the same text is the same
-          // attachment, so it keeps its number instead of accumulating duplicates.
-          const index = existing >= 0 ? existing : pastes.current.push(text) - 1
-          return setEdit((s) => insertAt(s, `[Pasted text #${index + 1}]`))
-        }
-        setEdit((s) => insertAt(s, text))
-      }
-    },
-    { isActive: mode === 'roster' && serverReady && !attached },
-  )
+  // The roster's keyboard lives in use-roster-keys.ts: a pure `rosterKey` decision plus the hook
+  // that performs it. Everything it reads or drives is handed over here.
+  useRosterKeys({
+    active: mode === 'roster' && serverReady && !attached,
+    resumeQuietMs,
+    mode,
+    attachedRef,
+    setAttached,
+    resumedAt,
+    backgrounded,
+    setBackgrounded,
+    handleMouse,
+    input,
+    setInput,
+    setEdit,
+    pastes,
+    current,
+    selectedHeader,
+    navRows,
+    navSel,
+    unfoldedGroups,
+    suggestions,
+    view,
+    setView,
+    allMembers,
+    setSelectedKey,
+    updateRoster,
+    capabilitiesOf,
+    backendNameOf,
+    setTarget,
+    setMode,
+    deleteGroup,
+    stopOrDelete,
+    toggleCollapsed,
+    submit,
+    attach,
+    openPeek,
+    onAction,
+    exit,
+    flash,
+  })
 
   // Clicks and the wheel. Ink 8 drops SGR mouse reports before any useInput sees them (ink
   // build/components/App.js handleReadable: a complete CSI sequence that parses to no key name is
