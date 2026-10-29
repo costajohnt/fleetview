@@ -1293,7 +1293,7 @@ test('runs through a symlink to the binary (npm link scenario)', () => {
   const out = execFileSync('node', [link, '--help'], {
     env: { ...process.env, ROOST_CONFIG_DIR: configDir },
   })
-  expect(out.toString()).toContain('fleetview — a roster for opencode sessions')
+  expect(out.toString()).toContain('fleetview: one roster for opencode, claude and copilot sessions')
 })
 
 // --- ^g: the $EDITOR handover (drives a real editor subprocess) ---

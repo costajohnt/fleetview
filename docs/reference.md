@@ -6,7 +6,7 @@ screen-by-screen tour see the [guide](guide.md).
 ## From the shell
 
     fleetview                    open the roster
-    fleetview --cwd <path>       open it scoped to sessions under <path>
+    fleetview --cwd <path>       open it as if started in <path> (see below)
     fleetview ls [--all]         one line per session; --all includes finished ones
     fleetview --json [--all]     the same list as JSON
     fleetview attach <id>        attach in this terminal
@@ -26,9 +26,11 @@ These shell commands (`ls`, `--json`, `attach`, `logs`, `add`, `answer`, `watch`
 sessions only — they talk to the opencode server directly. The roster TUI is the only view that
 shows sessions from every backend (opencode, claude, copilot).
 
-Session ids can be abbreviated to any unique prefix. `--cwd` also fixes where a bare dispatch
-lands; a relative path (`--cwd .`) is resolved against the current directory before it is matched
-against opencode's project paths, so `--cwd .` means this repository.
+Session ids can be abbreviated to any unique prefix. In the roster, `--cwd` does not filter rows:
+it stands in for the directory fleetview was started in, so a bare dispatch prefers that repository
+and `@repo` also offers the repositories directly inside it. With `ls` and `--json` it lists only
+sessions under the path. A relative path (`--cwd .`) is resolved against the current directory
+before it is matched against opencode's project paths, so `--cwd .` means this repository.
 
 `answer` is the peek panel's answering from the shell, so a `FLEETVIEW_NOTIFY_CMD` notification or a
 tmux binding can act on a waiting session without opening the roster: `y`, `a` and `d` answer the
@@ -131,7 +133,8 @@ else. (A postinstall step restores `spawn-helper`'s executable bit, which the np
 without it attaching fails with `posix_spawnp failed`.)
 
 The wire shapes are verified against opencode 1.18.4, so a much newer server may drift. The
-pre-rename `ROOST_*` variables and `roost` directories are still read for one more release.
+pre-rename `ROOST_*` variables and `roost` directories are still read for now; they will be removed
+in a future release.
 
 ## Developing
 
