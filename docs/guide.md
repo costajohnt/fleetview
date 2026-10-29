@@ -110,9 +110,10 @@ for it: `--backend`, `FLEETVIEW_BACKEND`, or a row from a previous run. Without 
 opencode and the roster is exactly what it always was. When a second backend does have sessions,
 every row grows a dim backend name after its title.
 
-Only the roster TUI spans every backend. The shell commands (all listed in `fleetview --help` and
-the [reference](reference.md#from-the-shell)) talk to the opencode server directly and so act on
-opencode sessions only.
+From the shell, `ls`, `--json`, `status`, `attach`, `logs`, `stop` and `rm` cover every backend,
+and each `--json` row says which one it belongs to. `add`, `answer`, `watch` and `bg` act on
+opencode sessions only. The [reference](reference.md#from-the-shell) has the details, including
+what `rm` and `logs` can't do for Claude Code and Copilot sessions.
 
 ![A roster with opencode, claude, and copilot sessions, each row carrying its dim backend name](images/backends.png)
 

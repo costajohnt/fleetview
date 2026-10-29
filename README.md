@@ -61,8 +61,9 @@ what they can't do, the roster says so instead of pretending. ([full table](docs
 
 **Scriptable.** `fleetview bg "<prompt>"` dispatches from any terminal, `fleetview --json`
 reports states in the same words as `claude agents --json`, so scripts written against agent
-view read fleetview too. The shell commands (`fleetview --help` lists them all) talk to the opencode
-server and so act on opencode sessions only; the roster TUI is the view that spans every backend.
+view read fleetview too. `ls`, `--json`, `status`, `attach`, `logs`, `stop` and `rm` cover every
+backend, and keep working for Claude Code and Copilot sessions when opencode is missing; the rest of
+the shell commands (`fleetview --help` lists them all) act on opencode sessions only.
 ([CLI reference](docs/reference.md#from-the-shell))
 
 **Locked down by default.** The opencode server fleetview spawns exposes shell execution, so

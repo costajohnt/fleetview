@@ -82,7 +82,10 @@ export function createBackends({
 } = {}): Partial<Record<BackendName, Backend>> {
   return {
     ...(server && client ? { opencode: createOpencodeBackend({ server, client, ...(fetchImpl ? { fetchImpl } : {}) }) } : {}),
-    claude: createClaudeBackend(),
-    copilot: createCopilotBackend(),
+    ...createProcessBackends(),
   }
 }
+
+// The backends that need no server, on their own: what the shell commands (commands.ts) use when
+// opencode is missing or down, and alongside opencode when it is not.
+export const createProcessBackends = () => ({ claude: createClaudeBackend(), copilot: createCopilotBackend() })

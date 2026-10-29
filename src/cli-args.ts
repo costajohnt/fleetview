@@ -18,9 +18,9 @@ export const USAGE = `fleetview: one roster for opencode, claude and copilot ses
   fleetview --cwd <path>         open it as if started in <path>: a bare dispatch
                                  prefers it and @repo offers the repos inside it
 
-  The shell commands below (ls/--json/attach/logs/add/answer/watch/status/
-  stop/rm/bg) act on opencode sessions only; the roster TUI shows sessions
-  from every backend.
+  ls/--json/status/attach/logs/stop/rm act on every backend's sessions, and
+  still work for claude and copilot when opencode is missing. add/answer/
+  watch/bg act on opencode sessions only.
 
   fleetview --json [--all]       print sessions as JSON instead of opening the roster
   fleetview ls [--all]           the same list, one line per session
@@ -255,6 +255,10 @@ export function sessionJson(session: ShellSession, { repo, worktree }: { repo?: 
     // interactive-session concept the way agent view has one — so this is a constant, present so a
     // script that switches on `kind` still finds the field agent view documents.
     kind: 'background',
+    // Which agent CLI the session belongs to. The store tags every non-opencode row with its origin
+    // and leaves opencode's untagged, so absent means opencode (the literal, not DEFAULT_BACKEND,
+    // to keep this module free of the backend registry).
+    backend: typeof session.origin === 'string' ? session.origin : 'opencode',
     state: STATE_WORDS[session.status] ?? session.status,
     // The repository, not the worktree it happens to run in — the same thing the rows say.
     cwd: repo ?? session.projectKey,
