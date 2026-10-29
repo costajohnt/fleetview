@@ -1,5 +1,6 @@
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
+import { waitFor } from './helpers.ts'
 import { EventEmitter } from 'node:events'
 import { render } from 'ink'
 import { gatedStdout } from '../src/gated-stdout.ts'
@@ -35,17 +36,6 @@ class FakeStdin extends EventEmitter {
 // CSI codes and OSC strings both go — the tab title is an OSC carrying readable text, and leaving
 // it in would make it look like a drawn frame.
 const stripAnsi = (s: string) => s.replace(/\x1b\][^\x07]*\x07/g, '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
-// Bounded polling, not a fixed sleep: on a loaded CI runner Ink's frame can take longer than any
-// sleep this test would want to hardcode, and a too-short one reads as "resize handling broke".
-const waitFor = async (fn: () => boolean, timeoutMs = 3000) => {
-  const start = Date.now()
-  for (;;) {
-    if (fn()) return
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((r) => setTimeout(r, 10))
-  }
-}
-
 test('gatedStdout forwards the wrapped stream resize event to its own listeners', () => {
   const target = new FakeTerminal()
   const gate = gatedStdout(target as any)

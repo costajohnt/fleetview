@@ -1,5 +1,6 @@
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
+import { tick, waitFor } from './helpers.ts'
 import { render as inkRender } from 'ink-testing-library'
 
 // Its own file because of this mock: `runNotifyHook` is what the user's FLEETVIEW_NOTIFY_CMD hangs
@@ -27,16 +28,6 @@ afterEach(() => {
 
 const server = { host: '127.0.0.1', port: 4900 }
 const project = { id: 'a-1', worktree: '/x/alpha', vcs: 'git', time: { created: 1, updated: 1000 } }
-const tick = () => new Promise((r) => setTimeout(r, 20))
-const waitFor = async (fn: () => boolean, timeoutMs = 3000) => {
-  const start = Date.now()
-  for (;;) {
-    if (fn()) return
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((r) => setTimeout(r, 10))
-  }
-}
-
 function makeDeps() {
   const client = {
     listProjects: vi.fn(() => Promise.resolve([project])),
@@ -84,9 +75,11 @@ test('filtering the blocked session out of view and back does not re-fire agent_
   stdin.write('\x1B') // esc clears the filter and the row comes back
   await waitFor(() => lastFrame()!.includes('fix tests'))
   // The re-fire mechanism runs on the poll cycle, so the observation window has to contain one:
-  // wait until listPermissions has answered at least once more, then a spurious event had its chance.
+  // wait for TWO more listPermissions calls. The second call starting means the first one's answer
+  // was already applied, so a spurious event off that snapshot had its chance; one call only proves
+  // the request went out.
   const polls = deps.client.listPermissions.mock.calls.length
-  await waitFor(() => deps.client.listPermissions.mock.calls.length > polls)
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > polls + 1)
   await tick()
 
   expect(events().length).toBe(before)
@@ -121,7 +114,7 @@ test('browsing sessions that are not roster members does not fire the hook for t
   // Same widened window as above: a spurious fire off the next poll's snapshot must get its chance
   // before the count is declared frozen.
   const polls = deps.client.listPermissions.mock.calls.length
-  await waitFor(() => deps.client.listPermissions.mock.calls.length > polls)
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > polls + 1)
   await tick()
 
   expect(events().length).toBe(before)
