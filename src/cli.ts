@@ -1448,7 +1448,7 @@ export async function editPrompt(text: string, out: TerminalGate, instance: Rend
 // An attach that dies instantly without drawing anything leaves the user staring at the roster
 // wondering whether the keypress registered. The usual cause is a session whose directory is gone —
 // a removed git worktree — which makes `opencode attach --dir` exit 1 silently.
-function describeExit(reason: AttachEnd, target: { worktree: string }) {
+function describeExit(reason: AttachEnd, target: { worktree: string; backend?: string }) {
   // Only the exit member carries a message — it is set by attachLoop's own catch for a child that
   // never started — so the `type` test is what the untyped read was already relying on.
   if (reason.type === 'exit' && reason.message) return { message: reason.message }
@@ -1456,7 +1456,7 @@ function describeExit(reason: AttachEnd, target: { worktree: string }) {
   // business, not a failure to attach. Only an instant, silent death is worth reporting.
   if (reason.type === 'exit' && reason.drewNothing && reason.exitCode !== 0 && reason.ms < 2000) {
     return existsSync(target.worktree)
-      ? { message: `couldn't attach (opencode exited ${reason.exitCode})` }
+      ? { message: `couldn't attach (${target.backend ?? DEFAULT_BACKEND} exited ${reason.exitCode})` }
       : { message: `couldn't attach: ${target.worktree} no longer exists` }
   }
   return undefined
@@ -1488,7 +1488,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
     // `claude --resume` fails "No conversation found" from fleetview's directory.
     const result = spawnSync(command, argv, { stdio: 'inherit', cwd: action.worktree, env: envFor(action) })
     reclaimTerminal(out, instance)
-    return result.error ? { message: `couldn't launch opencode: ${result.error.message}` } : undefined
+    return result.error ? { message: `couldn't launch ${action.backend ?? DEFAULT_BACKEND}: ${result.error.message}` } : undefined
   }
   let target = action
   for (;;) {
@@ -1509,7 +1509,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
       onResume: () => reclaimTerminal(out, instance),
     }).catch((error) => {
       reclaimTerminal(out, instance)
-      return { type: 'exit', exitCode: 1, drewNothing: true, ms: 0, message: `couldn't launch opencode: ${error.message}` }
+      return { type: 'exit', exitCode: 1, drewNothing: true, ms: 0, message: `couldn't launch ${target.backend ?? DEFAULT_BACKEND}: ${error.message}` }
     })
     // A detach is reported back to App with which session was left behind: the roster shows the
     // "moved to the background" notice on that row, and Esc can re-open it later. A CLEAN exit of
