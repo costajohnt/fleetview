@@ -188,6 +188,7 @@ type AppProps = {
   initialBackend?: string
   isolate?: boolean
   projectPollMs?: number
+  stopArmMs?: number
   fetchPullRequestsImpl?: (dir: string) => Promise<{ prs: PullRequest[]; reason: string | null }>
   branchOfImpl?: (dir: string) => string | null
   cwd?: string
@@ -231,6 +232,9 @@ export function App({
   // false (FLEETVIEW_NO_ISOLATE=1) dispatches into the checkout instead of a per-session worktree.
   isolate = true,
   projectPollMs = 30000,
+  // The two-press ^x window (stop, then delete). A prop so a test can let it lapse without racing
+  // real time (M4).
+  stopArmMs = 2000,
   fetchPullRequestsImpl = fetchPullRequests,
   branchOfImpl = branchOf,
   cwd = process.cwd(),
@@ -628,7 +632,7 @@ export function App({
     // moving it there while the confirming second press is still pending makes the user chase the
     // row down the board. While the arm is live the row keeps the section and sort position it had
     // when armed; by the time the arm lapses the row is either deleted or no longer armed.
-    const held = stopArm.current?.held && Date.now() - stopArm.current.at < 2000 ? stopArm.current : null
+    const held = stopArm.current?.held && Date.now() - stopArm.current.at < stopArmMs ? stopArm.current : null
     const isHeld = (s: RosterSession) => held?.key === `${s.projectKey}:${s.id}`
     const groupFor = (s: RosterSession) => (isHeld(s) ? held!.held!.group : STATE_GROUPS.find((g) => g.match(s))?.key)
     const sortTime = (s: RosterSession) => (isHeld(s) ? held!.held!.updatedAt : s.updatedAt ?? 0)
@@ -1171,10 +1175,10 @@ export function App({
     const rows: RosterSession[] = group?.sessions ?? []
     if (rows.length === 0) return
     const armKey = `group:${projectKey}`
-    const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < 2000
+    const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < stopArmMs
     if (!armed) {
       stopArm.current = { key: armKey, at: Date.now() }
-      return flash(`^x again to delete ${rows.length} session${rows.length === 1 ? '' : 's'} in ${group?.repoName}`, 2000)
+      return flash(`^x again to delete ${rows.length} session${rows.length === 1 ? '' : 's'} in ${group?.repoName}`, stopArmMs)
     }
     stopArm.current = null
     setNotice(null)
@@ -1221,7 +1225,7 @@ export function App({
       return flash(`removed "${row.title}"`)
     }
     const armKey = `${row.projectKey}:${row.id}`
-    const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < 2000
+    const armed = stopArm.current && stopArm.current.key === armKey && Date.now() - stopArm.current.at < stopArmMs
     if (armed) {
       stopArm.current = null
       setNotice(null)
@@ -1254,7 +1258,7 @@ export function App({
     // until the arm lapses so the confirming press targets a row that hasn't moved (#15).
     stopArm.current = { key: armKey, at: armedAt, held: { group: STATE_GROUPS.find((g) => g.match(row))?.key, updatedAt: row.updatedAt ?? 0 } }
     if (armTimer.current) clearTimeout(armTimer.current)
-    armTimer.current = setTimeout(rerender, 2050) // just past the window, so the released row repaints
+    armTimer.current = setTimeout(rerender, stopArmMs + 50) // just past the window, so the released row repaints
     // The arm is immediate — the two-press window must not wait on the network — but the notice
     // reports the outcome, not the intention. It used to say `stopped "<title>"` before the abort
     // had even been sent, and never corrected itself when the abort threw: a session that is still
@@ -1264,7 +1268,7 @@ export function App({
     // live, so it is repeated only for whatever is left of that window — a notice that outlived the
     // arm would invite a second press that arms again instead of deleting.
     const report = (message: string) => {
-      const left = 2000 - (Date.now() - armedAt)
+      const left = stopArmMs - (Date.now() - armedAt)
       return left > 0 ? flash(`${message} · ^x again to delete`, left) : flash(message)
     }
     try {

@@ -1806,7 +1806,7 @@ test('a failed session renders red and lands in the completed group', async () =
 // confirming press is still pending, leaving the user to hunt it down the board.
 test('a first ^x holds the row in its section until the arm lapses, then lets it fall into completed', async () => {
   const deps = makeDeps()
-  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, stopArmMs: 1000, onAction: vi.fn() }))
   await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
   const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
   onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
@@ -1827,7 +1827,7 @@ test('a first ^x holds the row in its section until the arm lapses, then lets it
   await waitFor(() => lastFrame().includes('stopped "fix tests"'))
   expect(sectionOf('fix tests')).toBe('working') // held where it was, not re-sorted under the cursor
   await waitFor(() => sectionOf('fix tests') === 'completed', 5000) // arm lapsed, row settles
-}, 10000) // the 2s arm window is real time, so this test outlasts the default per-test timeout
+}, 10000) // the arm window is real time (1s here via stopArmMs), so keep headroom over the default timeout
 
 test('stopping a session moves it under completed without losing the selection (second ^x still lands)', async () => {
   const deps = makeDeps()
