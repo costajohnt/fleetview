@@ -1238,8 +1238,8 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
   // The roster owns the whole screen (alternate buffer), like every full-screen TUI: no shell
   // scrollback bleeding above the header, and quitting restores the terminal exactly as it was.
   // Only interactive mode — `fleetview ls` and friends print to the normal buffer. The `exit` handler
-  // covers quit, crash, and process.exit alike; SIGTERM/SIGHUP get handlers so `exit` fires for
-  // them too (Node kills the process without it otherwise). Skipped when stdout isn't a TTY so
+  // covers quit, crash, and process.exit alike; SIGTERM/SIGHUP/SIGINT get handlers that restore the
+  // screen before re-raising (Node kills the process without it otherwise). Skipped when stdout isn't a TTY so
   // piping fleetview's output somewhere doesn't emit escape garbage.
   const tty = process.stdout.isTTY
   const restoreScreen = () => process.stdout.write(RESTORE_SCREEN)
@@ -1249,14 +1249,22 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
     // SIGINT too: an external `kill -INT` (not the in-TUI ctrl+c, which Ink reads as a raw-mode
     // keypress and never as a signal) otherwise takes the default disposition, skipping the `exit`
     // handler and leaving the alt screen up with mouse reporting on and the cursor hidden.
-    for (const sig of ['SIGTERM', 'SIGHUP', 'SIGINT'])
-      process.on(sig, () => {
+    for (const sig of ['SIGTERM', 'SIGHUP', 'SIGINT']) {
+      const handler = () => {
         // The tty is often already gone here (a dropped SSH session HUPs its process group), so the
         // log file is the only reader left — and it is what tells a user whose terminal vanished
         // mid-session that fleetview was killed rather than that it crashed.
         noteExit(`exited on ${sig}`)
-        process.exit(1)
-      })
+        // Re-raised rather than process.exit(1), as pty-host.ts does: the default disposition makes
+        // the exit status say "killed by <sig>" to a parent's wait(). That skips `exit` handlers, so
+        // the screen is restored here, once. Only this handler comes off — other subsystems' stay.
+        restoreScreen()
+        process.removeListener('exit', restoreScreen)
+        process.removeListener(sig, handler)
+        process.kill(process.pid, sig)
+      }
+      process.on(sig, handler)
+    }
     // A crash used to leave no trace at all: node writes the stack to stderr while the alternate
     // screen is still up, then the `exit` handler above switches back to the normal buffer and the
     // whole alt-screen page — stack included — goes with it. What the user sees is a shell prompt
