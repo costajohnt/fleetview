@@ -122,7 +122,9 @@ export function parseArgs(argv: string[] = []): ParseResult {
   // meaningful.
   const ALLOWED_FLAGS: Record<string, Set<string>> = {
     ui: new Set(['model', 'agent', 'backend']),
-    bg: new Set(['name', 'agent', 'model', 'exec']),
+    // `backend` reaches runBg so a non-opencode value gets its explanation (bg dispatches via
+    // opencode only) instead of a bare "not valid", and `--backend opencode` stays a no-op.
+    bg: new Set(['name', 'agent', 'model', 'exec', 'backend']),
   }
   const flagProblem = (command: string): string | null => {
     const allowed = ALLOWED_FLAGS[command] ?? new Set<string>()

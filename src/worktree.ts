@@ -150,9 +150,11 @@ export function logNameCollision(entry: { prompt: string; name: string; existing
 const git = (dir: string, args: string[], run = execFileSync) =>
   run('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
 
-// What `^x^x` is allowed to destroy. Agent view's rules exactly: pressing it twice "removes the
-// worktree and uncommitted changes (commit first)", but "neither removes a worktree with unpushed
-// commits — it is kept with the session row". So dirt is expendable and commits are not.
+// What `^x^x` and `fleetview rm` are allowed to destroy. Agent view: "neither removes a worktree with
+// unpushed commits — it is kept with the session row", and `claude rm <id>` "keeps the worktree if
+// it has uncommitted changes". Deliberate divergence from agent view's `^x^x`, which does take
+// uncommitted changes: opencode's server-side removal is unverified on whether it forces, so dirt
+// is kept too rather than gambling someone's edits on it.
 //
 // `base` is what the commits would be measured against: the branch's upstream when it has one,
 // otherwise the parent repository's current branch. With no remote configured, every commit is
@@ -175,13 +177,11 @@ export function worktreeSafety(dir: string, parentDir: string | null | undefined
     if (!base || base === 'HEAD') return { removable: false, dirty, unpushed: true, reason: 'no branch to compare against' }
     const ahead = Number(git(dir, ['rev-list', '--count', `${base}..HEAD`], run))
     const unpushed = Number.isNaN(ahead) ? true : ahead > 0
-    return {
-      removable: !unpushed,
-      dirty,
-      unpushed,
-      // Non-numeric output means the count is unknown, so say that rather than "NaN unpushed commits".
-      reason: !unpushed ? null : Number.isNaN(ahead) ? 'could not count unpushed commits' : `${ahead} unpushed commit${ahead === 1 ? '' : 's'}`,
-    }
+    // Non-numeric output means the count is unknown, so say that rather than "NaN unpushed commits".
+    const commits = !unpushed ? null : Number.isNaN(ahead) ? 'could not count unpushed commits' : `${ahead} unpushed commit${ahead === 1 ? '' : 's'}`
+    // Both reasons when both hold: the user has two things to deal with before it can go.
+    const reason = [commits, dirty ? 'uncommitted changes' : null].filter(Boolean).join(', ') || null
+    return { removable: !unpushed && !dirty, dirty, unpushed, reason }
   } catch {
     // A worktree git can't read is one fleetview must not delete. Any failure here — the directory is
     // gone, git is missing, the repository is broken — resolves to "leave it alone".

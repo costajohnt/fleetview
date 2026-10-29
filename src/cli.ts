@@ -145,7 +145,7 @@ type RunRmDeps = {
 type RunWatchDeps = {
   ensureServer: EnsureServer
   serverFile: string
-  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions'>
+  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'sessionStatus'>
   connect?: typeof connectEvents
   log?(message: string): void
   error?(message: string): void
@@ -688,16 +688,26 @@ export async function runRm(
     })
   } catch {}
   // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
-  // commits that exist nowhere else, which is the case that actually loses work. Reported either
-  // way, because a worktree left behind is something the user should know about.
+  // commits that exist nowhere else too (worktreeSafety). Reported either way, because a worktree
+  // left behind is something the user should know about.
   if (found.worktree !== found.repo) {
+    const kept = (reason: string) => log(`removed ${found.session.id} — kept its worktree (${reason}): ${found.worktree}`)
+    // The TUI's guard (app.ts removeWorktreeFor): only the last session in a worktree takes it with
+    // it — a /fork sibling still runs there. Counted excluding the deleted id rather than trusting
+    // the server to have dropped it already; a listing that fails is not proof of "nobody left".
+    const listed = await client.listSessions(found.worktree).catch(() => null)
+    if (!Array.isArray(listed)) return kept('could not list its sessions')
+    const others = listed.filter((s) => isListedSession(s) && s.id !== found.session.id).length
+    if (others > 0) return kept(`${others} other session${others === 1 ? '' : 's'} still use${others === 1 ? 's' : ''} it`)
     const safety = worktreeSafetyImpl(found.worktree, found.repo)
-    if (safety.removable) {
-      await client.removeWorktree?.(found.worktree, found.repo).catch(() => {})
-      log(`removed ${found.session.id} and its worktree`)
-    } else {
-      log(`removed ${found.session.id} — kept its worktree (${safety.reason}): ${found.worktree}`)
+    if (!safety.removable) return kept(safety.reason ?? 'not safe to remove')
+    if (!client.removeWorktree) return kept('this server cannot remove worktrees')
+    try {
+      await client.removeWorktree(found.worktree, found.repo)
+    } catch (e) {
+      return kept(`removal failed: ${stripControl(e instanceof Error ? e.message : String(e))}`)
     }
+    log(`removed ${found.session.id} and its worktree`)
     return
   }
   log(`removed ${found.session.id}`)
@@ -849,6 +859,7 @@ export async function runWatch(
   const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
   if (!found) return
   const { session, worktree, server } = found
+  const client = found.client as ReturnType<NonNullable<RunWatchDeps['createClient']>>
   const printed = new Map<string, number>()
   // Assigned synchronously inside the executor, so it is set by the time anything can resolve.
   let conn: ReturnType<typeof connect> | null = null
@@ -877,10 +888,22 @@ export async function runWatch(
             if (failure) error(`error: ${failure}`)
             return
           }
-          // Idle is how a turn ends. `watch` on an already-idle session therefore returns almost
-          // immediately, which is the honest answer: there is no output coming.
+          // Idle is how a turn ends.
           if (event.type === 'session.status' && event.properties.sessionID === session.id && event.properties.status?.type === 'idle') done()
           if (event.type === 'session.deleted' && event.properties.info?.id === session.id) done()
+        },
+        // M16: a session already idle (or gone idle before the stream connected) never sends an
+        // idle frame, so ask once the stream is up: absent from the status map or idle means there
+        // is no output coming, which is the honest answer. Asked after connecting, not before, so a
+        // turn ending in between is caught by one side or the other. An unreadable status map
+        // proves nothing, so the watch keeps waiting on the stream.
+        onOnline: () => {
+          void client.sessionStatus(worktree).then(
+            (statuses) => {
+              if (statuses && typeof statuses === 'object' && (statuses[session.id] ?? { type: 'idle' }).type === 'idle') done()
+            },
+            () => {},
+          )
         },
         // No reconnect: a dropped stream mid-watch should end the command rather than silently
         // resume minutes later having missed the output the caller was waiting for.
@@ -1215,8 +1238,8 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
   // The roster owns the whole screen (alternate buffer), like every full-screen TUI: no shell
   // scrollback bleeding above the header, and quitting restores the terminal exactly as it was.
   // Only interactive mode — `fleetview ls` and friends print to the normal buffer. The `exit` handler
-  // covers quit, crash, and process.exit alike; SIGTERM/SIGHUP get handlers so `exit` fires for
-  // them too (Node kills the process without it otherwise). Skipped when stdout isn't a TTY so
+  // covers quit, crash, and process.exit alike; SIGTERM/SIGHUP/SIGINT get handlers that restore the
+  // screen before re-raising (Node kills the process without it otherwise). Skipped when stdout isn't a TTY so
   // piping fleetview's output somewhere doesn't emit escape garbage.
   const tty = process.stdout.isTTY
   const restoreScreen = () => process.stdout.write(RESTORE_SCREEN)
@@ -1226,14 +1249,22 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
     // SIGINT too: an external `kill -INT` (not the in-TUI ctrl+c, which Ink reads as a raw-mode
     // keypress and never as a signal) otherwise takes the default disposition, skipping the `exit`
     // handler and leaving the alt screen up with mouse reporting on and the cursor hidden.
-    for (const sig of ['SIGTERM', 'SIGHUP', 'SIGINT'])
-      process.on(sig, () => {
+    for (const sig of ['SIGTERM', 'SIGHUP', 'SIGINT']) {
+      const handler = () => {
         // The tty is often already gone here (a dropped SSH session HUPs its process group), so the
         // log file is the only reader left — and it is what tells a user whose terminal vanished
         // mid-session that fleetview was killed rather than that it crashed.
         noteExit(`exited on ${sig}`)
-        process.exit(1)
-      })
+        // Re-raised rather than process.exit(1), as pty-host.ts does: the default disposition makes
+        // the exit status say "killed by <sig>" to a parent's wait(). That skips `exit` handlers, so
+        // the screen is restored here, once. Only this handler comes off — other subsystems' stay.
+        restoreScreen()
+        process.removeListener('exit', restoreScreen)
+        process.removeListener(sig, handler)
+        process.kill(process.pid, sig)
+      }
+      process.on(sig, handler)
+    }
     // A crash used to leave no trace at all: node writes the stack to stderr while the alternate
     // screen is still up, then the `exit` handler above switches back to the normal buffer and the
     // whole alt-screen page — stack included — goes with it. What the user sees is a shell prompt
@@ -1425,7 +1456,7 @@ export async function editPrompt(text: string, out: TerminalGate, instance: Rend
 // An attach that dies instantly without drawing anything leaves the user staring at the roster
 // wondering whether the keypress registered. The usual cause is a session whose directory is gone —
 // a removed git worktree — which makes `opencode attach --dir` exit 1 silently.
-function describeExit(reason: AttachEnd, target: { worktree: string }) {
+function describeExit(reason: AttachEnd, target: { worktree: string; backend?: string }) {
   // Only the exit member carries a message — it is set by attachLoop's own catch for a child that
   // never started — so the `type` test is what the untyped read was already relying on.
   if (reason.type === 'exit' && reason.message) return { message: reason.message }
@@ -1433,7 +1464,7 @@ function describeExit(reason: AttachEnd, target: { worktree: string }) {
   // business, not a failure to attach. Only an instant, silent death is worth reporting.
   if (reason.type === 'exit' && reason.drewNothing && reason.exitCode !== 0 && reason.ms < 2000) {
     return existsSync(target.worktree)
-      ? { message: `couldn't attach (opencode exited ${reason.exitCode})` }
+      ? { message: `couldn't attach (${target.backend ?? DEFAULT_BACKEND} exited ${reason.exitCode})` }
       : { message: `couldn't attach: ${target.worktree} no longer exists` }
   }
   return undefined
@@ -1465,7 +1496,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
     // `claude --resume` fails "No conversation found" from fleetview's directory.
     const result = spawnSync(command, argv, { stdio: 'inherit', cwd: action.worktree, env: envFor(action) })
     reclaimTerminal(out, instance)
-    return result.error ? { message: `couldn't launch opencode: ${result.error.message}` } : undefined
+    return result.error ? { message: `couldn't launch ${action.backend ?? DEFAULT_BACKEND}: ${result.error.message}` } : undefined
   }
   let target = action
   for (;;) {
@@ -1486,7 +1517,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
       onResume: () => reclaimTerminal(out, instance),
     }).catch((error) => {
       reclaimTerminal(out, instance)
-      return { type: 'exit', exitCode: 1, drewNothing: true, ms: 0, message: `couldn't launch opencode: ${error.message}` }
+      return { type: 'exit', exitCode: 1, drewNothing: true, ms: 0, message: `couldn't launch ${target.backend ?? DEFAULT_BACKEND}: ${error.message}` }
     })
     // A detach is reported back to App with which session was left behind: the roster shows the
     // "moved to the background" notice on that row, and Esc can re-open it later. A CLEAN exit of
