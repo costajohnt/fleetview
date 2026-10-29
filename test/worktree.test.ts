@@ -207,13 +207,23 @@ test('a clean worktree with no commits of its own is removable', () => {
   expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: true, dirty: false, unpushed: false })
 })
 
-// Agent view: "Ctrl+X twice removes the worktree and uncommitted changes (commit first)." Dirt is
-// expendable — it is committed work that is protected.
-test('uncommitted changes alone do not stop removal, but are reported', () => {
+// `claude rm` "keeps the worktree if it has uncommitted changes" — and whether opencode's removal
+// forces is unverified, so dirt blocks removal on every path rather than being bet on.
+test('uncommitted changes alone keep the worktree', () => {
   const repo = makeRepo()
   const wt = makeWorktree(repo, 'dirty')
   writeFileSync(join(wt, 'a.txt'), 'changed\n')
-  expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: true, dirty: true, unpushed: false })
+  expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: false, dirty: true, unpushed: false, reason: 'uncommitted changes' })
+})
+
+test('unpushed commits and uncommitted changes are both named', () => {
+  const repo = makeRepo()
+  const wt = makeWorktree(repo, 'both')
+  writeFileSync(join(wt, 'b.txt'), 'work\n')
+  execFileSync('git', ['-C', wt, 'add', '-A'], { stdio: 'ignore' })
+  execFileSync('git', ['-C', wt, 'commit', '-qm', 'real work'], { stdio: 'ignore' })
+  writeFileSync(join(wt, 'b.txt'), 'more\n')
+  expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: false, dirty: true, unpushed: true, reason: '1 unpushed commit, uncommitted changes' })
 })
 
 // Agent view: "Neither removes a worktree with unpushed commits — it is kept with the session row."
