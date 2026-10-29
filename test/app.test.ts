@@ -2634,7 +2634,7 @@ test('a dispatch whose prompt fails after the session exists keeps the worktree'
   stdin.write('fix the thing')
   await tick()
   stdin.write('\r')
-  await waitFor(() => lastFrame().includes('dispatch failed'))
+  await waitFor(() => lastFrame().includes('session created, prompt not sent'))
   expect(deps.client.removeWorktree).not.toHaveBeenCalled()
 })
 

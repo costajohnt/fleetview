@@ -196,6 +196,7 @@ export function useDispatch({
     let worktree = target
     let isolated = false
     let worktreeRemoved = false
+    let created = false
     try {
       // isolate=false (FLEETVIEW_NO_ISOLATE) skips the worktree entirely — the session edits the
       // checkout directly, agent view's `bgIsolation: "none"`. Isolation stays the default.
@@ -247,6 +248,7 @@ export function useDispatch({
       // The prompt rides the membership (capped — a pasted wall of text is not a lookup key) so
       // a pasted URL can find this session later, agent view's any-URL filter.
       addMember(worktree, session.id, { ...(shell ? { shell: true } : {}), prompt: text.slice(0, 2000) })
+      created = true
       // Same launch --agent fallback as the prompt branch's effectiveAgent — a `fleetview --agent
       // foo` run must not silently send `!` jobs as 'build' (the CLI's runBg --exec honors it).
       if (shell) await client.runShell(session.id, text, worktree, agent ?? initialAgent ?? 'build')
@@ -283,6 +285,10 @@ export function useDispatch({
       // repository the user chose, which is the header they can see.
       setOfflineProjects((s) => new Set(s).add(worktreeRemoved ? target : worktree))
       if (dispatched) return flash('session started, but the project list is stale')
+      // The session exists and is on the roster; only its prompt failed. Handing the prompt back
+      // would invite a retry that makes a second, duplicate session — the row is the place to
+      // resend it from.
+      if (created) return flash('session created, prompt not sent — peek it to resend', 5000)
       // Only restore into an input the user hasn't started refilling: a dispatch can be in flight
       // for up to the client's 10s timeout, and overwriting a half-typed prompt with the failed
       // one is worse than losing it.

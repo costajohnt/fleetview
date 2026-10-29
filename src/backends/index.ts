@@ -21,6 +21,11 @@ export const DEFAULT_BACKEND: BackendName = 'opencode'
 export const isBackendName = (name: unknown): name is BackendName =>
   typeof name === 'string' && (BACKEND_NAMES as readonly string[]).includes(name)
 
+// The adapter for a backend name, falling back to the default one: a row (or attach target) whose
+// backend can't be resolved must not go inert or hide keys that have always worked.
+export const resolveBackend = (backends: Record<string, Backend>, name: string | undefined): Backend =>
+  backends[name ?? DEFAULT_BACKEND] ?? backends[DEFAULT_BACKEND]
+
 // Same override chain shape as every other fleetview setting (FLEETVIEW_*, then the pre-rename
 // ROOST_* spelling). An unrecognised value falls back to the default rather than failing the launch:
 // a typo in a shell profile must not make the roster unopenable, and `--backend` — which the user
