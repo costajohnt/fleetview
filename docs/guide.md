@@ -285,4 +285,6 @@ A claude or copilot session can't be deleted (its transcript belongs to the CLI)
 those rows in its own worktree `^x^x` drops the row from the roster and removes the worktree under
 the same rules, plus a sibling check: another session still running there keeps it. The removal
 is `git worktree remove` without `--force`, then `git branch -d` on the `fleetview/` branch only,
-so git refuses on its own as well. `fleetview rm` only sees opencode sessions.
+so git refuses on its own as well. `fleetview rm <id>` does the same for such a session from the
+shell. On a claude or copilot session outside a fleetview worktree it refuses, since there is
+nothing for it to delete.

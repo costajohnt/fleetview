@@ -16,7 +16,7 @@ import { createStore, memberTitle, messageBody, errorLabel } from './session-sto
 import type { SessionStore } from './session-store.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { summarise } from './ui/header.ts'
-import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories } from './worktree.ts'
+import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories, isLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import { sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem } from './cli-args.ts'
 import { stripControl } from './text-utils.ts'
 import type { ParsedArgs } from './cli-args.ts'
@@ -97,6 +97,8 @@ type RunRmDeps = {
   createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'deleteSession' | 'removeWorktree'>
   rosterFile?: string
   worktreeSafetyImpl?(dir: string, parentDir: string): { removable: boolean; reason: string | null }
+  isLocalWorktreeImpl?(dir: string): boolean
+  removeLocalWorktreeImpl?(dir: string, repo: string): void
   backends?: Backends
   log?(message: string): void
   error?(message: string): void
@@ -282,6 +284,8 @@ export async function runRm(
     createClient = (url: string) => new OpencodeClient(url),
     rosterFile = defaultRosterFile(),
     worktreeSafetyImpl = worktreeSafety,
+    isLocalWorktreeImpl = isLocalWorktree,
+    removeLocalWorktreeImpl = removeLocalWorktree,
     backends = {},
     log = console.log,
     error = console.error,
@@ -310,6 +314,33 @@ export async function runRm(
     // whether its CLI can delete at all. Neither claude nor copilot can today, so this says so
     // rather than calling a delete that only throws.
     const adapter = backends[found.backend]
+    // A dispatch fleetview isolated in a local worktree (createLocalWorktree): like the TUI's ^x^x
+    // forgetOnly path, the row is forgotten (the CLI's transcript stays) and the worktree goes with it
+    // under the same guards — another member still in it, or uncommitted/unpushed work, keeps it.
+    if (!adapter.capabilities.delete && isLocalWorktreeImpl(found.worktree)) {
+      const members = (() => {
+        try {
+          return loadRoster(rosterFile).sessions
+        } catch {
+          return []
+        }
+      })()
+      const repo = members.find((m) => m.worktree === found.worktree && m.id === found.id)?.repo
+      prune()
+      const kept = (reason: string) => log(`removed ${found.id} — kept its worktree (${reason}): ${found.worktree}`)
+      if (typeof repo !== 'string') return kept('its repository is not recorded')
+      const others = members.filter((m) => m.worktree === found.worktree && m.id !== found.id).length
+      if (others > 0) return kept(`${others} other session${others === 1 ? '' : 's'} still use${others === 1 ? 's' : ''} it`)
+      const safety = worktreeSafetyImpl(found.worktree, repo)
+      if (!safety.removable) return kept(safety.reason ?? 'not safe to remove')
+      try {
+        removeLocalWorktreeImpl(found.worktree, repo)
+      } catch (e) {
+        return kept(`removal failed: ${stripControl(e instanceof Error ? e.message : String(e))}`)
+      }
+      log(`removed ${found.id} and its worktree`)
+      return
+    }
     if (!adapter.capabilities.delete) {
       error(`${found.backend} cannot delete a session (its CLI has no way to); fleetview stop ${found.id} ends a running one`)
       setExitCode(1)
