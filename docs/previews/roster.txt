@@ -5,5 +5,5 @@
   [36m✻[39m [2mport the parser                                    — rewriting tokenizer edge cases[22m           [2m3m[22m
 
   [1m[90mcompleted[39m[22m
-  [32m•[39m [2mupdate the readme                                 [22m                                         [35m]8;;https://github.com/o/r/pull/7#7[39m]8;; [2m4m[22m]8;;
+  [32m•[39m [2mupdate the readme                                 [22m                                         [35m]8;;https://github.com/o/r/pull/7#7]8;;[39m [2m4m[22m
   [31m•[39m [2mspike the importer                                [22m                                           [2m11m[22m

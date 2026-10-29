@@ -3941,7 +3941,7 @@ test('#49: a selected completed row that would fold away stays selected, and ^x 
   expect(deps.client.abortSession).toHaveBeenCalledWith('c5', '/x/alpha')
 }, 20000)
 
-// #60: Ink 7 turns one stdin read into several key events and dispatches them all in a single
+// #60: Ink (7 and 8) turns one stdin read into several key events and dispatches them all in a single
 // synchronous pass, but `isActive: false` only lands on the next render — so `→` and `^X` typed
 // fast enough to coalesce (key repeat, paste, or a render stalling the loop) both reached the
 // roster and the ^X stopped the very row being attached to.

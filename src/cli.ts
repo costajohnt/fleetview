@@ -667,10 +667,10 @@ async function rosterLoop(
         }),
         // Ctrl+C clears the dispatch input before it quits, so Ink must not intercept it.
         // The one unavoidable cast in this file, and it is a boundary fact rather than a shortcut:
-        // Ink types `stdout` as the concrete `NodeJS.WriteStream` class, while `out` is deliberately
-        // a structural stand-in for one (gated-stdout's Gate — write/columns/rows/isTTY/resize plus
-        // the open/close gate Ink knows nothing about). No structural type can satisfy a class, and
-        // widening the gate to a whole WriteStream would mean implementing tty methods nothing calls.
+        // Ink types `stdout` as `NodeJS.WritableStream`, while `out` is deliberately a structural
+        // stand-in for one (gated-stdout's Gate — write/columns/rows/isTTY/resize plus the
+        // open/close gate Ink knows nothing about). Widening the gate to a whole WritableStream
+        // would mean implementing end/writable/pipe-side methods nothing calls.
         { exitOnCtrlC: false, stdout: out as any },
       )
     })
@@ -684,9 +684,10 @@ async function rosterLoop(
 // steps, and the order matters.
 //
 // 1. Reopen the gate. That also re-arms mouse reporting and re-hides the cursor the child showed.
-// 2. `instance.clear()`. Ink erases the frame it thinks it last wrote and then re-points its
-//    skip-the-identical-frame check at that frame (ink 7's clear() calls log.sync() straight after
-//    log.clear()). Both halves are pure bookkeeping here: nothing of Ink's survived the child.
+// 2. `instance.clear()`. Ink erases the frame it thinks it last wrote and forgets it, so the next
+//    render draws in full even when unchanged (ink 8: build/ink.js clear() zeroes
+//    lastOutputHeight, and onRender then drops lastOutputToRender). Both are pure bookkeeping
+//    here: nothing of Ink's survived the child.
 // 3. Wipe the screen. This is the part that was missing, and without it the roster comes back
 //    wrong even though Ink does repaint. Ink's repaint is written RELATIVE to wherever the cursor
 //    happens to be: eraseLines(n) for the n lines it believes it last wrote, then the frame. The
@@ -698,10 +699,11 @@ async function rosterLoop(
 //    itself. It goes through the gate rather than round it, so a clear can never reach a terminal
 //    some other child already owns.
 //
-// The repaint does not need forcing on top of this: App renders null for the whole attachment
-// (`if (attached) return null`) and the roster the instant it ends, so the frame after a resume can
-// never be byte-identical to the one clear() just re-armed the skip check with, and Ink writes it.
-// Ink 7 has a public useApp().suspendTerminal() that does all of the above, but it is callable only
+// The repaint does not need forcing on top of this: Ink 8 redraws the first frame after clear()
+// unconditionally (above), and App renders null for the whole attachment (`if (attached) return
+// null`) and the roster the instant it ends, so that frame is the roster. Step 3 is still needed:
+// clear()'s erase is cursor-relative (build/log-update.js buildEraseFrame), and ink 8's
+// scrollback fix (#994) only changed Ink's own full-clear path, not this one. Ink has a public useApp().suspendTerminal() that does all of the above, but it is callable only
 // from inside the tree and it also takes over the stdin handoff that pty-host owns — not a trade
 // worth making for a screen clear.
 const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
