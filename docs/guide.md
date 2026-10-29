@@ -85,6 +85,14 @@ opencode is the default and the only backend with a server behind it. Claude Cod
 Copilot CLI are process-backed: a session is a detached headless run whose output fleetview reads,
 so there is less it can do and the roster says so rather than pretending.
 
+opencode is optional. When it is not on `PATH`, the roster still opens as long as `claude` or
+`copilot` is: the header says opencode is not installed, dispatches go to `--backend` /
+`FLEETVIEW_BACKEND` if that names claude or copilot and otherwise to the first of the two that is
+installed, and both are streamed from the start. With no project list from opencode, the roster
+watches the directory you launched it in (or `--cwd`) plus every directory already on the roster.
+`!` shell jobs, `/model`, `/fork` and `@opencode` say they need opencode rather than failing. With
+none of the three CLIs installed, fleetview says so and stops there.
+
 | | opencode | claude | copilot |
 |---|---|---|---|
 | dispatch, follow-up prompt, stop, attach | yes | yes | yes |
@@ -97,8 +105,8 @@ Pick one for a dispatch with `@claude`/`@copilot`, or for the whole run with `--
 `FLEETVIEW_BACKEND`. `@` resolves a subagent first, then a repository, then a backend — so a project
 called `claude` keeps `@claude`, and `--backend` is how you reach the CLI in that case.
 
-A backend other than opencode is streamed only once something has asked for it: `--backend`,
-`FLEETVIEW_BACKEND`, or a row from a previous run. Without that, fleetview reads nothing outside
+With opencode installed, a backend other than opencode is streamed only once something has asked
+for it: `--backend`, `FLEETVIEW_BACKEND`, or a row from a previous run. Without that, fleetview reads nothing outside
 opencode and the roster is exactly what it always was. When a second backend does have sessions,
 every row grows a dim backend name after its title.
 

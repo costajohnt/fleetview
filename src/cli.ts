@@ -25,7 +25,7 @@ import { createRequire } from 'node:module'
 import { App } from './app.ts'
 import { OpencodeClient } from './backends/opencode/client.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
-import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, isBackendName, resolveBackend } from './backends/index.ts'
+import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, fallbackBackend, isBackendName, resolveBackend } from './backends/index.ts'
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer, OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
@@ -1315,10 +1315,15 @@ async function rosterLoop(
     // server.json is re-read each iteration — a reconnect action means it now points at a new port
     const r = pending ?? (await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER))
     pending = undefined
+    // M7: no opencode on PATH is not the end of the roster when claude or copilot is installed. The
+    // registry is built without opencode (App reads that absence as "run without it"), and a launch
+    // backend of opencode falls back to the first installed CLI. null: none of the three is
+    // installed, and the roster keeps its missing screen.
+    const local = r.reason === OPENCODE_MISSING ? fallbackBackend(launch.launchBackend ?? DEFAULT_BACKEND) : null
     const client = new OpencodeClient(`http://${r.server.host}:${r.server.port}`)
     // Every adapter, not just the one being dispatched onto: the roster can hold rows from more than
     // one backend at once, so attach and the key handlers have to be able to reach any of them.
-    const backends = createBackends({ server: r.server, client })
+    const backends: Record<string, Backend> = local ? createBackends() : createBackends({ server: r.server, client })
     const seen = loadSeen(defaultSeenFile()) // re-read each iteration so post-attach re-mounts see fresh state
     const roster = loadRoster(rosterFile) // re-read each iteration so post-attach re-mounts see fresh membership
     // Ink renders into a gate fleetview can close, so an attached session owns the terminal without
@@ -1340,7 +1345,7 @@ async function rosterLoop(
           server: r.server,
           client,
           ensureServerImpl: ensureServer,
-          serverReady: r.ok,
+          serverReady: r.ok || local !== null,
           serverFailReason: r.reason,
           seen,
           persistSeen: makePersistSeen({ seen, saveSeen, seenFile: defaultSeenFile() }),
@@ -1358,7 +1363,7 @@ async function rosterLoop(
           // --backend / FLEETVIEW_BACKEND: which CLI an unprefixed dispatch runs on, and the one
           // non-opencode backend (if any) the roster streams from the moment it opens.
           backends,
-          initialBackend: launch.launchBackend ?? DEFAULT_BACKEND,
+          initialBackend: local ?? launch.launchBackend ?? DEFAULT_BACKEND,
           // Opt out of per-session worktree isolation (agent view's bgIsolation:"none"). Isolation
           // is the safe default; this is for a single-session flow or a build that needs the checkout.
           isolate: (process.env.FLEETVIEW_NO_ISOLATE ?? process.env.ROOST_NO_ISOLATE) !== '1',

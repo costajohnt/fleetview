@@ -31,6 +31,7 @@ const mergeProjects = (prev: Project[], fresh: Project[]) => {
 // backend registry); typed loose because their real shapes live in other modules.
 export function useDiscovery({
   serverReady,
+  cwd,
   client,
   store,
   seen,
@@ -64,6 +65,9 @@ export function useDiscovery({
   attachedRef,
 }: {
   serverReady: boolean
+  // The launch directory. Without opencode there is no project list, so this and the roster's own
+  // member directories are the projects (M7).
+  cwd?: string
   client: RosterClient
   store: SessionStore
   seen?: SeenMap
@@ -262,7 +266,10 @@ export function useDiscovery({
     // default (--backend / FLEETVIEW_BACKEND), a roster membership left by a previous run, or an
     // `@backend` dispatch. A pure-opencode user never activates one, so nothing here ever runs for
     // them — no extra polling, and no other tool's sessions in their roster.
-    const activeBackends = new Set<string>([DEFAULT_BACKEND, initialBackend])
+    // Without opencode (M7) the registry holds no opencode adapter, and every backend it does hold
+    // is active from the start: they are the whole roster now, not an opt-in beside opencode.
+    const hasOpencode = Boolean(backendRegistry[DEFAULT_BACKEND])
+    const activeBackends = new Set<string>(hasOpencode ? [DEFAULT_BACKEND, initialBackend] : Object.keys(backendRegistry))
     for (const m of rosterRef.current.sessions) {
       // `backend` is a member field the roster file carries, so it is read like every other one:
       // narrowed first. Absent (or anything but a name) means opencode, which is the default.
@@ -468,11 +475,37 @@ export function useDiscovery({
       }
     }
 
+    // M7: the no-opencode poll. The directories are the launch directory plus every directory the
+    // roster has a member in (and any a dispatch added); each is listed by every active backend on
+    // the same tick and interval the opencode path uses. No listProjects, no ensureServer, no
+    // server-down banner: there is no server to be down.
+    const refreshLocal = async () => {
+      if (polling) return
+      polling = true
+      syncExternalMembers()
+      try {
+        const dirs = [...new Set([...(cwd ? [cwd] : []), ...rosterRef.current.sessions.map((m) => m.worktree), ...knownWorktrees.current])]
+        for (const d of dirs) knownWorktrees.current.add(d)
+        setProjects((prev) => mergeProjects(prev, dirs.map((worktree) => ({ id: worktree, worktree }))))
+        for (const name of activeBackends) await Promise.all(dirs.map((d) => streamBackend(name, d)))
+      } finally {
+        polling = false
+      }
+    }
+    if (!hasOpencode) {
+      // A dispatch that made a directory of its own (a worktree) hands it over here, as on opencode.
+      streamProjectRef.current = async (w) => {
+        knownWorktrees.current.add(w)
+        await Promise.all([...activeBackends].map((name) => streamBackend(name, w)))
+      }
+    }
+    const refresh = hasOpencode ? refreshProjects : refreshLocal
+
     if (serverReady) {
       ;(async () => {
-        await refreshProjects()
+        await refresh()
         if (cancelled) return
-        intervalId = setInterval(refreshProjects, projectPollMs)
+        intervalId = setInterval(refresh, projectPollMs)
       })()
     }
 

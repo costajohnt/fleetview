@@ -60,7 +60,7 @@ duplicate `id` (opencode's `ses_…` id is already `id`).
 |---|---|
 | `OPENCODE_SERVER_PASSWORD` | HTTP basic auth for the opencode server; overrides the password fleetview generates, see [below](#the-server-fleetview-spawns-is-password-protected). `OPENCODE_SERVER_USERNAME` overrides the `opencode` default |
 | `FLEETVIEW_NOTIFY_CMD` | shell command run on each needs-input / completed / failed transition |
-| `FLEETVIEW_BACKEND` | default backend for dispatches: `opencode` (default), `claude`, `copilot`. `--backend` overrides it, and rejects an unknown name rather than falling back |
+| `FLEETVIEW_BACKEND` | default backend for dispatches: `opencode` (default), `claude`, `copilot`. `--backend` overrides it, and rejects an unknown name rather than falling back. When opencode is not installed, `opencode` (or nothing set) falls back to the first installed of `claude` and `copilot` |
 | `FLEETVIEW_DEFAULT_PROJECT` | repository a bare dispatch lands in when nothing more specific applies, e.g. `~/repos/ui`. Beats the newest-updated project (which is otherwise whatever opencode touched last) and the highlighted row; a known launch `--cwd` and a project-grouped highlighted row still win, and a path that no longer exists is skipped |
 | `FLEETVIEW_NO_ISOLATE=1` | dispatches edit the checkout directly instead of a per-session git worktree |
 | `FLEETVIEW_NO_ALT_SWITCH=1` | turn off `alt+1..9` quick-switch (recommended over SSH) |
@@ -116,6 +116,11 @@ status, one stream per project. Attaching runs `opencode attach <url> -s <id> --
 - `~/.local/share/opencode/worktree/<repo>/<name>/` — one worktree per dispatched session
 
 ## Install notes
+
+fleetview needs at least one of the `opencode`, `claude` or `copilot` CLIs on `PATH`. opencode is
+needed for the opencode backend and everything only it can do (answering from the roster, `!`
+shell jobs, `/fork`, `/model`, worktree isolation, browse over opencode's projects); the roster
+opens without it on whichever of the other two is installed.
 
 fleetview is written in TypeScript that Node runs directly by stripping types at load — in a
 clone there is no build step to think about (`npm install` emits `dist/` once via `prepare`, and
