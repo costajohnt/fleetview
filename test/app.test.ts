@@ -351,10 +351,11 @@ test('main: ^a removes from roster only — session NOT deleted or stopped', asy
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
   await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('\x01')
-  await tick()
+  // the removal has landed before the absence of a delete/stop is worth anything
+  await waitFor(() => deps.persistRoster.mock.calls.some((c: any) => c[0].sessions.length === 0))
+  await waitFor(() => lastFrame().includes('a session is asking you something'))
   expect(deps.client.deleteSession).not.toHaveBeenCalled()
   expect(deps.client.abortSession).not.toHaveBeenCalled()
-  expect(deps.persistRoster).toHaveBeenCalledWith(expect.objectContaining({ sessions: [] }))
   expect(lastFrame()).toContain('a session is asking you something')
 })
 
@@ -876,6 +877,9 @@ test('membership filtering: non-member session is invisible in main, visible in 
   const deps = makeDeps()
   deps.roster = { groupBy: 'state', sessions: [] } // s1 not a member
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  // s1 is in the store once the stream connects (setSessions runs first); only then is its
+  // absence from main the filter at work rather than discovery not having finished
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
   await tick()
   expect(lastFrame()).not.toContain('fix tests')
   expect(lastFrame()).toContain('a session is asking you something')
@@ -889,7 +893,7 @@ test('space in browse adds a non-member session to the roster and marks it; spac
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
   await tick()
   stdin.write('\x02')
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // browse is showing the row
   expect(lastFrame()).not.toContain('[roster]')
   stdin.write('\x01')
   await waitFor(() => deps.persistRoster.mock.calls.length > 0 && lastFrame().includes('[roster]'))
@@ -1014,8 +1018,8 @@ test('esc in browse returns to main', async () => {
   stdin.write('\x02')
   await waitFor(() => lastFrame().includes('^a add/remove'))
   stdin.write('\x1B')
-  await tick()
-  expect(lastFrame()).not.toContain('^a add/remove')
+  await waitFor(() => !lastFrame().includes('^a add/remove'))
+  expect(lastFrame()).toContain('^b browse') // the main footer, not a blank frame
 })
 
 // --- peek pane (v3 Task 4) ---
@@ -1185,6 +1189,7 @@ test('stale peek response is discarded once a second session is selected (latest
 
   gate2.resolve([{ info: { role: 'assistant' }, parts: [{ type: 'text', text: 'fresh second' }] }])
   await waitFor(() => lastFrame().includes('fresh second'))
+  expect(lastFrame()).not.toContain('STALE first') // and still not, now that peek has rendered since
 })
 
 test('peek fetch failure shows a peek-local error line and the app stays responsive', async () => {
@@ -1245,14 +1250,12 @@ test('I1: a hanging delete does not resurrect a session removed from the roster 
   stdin.write('\x18')
   await tick()
   stdin.write('\x18') // delete session A — deleteSession hangs on gate.promise
-  await tick()
-  expect(lastFrame()).not.toContain('session A') // optimistically removed already
+  await waitFor(() => !lastFrame().includes('session A')) // optimistically removed already
 
   // while A's delete is still in flight, remove session C from the roster only (^a, no delete)
   expect(lastFrame()).toContain('session C')
   stdin.write('\x01')
-  await tick()
-  expect(lastFrame()).not.toContain('session C')
+  await waitFor(() => !lastFrame().includes('session C'))
   expect(deps.persistRoster).toHaveBeenLastCalledWith(expect.objectContaining({ sessions: [] }))
 
   gate.reject(new Error('down')) // A's delete fails → restore A only
@@ -1510,6 +1513,7 @@ test('I1: respondPermission failure + listPermissions omits the entry (already a
   await waitFor(() => lastFrame().includes('⚠ permission'))
   stdin.write('y')
   await waitFor(() => lastFrame().includes("couldn't answer permission"))
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > 1) // mount seed + the reconcile
   await tick()
   expect(lastFrame()).not.toContain('⚠ permission') // reconcile confirmed it's gone — no re-add
   stdin.write('\x1B[D') // back to roster — row must not be stuck "waiting"
@@ -1572,7 +1576,9 @@ test('M6: respondPermission failure for s1 lands after navigating to s2 — s2 s
   await tick()
   stdin.write('\x1B[B') // navigate to s2 before the reply settles
   await waitFor(() => lastFrame().includes('second'))
+  const seeds = deps.client.listPermissions.mock.calls.length
   gate.reject(new Error('down'))
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > seeds) // the failure ran its reconcile
   await tick()
   expect(lastFrame()).not.toContain("couldn't answer permission") // error belongs to s1, not s2
   stdin.write('\x1B[A') // back to s1 — error was raised before this nav, so it's still cleared (nav resets it)
@@ -3256,7 +3262,8 @@ test('a pure-opencode roster never streams another backend', async () => {
   const deps = makeDeps()
   const claude = fakeBackend('claude', {}, [claudeRow()])
   render(React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }))
-  await waitFor(() => deps.client.listSessions.mock.calls.length > 0)
+  // the stream connects at the end of seedAndStream, and the other-backend loop runs right after it
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
   await tick()
   expect(claude.events).not.toHaveBeenCalled()
   expect(claude.listSessions).not.toHaveBeenCalled()
@@ -3759,6 +3766,8 @@ test('#34: a member of an OFFLINE project is not treated as a ghost', async () =
   // And ^x with nothing selected must not have removed it behind the scenes either.
   stdin.write('\x18')
   await tick()
+  stdin.write('z') // keys are handled in order, so once this one shows the ^x has been too
+  await waitFor(() => lastFrame().includes('z█'))
   expect(deps.persistRoster).not.toHaveBeenCalled()
 })
 
@@ -3802,6 +3811,8 @@ test('#43: a member of an OFFLINE project is not ghosted by the no-project-recor
   await waitFor(() => !lastFrame().includes('dispatch into a deleted worktree'))
   stdin.write('\x18')
   await tick()
+  stdin.write('z') // keys are handled in order, so once this one shows the ^x has been too
+  await waitFor(() => lastFrame().includes('z█'))
   expect(deps.persistRoster).not.toHaveBeenCalled()
 })
 
@@ -3815,7 +3826,7 @@ test('#43: no member is ghosted before a successful listProjects round', async (
   }
   deps.client.listProjects = vi.fn(() => Promise.reject(new Error('down')))
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  await waitFor(() => deps.ensureServerImpl.mock.calls.length > 0) // the failed round reached its catch
   await tick()
   expect(lastFrame()).not.toContain('dispatch into a deleted worktree')
 })
