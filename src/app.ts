@@ -3,20 +3,19 @@ import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
 import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
-import { stripEscapeResidue } from './text-utils.ts'
-import { EMPTY, atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, withCaret, type TextCursor } from './text-cursor.ts'
+import { EMPTY, atEnd, type TextCursor } from './text-cursor.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND, NO_AGENT_CLI, resolveBackend } from './backends/index.ts'
 import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { hasSession, withMember, withoutMember, type Roster as RosterType } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows } from './ui/roster.ts'
-import { parseMouseEvents } from './ui/mouse.ts'
 import { DispatchInput, inputRows, INPUT_BOX_ROWS } from './ui/dispatch-input.ts'
 import { Header, headerRows } from './ui/header.ts'
 import { titleFor, setTitle, bell, newlyNotable, hookTransitions, runNotifyHook } from './ui/notify.ts'
 import { Help, helpLines, helpPage } from './ui/help.ts'
 import { Peek } from './ui/peek.ts'
+import { RenameInput } from './ui/rename-input.ts'
 import { usePeek } from './use-peek.ts'
 import { useDiscovery } from './use-discovery.ts'
 import { useDispatch } from './use-dispatch.ts'
@@ -1204,25 +1203,4 @@ export function App({
         )
       : null,
   )
-}
-
-function RenameInput({ initial, onSubmit, onCancel }: { initial: string; onSubmit: (title: string) => void; onCancel: () => void }): React.ReactElement {
-  const [edit, setEdit] = useState<TextCursor>(() => atEnd(initial))
-  const text = edit.text
-  useInput((input, key) => {
-    if (key.escape || (key.ctrl && input === 'c')) return onCancel()
-    if (key.return) return text.trim() && onSubmit(text.trim())
-    if (parseMouseEvents(input).length) return // mouse sequences are not text
-    const motion = motionOf(input, key) // #134: same caret and word motion as the prompt
-    if (motion) return setEdit((s) => move(s, motion))
-    if (key.backspace) setEdit(backspaceAt)
-    else if (key.delete) setEdit(deleteForwardAt)
-    else if (input && !key.ctrl && !key.meta) {
-      // #112.3: strip control bytes / escape residue the same way the dispatch input does, so a
-      // paste can't land C0 bytes verbatim in the title sent to the server.
-      const text = stripEscapeResidue(input.replace(/[\r\n]+/g, ' ').replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, ''))
-      if (text) setEdit((s) => insertAt(s, text))
-    }
-  })
-  return React.createElement(Text, null, `Rename: ${withCaret(edit)} (⏎ save · esc cancel)`)
 }
