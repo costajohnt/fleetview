@@ -49,7 +49,8 @@ use).
 ## Working on this codebase
 
 - Gate before any PR: `npx tsc --noEmit` and `npm test` must be clean, and UI-affecting changes
-  must regenerate `npm run preview` output and commit `docs/previews/` (CI diffs them).
+  must regenerate `npm run preview` and `npm run shots` output and commit `docs/previews/` and
+  `docs/images/*.html` (CI diffs both).
 - `CONTRIBUTING.md` has the full rules (erasable-TypeScript-only syntax, preview frames,
   add-a-backend guide); `SECURITY.md` has the threat model.
 - Never write a raw ESC byte (0x1B) into source files — escape sequences are spelled as

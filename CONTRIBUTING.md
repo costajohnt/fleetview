@@ -15,15 +15,18 @@ Prereqs: **Node 24+** and [opencode](https://opencode.ai) on your `PATH`.
     cd fleetview && npm install && npm link
     fleetview
 
-There is **no build step**. Node runs the `.ts` sources in `src/` directly by
-stripping types at load, and `./src/cli.ts` is the published entry point. `tsc`
-is only a type checker.
+Development has **no build step**: Node runs the `.ts` sources in `src/`
+directly by stripping types at load, and tests and `node src/cli.ts` use them as
+they are. The npm package ships JavaScript in `dist/` (the `fleetview` bin is
+`dist/preflight.js`), emitted by `npm run build`, which `npm install` runs once
+through `prepare`; re-run it after editing `src/` if you use the linked bin.
 
-## The gate — all three must be green before a PR is ready
+## The gate — all four must be green before a PR is ready
 
     npm run typecheck    # tsc --noEmit, zero errors
     npm test             # vitest, all green
     npm run preview      # regenerate docs/previews; CI diffs them
+    npm run shots        # regenerate docs/images/*.html; CI diffs them too
 
 **Every PR that changes anything visual must commit updated preview frames**
 (`npm run preview`, then commit `docs/previews/`). CI fails on an out-of-date
