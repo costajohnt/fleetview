@@ -145,7 +145,7 @@ type RunRmDeps = {
 type RunWatchDeps = {
   ensureServer: EnsureServer
   serverFile: string
-  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions'>
+  createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'sessionStatus'>
   connect?: typeof connectEvents
   log?(message: string): void
   error?(message: string): void
@@ -859,6 +859,7 @@ export async function runWatch(
   const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
   if (!found) return
   const { session, worktree, server } = found
+  const client = found.client as ReturnType<NonNullable<RunWatchDeps['createClient']>>
   const printed = new Map<string, number>()
   // Assigned synchronously inside the executor, so it is set by the time anything can resolve.
   let conn: ReturnType<typeof connect> | null = null
@@ -887,10 +888,22 @@ export async function runWatch(
             if (failure) error(`error: ${failure}`)
             return
           }
-          // Idle is how a turn ends. `watch` on an already-idle session therefore returns almost
-          // immediately, which is the honest answer: there is no output coming.
+          // Idle is how a turn ends.
           if (event.type === 'session.status' && event.properties.sessionID === session.id && event.properties.status?.type === 'idle') done()
           if (event.type === 'session.deleted' && event.properties.info?.id === session.id) done()
+        },
+        // M16: a session already idle (or gone idle before the stream connected) never sends an
+        // idle frame, so ask once the stream is up: absent from the status map or idle means there
+        // is no output coming, which is the honest answer. Asked after connecting, not before, so a
+        // turn ending in between is caught by one side or the other. An unreadable status map
+        // proves nothing, so the watch keeps waiting on the stream.
+        onOnline: () => {
+          void client.sessionStatus(worktree).then(
+            (statuses) => {
+              if (statuses && typeof statuses === 'object' && (statuses[session.id] ?? { type: 'idle' }).type === 'idle') done()
+            },
+            () => {},
+          )
         },
         // No reconnect: a dropped stream mid-watch should end the command rather than silently
         // resume minutes later having missed the output the caller was waiting for.
