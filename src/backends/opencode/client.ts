@@ -22,8 +22,9 @@ export type ModelSelection = string | { providerID: string; id: string } | null
 //
 // This matters more than it looks: the server has POST /session/:id/shell, which runs an arbitrary
 // shell command, and fleetview spawns it detached and unref'd so it outlives fleetview on a fixed port.
-// Unauthenticated, anything that can reach 127.0.0.1 as this user has code execution. Opt-in
-// because turning it on unilaterally would lock fleetview out of a server the user already had running.
+// Unauthenticated, anything that can reach 127.0.0.1 as this user has code execution, so
+// ensureServer (cli.ts) mints a password for every server fleetview spawns. A server fleetview
+// merely adopts keeps whatever auth it already has; locking that one would lock fleetview out of it.
 export function authHeader(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const password = env.OPENCODE_SERVER_PASSWORD
   if (!password) return undefined
