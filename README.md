@@ -23,8 +23,8 @@ that session, and `^z` detaches and leaves it running in the background.
 
 Requirements: Node 24 or newer, macOS or Linux, and at least one of the `opencode`, `claude` or
 `copilot` CLIs on `PATH`. opencode is optional but is the full experience: it is the default
-backend, and answering questions from the roster, `!` shell jobs, `/fork`, `/model` and worktree
-isolation all need it. No registration: on first run fleetview spawns one detached
+backend, and answering questions from the roster, `!` shell jobs, `/fork` and `/model`
+all need it. No registration: on first run fleetview spawns one detached
 `opencode serve`, and browse (`^b`) lists every directory you have ever run opencode in, grouped
 by project with live status. Without opencode the roster opens on claude and copilot alone,
 watching the directory you launched it in plus any directory already on the roster.

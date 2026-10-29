@@ -133,7 +133,7 @@ status, one stream per project. Attaching runs `opencode attach <url> -s <id> --
 
 fleetview needs at least one of the `opencode`, `claude` or `copilot` CLIs on `PATH`. opencode is
 needed for the opencode backend and everything only it can do (answering from the roster, `!`
-shell jobs, `/fork`, `/model`, worktree isolation, browse over opencode's projects); the roster
+shell jobs, `/fork`, `/model`, browse over opencode's projects); the roster
 opens without it on whichever of the other two is installed.
 
 fleetview is written in TypeScript that Node runs directly by stripping types at load — in a
