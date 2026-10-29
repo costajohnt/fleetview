@@ -25,7 +25,7 @@ import { createRequire } from 'node:module'
 import { App } from './app.ts'
 import { OpencodeClient } from './backends/opencode/client.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
-import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, isBackendName } from './backends/index.ts'
+import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, isBackendName, resolveBackend } from './backends/index.ts'
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer, OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
@@ -1497,7 +1497,7 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
   // opencode row, which carries nothing) falls back to opencode, so this can only ever add cases.
   // The cwd the pty host uses is the session's directory either way, which is what `claude --resume`
   // needs to find the session at all — copilot names it a second time with its own `-C`.
-  const backendFor = (target: AttachRequest): Backend => backends[target.backend ?? DEFAULT_BACKEND] ?? backends[DEFAULT_BACKEND]
+  const backendFor = (target: AttachRequest): Backend => resolveBackend(backends, target.backend)
   // A process-backed child gets the scoped env the dispatch path already uses: it must not inherit
   // the opencode server password (an attached `claude --resume` runs the same attacker-influenced
   // history with the same tool access as a dispatch) nor this process's Claude Code session

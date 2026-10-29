@@ -2,6 +2,7 @@
 // these don't collide with app.test.ts's timing rework.
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
+import { waitFor } from './helpers.ts'
 import { render as inkRender } from 'ink-testing-library'
 import { App, foldCompleted, SHELL_JOB_TTL_MS } from '../src/app.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
@@ -48,14 +49,6 @@ function makeDeps(): any {
   }
 }
 
-const waitFor = async (fn: () => any, timeoutMs = 15000) => {
-  const start = Date.now()
-  for (;;) {
-    if (fn()) return
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((r) => setTimeout(r, 10))
-  }
-}
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const typeText = async (stdin: any, text: string) => {
   for (const ch of text) {
