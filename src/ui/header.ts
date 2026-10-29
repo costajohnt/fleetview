@@ -56,12 +56,14 @@ export type HeaderProps = {
   model?: ModelRef | null
   cwd?: string | null
   columns?: number
+  // Replaces the model text, e.g. when opencode is not installed and /model does nothing.
+  note?: string
 }
 
-export function Header({ sessions = [], model, cwd, columns = 80 }: HeaderProps) {
+export function Header({ sessions = [], model, cwd, columns = 80, note }: HeaderProps) {
   const width = Math.max(20, columns)
   const fit = (text: string) => truncateGraphemes(text, width)
-  const modelText = model ? `${model.providerID}/${model.id}` : 'default model'
+  const modelText = note ?? (model ? `${model.providerID}/${model.id}` : 'default model')
   const place = cwd ? basename(cwd) || cwd : null
   const big = headerRows(columns) > 3
   return React.createElement(

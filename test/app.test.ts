@@ -131,7 +131,8 @@ test('server unreachable renders only the restart message', async () => {
   expect(deps.client.listProjects).not.toHaveBeenCalled()
 })
 
-// M6: a missing opencode CLI is not fixed by a restart, so it gets its own headline.
+// M6: a missing opencode CLI is not fixed by a restart, so it gets its own headline. cli.ts only
+// leaves the roster on this screen when claude and copilot are missing too (M7), so it names all three.
 test('opencode missing leads with the install message, not the restart one', async () => {
   const deps = makeDeps()
   deps.serverReady = false
@@ -139,7 +140,7 @@ test('opencode missing leads with the install message, not the restart one', asy
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
   await tick()
   const frame = lastFrame().replace(/\s+/g, ' ')
-  expect(frame).toContain('fleetview needs the opencode CLI. Install it from https://opencode.ai and run fleetview again.')
+  expect(frame).toContain('fleetview needs at least one of opencode, claude or copilot on your PATH. Install one (opencode from https://opencode.ai) and run fleetview again.')
   expect(frame).not.toContain('restart fleetview')
   expect(deps.client.listProjects).not.toHaveBeenCalled()
 })

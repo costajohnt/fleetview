@@ -7,7 +7,7 @@ import { stripEscapeResidue } from './text-utils.ts'
 import { EMPTY, atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, withCaret, type TextCursor } from './text-cursor.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
-import { DEFAULT_BACKEND, resolveBackend } from './backends/index.ts'
+import { DEFAULT_BACKEND, NO_AGENT_CLI, resolveBackend } from './backends/index.ts'
 import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { hasSession, type Roster as RosterType, type RosterSession as RosterMember } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
@@ -271,6 +271,11 @@ export function App({
     () => backends ?? { opencode: createOpencodeBackend({ server, client }) },
     [backends, server, client],
   )
+  // M7: a registry without opencode means the CLI is not installed (cli.ts builds it that way), so
+  // the roster runs on claude/copilot alone and every opencode-only surface says so instead of
+  // calling a server that does not exist.
+  const hasOpencode = Boolean(backendRegistry[DEFAULT_BACKEND])
+  const needsOpencode = (what: string) => flash(`${what} needs opencode, which is not installed`, 4000)
   // Which backend a session belongs to, read from the one durable copy: the `origin` the store
   // keeps per record (M10). A parallel `${directory}:${id}` → name map used to live here and had
   // to be manually kept in step with store.noteOrigin — a desync (the map satisfied its dedup
@@ -395,7 +400,7 @@ export function App({
   useEffect(() => { rosterRef.current = rosterState }, [rosterState])
 
   useEffect(() => {
-    if (!serverReady) return
+    if (!serverReady || !hasOpencode) return
     let cancelled = false
     Promise.resolve(client.listAgents?.() ?? [])
       .then((list) => !cancelled && setAgents((list ?? []).filter((a) => !INTERNAL_AGENTS.has(a.name))))
@@ -409,7 +414,7 @@ export function App({
       .then((r) => !cancelled && setProviders(r?.providers ?? []))
       .catch(() => {})
     return () => { cancelled = true }
-  }, [client, serverReady])
+  }, [client, serverReady, hasOpencode])
 
   useEffect(() => {
     const unsub = store.subscribe(rerender)
@@ -530,6 +535,9 @@ export function App({
   const vanishedProject = (worktree: string) =>
     projectsListed.current && !projectDirs.has(worktree) && !knownWorktrees.current.has(worktree)
   const ghostMembers = rosterState.sessions
+    // Without opencode its members are unreachable, not gone: ghosting them would invite a ^x that
+    // drops a membership the next run with opencode still wants.
+    .filter((m) => hasOpencode || (typeof m.backend === 'string' && m.backend !== DEFAULT_BACKEND))
     .filter((m) => !offlineProjects.has(m.worktree) && (seededProjectKeys.current.has(m.worktree) || vanishedProject(m.worktree)))
     .filter((m) => !(byProjectSessions.get(m.worktree) ?? []).some((s) => s.id === m.id))
     .map((m): RosterSession => ({
@@ -584,7 +592,9 @@ export function App({
     commands: commands.map((c) => c.name),
     // Every backend fleetview holds an adapter for, not just the active ones: `@claude` is how a
     // backend BECOMES active, so gating the token on activity would make it unreachable.
-    backends: Object.keys(backendRegistry),
+    // opencode stays a token when it is not installed, so `@opencode …` flashes why instead of
+    // sending the literal text to whatever the default backend is (M7).
+    backends: hasOpencode ? Object.keys(backendRegistry) : [DEFAULT_BACKEND, ...Object.keys(backendRegistry)],
   }
   const parsed = parseInput(input, vocab)
   const suggestions = suggestFor(input, vocab)
@@ -972,6 +982,7 @@ export function App({
   // peek's saved-reply queue each tick.
   useDiscovery({
     serverReady,
+    cwd,
     client,
     store,
     seen,
@@ -1077,6 +1088,10 @@ export function App({
       }
       // "/fork copies the conversation to a new background session" — here it acts on the
       // selected row, and an argument becomes the fork's first new prompt.
+      if (!hasOpencode) {
+        setInput('')
+        return needsOpencode(`/${parsed.command}`)
+      }
       if (parsed.command === 'fork') {
         if (!current) return flash('select a session to fork')
         // Capability gate, driven only by the backend's own flags: claude has --fork-session but the
@@ -1129,6 +1144,9 @@ export function App({
       setDispatchModel({ providerID, id: modelID })
       setInput('')
       return flash(`dispatch model: ${parsed.args}`)
+    }
+    if (!hasOpencode && (parsed.kind === 'shell' || parsed.backend === DEFAULT_BACKEND)) {
+      return needsOpencode(parsed.kind === 'shell' ? '! shell dispatch' : '@opencode')
     }
     if (parsed.kind === 'shell') return void dispatch(parsed.command ?? '', { thenAttach, shell: true })
     // A `/command` fleetview doesn't run itself is sent as the session's first prompt, which is what
@@ -1599,11 +1617,12 @@ export function App({
 
   if (!serverReady) {
     // A missing opencode CLI is not something a restart fixes, so it is the headline on its own.
+    // cli.ts only gets here with OPENCODE_MISSING when claude and copilot are missing too (M7).
     if (serverFailReason === OPENCODE_MISSING) {
       return React.createElement(
         Box,
         { flexDirection: 'column' },
-        React.createElement(Text, null, OPENCODE_MISSING),
+        React.createElement(Text, null, NO_AGENT_CLI),
         React.createElement(Text, { dimColor: true }, '(esc to quit)'),
       )
     }
@@ -1661,7 +1680,7 @@ export function App({
     { flexDirection: 'column', height: termRows },
     // allMembers, not the rendered rows: the header describes the fleet, so a filter that hides a
     // blocked session must not make the summary contradict the roster directly under it.
-    React.createElement(Header, { sessions: allMembers, model: dispatchModel, cwd, columns }),
+    React.createElement(Header, { sessions: allMembers, model: dispatchModel, cwd, columns, note: hasOpencode ? undefined : `${initialBackend} · opencode not installed` }),
     // One line above the list right after a detach, agent-view verbatim; the just-left session's
     // row is selected underneath it. Cleared by the next keypress or click.
     // wrap:'truncate' is load-bearing: chromeRows counts this as exactly one line, and a narrow
