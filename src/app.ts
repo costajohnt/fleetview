@@ -194,6 +194,7 @@ type AppProps = {
   isolate?: boolean
   projectPollMs?: number
   stopArmMs?: number
+  resumeQuietMs?: number
   fetchPullRequestsImpl?: (dir: string) => Promise<{ prs: PullRequest[]; reason: string | null }>
   branchOfImpl?: (dir: string) => string | null
   cwd?: string
@@ -240,6 +241,8 @@ export function App({
   // The two-press ^x window (stop, then delete). A prop so a test can let it lapse without racing
   // real time (M4).
   stopArmMs = 2000,
+  // The post-resume quiet window, a prop for the same reason: a test can widen it instead of racing 50ms of real time.
+  resumeQuietMs = RESUME_QUIET_MS,
   fetchPullRequestsImpl = fetchPullRequests,
   branchOfImpl = branchOf,
   cwd = process.cwd(),
@@ -1387,7 +1390,7 @@ export function App({
       // #59: except inside the post-resume quiet window. Dismissing costs nothing when the user
       // typed it, but a stray byte left over from the child's terminal destroys the Esc-undo with
       // no way back — unlike clearing the input, this one is not recoverable.
-      if (backgrounded && Date.now() - resumedAt.current >= RESUME_QUIET_MS) setBackgrounded(null)
+      if (backgrounded && Date.now() - resumedAt.current >= resumeQuietMs) setBackgrounded(null)
       const mouse = parseMouseEvents(ch)
       if (mouse.length) {
         for (const ev of mouse) handleMouse(ev)
@@ -1532,7 +1535,7 @@ export function App({
         // `setInput('')` below and wiped the prompt that was just edited, after editPrompt's
         // `finally` had already removed the temp file. Ignoring a genuinely-typed Escape within
         // 50ms of a resume costs nothing against a human reaction window.
-        if (Date.now() - resumedAt.current < RESUME_QUIET_MS) return
+        if (Date.now() - resumedAt.current < resumeQuietMs) return
         if (!empty) return setInput('')
         if (view === 'browse') {
           setView('main')

@@ -3965,14 +3965,28 @@ test('#60: → and ^X in one stdin read attach the row without aborting it', asy
 // post-resume quiet window — a fragment of the child's terminal-query answers, a mouse report —
 // destroyed the Esc-undo. Unlike clearing the input, that one is not recoverable.
 //
-// RESUME_QUIET_MS is 50ms of real time and Ink's re-render after a detach occasionally takes
-// longer than that on a loaded machine, so the attach/detach is retried until one press really
-// lands inside the window. Retrying can only make the assertion easier to fail, never to pass.
+// The window is widened through the resumeQuietMs prop: at the production 50ms, Ink's re-render
+// after a detach regularly outlasted it on a loaded machine and every attempt missed. The press
+// storm only runs in the first half of the window, so it cannot straddle the edge; a resume that
+// renders too late for that is retried. Retrying can only make the assertion easier to fail.
+const QUIET_MS = 1000
+const pressInsideWindow = async (stdin: any, key: string, resumed: number) => {
+  let sent = 0
+  // A storm of presses, not one: Node can drop the first stdin chunk written after useInput
+  // re-activates (see pressUntil), and a dropped byte would pass on the unfixed code by never
+  // reaching the handler at all.
+  for (; sent < 10 && Date.now() - resumed < QUIET_MS / 2; sent++) {
+    stdin.write(key)
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  await tick() // let the handler see every press before the frame is read
+  return sent > 0
+}
 test('#59: a byte inside the post-resume quiet window does not dismiss the background notice', async () => {
   const deps = makeDeps()
   let detach: any
   const onAction = vi.fn((a: any) => (a.type === 'enter' ? new Promise((r) => { detach = r }) : undefined))
-  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction, resumeQuietMs: QUIET_MS }))
   await waitFor(() => lastFrame().includes('fix tests'))
   const gone = () => !lastFrame().includes('moved to the background')
   let landed = false
@@ -3984,21 +3998,14 @@ test('#59: a byte inside the post-resume quiet window does not dismiss the backg
     const resumed = Date.now()
     settle({ detached: true, sessionId: 's1', worktree: '/x/alpha' })
     await waitFor(() => !gone(), 3000, 1)
-    if (Date.now() - resumed >= 40) {
-      await pressUntil(stdin, '\x1B[B', gone) // missed the window — spend the notice and retry
+    if (!(await pressInsideWindow(stdin, '\x1B[B', resumed))) {
+      await pressUntil(stdin, '\x1B[B', gone, 5000) // missed the window — spend the notice and retry
       continue
-    }
-    // A storm of presses, not one: Node can drop the first stdin chunk written after a detach
-    // re-activates useInput (see pressUntil), and a dropped byte would pass this test on the
-    // unfixed code by never reaching the handler at all.
-    while (Date.now() - resumed < 45) {
-      stdin.write('\x1B[B')
-      await new Promise((r) => setTimeout(r, 2))
     }
     expect(lastFrame()).toContain('moved to the background')
     landed = true
     // Once the window has lapsed the notice dismisses exactly as it always did.
-    await pressUntil(stdin, '\x1B[B', gone)
+    await pressUntil(stdin, '\x1B[B', gone, 5000)
   }
   expect(landed, 'no press landed inside the quiet window').toBe(true)
 }, 30000)
@@ -4011,7 +4018,7 @@ test('#47: Escape inside the post-resume quiet window does not clear the just-ed
   const deps = makeDeps()
   let finishEdit: any
   const onAction = vi.fn((a: any) => (a.type === 'edit' ? new Promise((r) => { finishEdit = r }) : undefined))
-  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction, resumeQuietMs: QUIET_MS }))
   await waitFor(() => lastFrame().includes('fix tests'))
   const cleared = () => !lastFrame().includes('edited prompt text')
   let landed = false
@@ -4022,16 +4029,9 @@ test('#47: Escape inside the post-resume quiet window does not clear the just-ed
     const resumed = Date.now()
     settle('edited prompt text')
     await waitFor(() => !cleared(), 3000, 1)
-    if (Date.now() - resumed >= 40) {
-      await pressUntil(stdin, '\x1B', cleared) // missed the window — clear it and retry
+    if (!(await pressInsideWindow(stdin, '\x1B', resumed))) {
+      await pressUntil(stdin, '\x1B', cleared, 5000) // missed the window — clear it and retry
       continue
-    }
-    // A storm of presses, not one: Node can drop the first stdin chunk written after the editor
-    // hand-back re-activates useInput (see pressUntil), and a dropped byte would pass this test on
-    // the unfixed code by never reaching the handler at all.
-    while (Date.now() - resumed < 45) {
-      stdin.write('\x1B')
-      await new Promise((r) => setTimeout(r, 2))
     }
     expect(lastFrame()).toContain('edited prompt text')
     landed = true
@@ -4039,7 +4039,7 @@ test('#47: Escape inside the post-resume quiet window does not clear the just-ed
   expect(landed, 'no press landed inside the quiet window').toBe(true)
   expect(onAction).not.toHaveBeenCalledWith({ type: 'quit' })
   // And after the window a typed Escape clears it, so the guard is a delay and not a new dead key.
-  await pressUntil(stdin, '\x1B', cleared)
+  await pressUntil(stdin, '\x1B', cleared, 5000)
 }, 30000)
 
 // --- #44: a `fleetview bg` dispatch from another terminal must reach an already-running TUI ---
