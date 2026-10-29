@@ -16,7 +16,7 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview watch <id>         stream its output until it goes idle
     fleetview status             one counts line; exits 0 when something awaits input
     fleetview stop <id>          stop it, leave it in the list
-    fleetview rm <id>            delete it (keeps a worktree holding commits)
+    fleetview rm <id>            delete it (keeps a worktree with uncommitted or unpushed work)
     fleetview bg "<prompt>"      dispatch a background session from the shell
                                  (--name, --agent, --model provider/model, --exec for a ! job)
     fleetview server status      the opencode server: host, port, pid, health

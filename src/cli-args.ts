@@ -32,7 +32,7 @@ export const USAGE = `fleetview: one roster for opencode, claude and copilot ses
   fleetview watch <id>           stream a session's output until it finishes
   fleetview status               one line of counts; exits 0 when something awaits input
   fleetview stop <id>            stop a session, leaving it in the list
-  fleetview rm <id>              delete a session (keeps a worktree holding commits)
+  fleetview rm <id>              delete a session (keeps a worktree with uncommitted or unpushed work)
   fleetview bg "<prompt>"        dispatch a background session without opening the roster
     --cwd <path>                 dispatch in <path> instead of the current directory
     --name <title>               name the session instead of waiting for opencode's title

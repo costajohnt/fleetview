@@ -260,6 +260,8 @@ main working tree — set `FLEETVIEW_NO_ISOLATE=1`. Every dispatch then edits th
 (agent view's `bgIsolation: "none"`), and the dispatch line says `isolation off, it edits the
 checkout`. Isolation stays the default.
 
-`^x^x` takes the worktree with the session, uncommitted changes included, but refuses when the
-branch holds commits that exist nowhere else and says `kept the worktree — 2 unpushed commits`.
-opencode's own endpoint has no such check, so fleetview checks before calling it.
+`^x^x` and `fleetview rm` remove the session's worktree only when it has no uncommitted changes
+and its branch holds no commits that exist nowhere else. Otherwise the worktree is kept and the
+message says why, for example `kept the worktree — 2 unpushed commits`. `fleetview rm` also keeps
+a worktree another session still uses. opencode's own endpoint has no such check, so fleetview
+checks before calling it.
