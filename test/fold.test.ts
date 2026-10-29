@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { foldCompleted } from '../src/app.ts'
+import { foldCompleted } from '../src/state-groups.ts'
 
 const g = (key: string, ...statuses: any[]) => ({
   projectKey: `state:${key}`,
