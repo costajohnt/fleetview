@@ -1436,6 +1436,19 @@ test('a dropped question.asked is recovered by an additive seed — the row reac
   expect(store.pendingQuestionsFor('repoA', 's2').map((q: any) => q.id)).toEqual(['q2']) // added, never swept
 })
 
+// Before any live event has been applied the counter is still 0, so seedMark() is 0 — and a record
+// that has never had anything removed must not read as "cleared at 0 >= mark". It did: the
+// default stamp was 0, so the additive pass skipped every record until the first event anywhere
+// moved the counter, leaving a dropped permission unrecoverable on a quiet stream.
+test('an additive seed recovers a dropped request before any live event has been applied', () => {
+  const store: any = createStore()
+  seed(store)
+  store.seedPermissions('repoA', [{ id: 'p1', sessionID: 's1', permission: 'bash' }], store.seedMark(), { additive: true })
+  store.seedQuestions('repoA', [{ id: 'q1', sessionID: 's2', questions: [] }], store.seedMark(), { additive: true })
+  expect(store.get('repoA', 's1').status).toBe('waiting')
+  expect(store.get('repoA', 's2').status).toBe('waiting')
+})
+
 // The answered-race. The additive seed's snapshot is taken at `mark`; a reply that lands while the
 // GET is in flight removes the entry, and a naive re-add would resurrect a request the server has
 // already accepted an answer for — the peek UI would re-open a prompt the user just dismissed.

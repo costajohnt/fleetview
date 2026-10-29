@@ -351,10 +351,11 @@ test('main: ^a removes from roster only — session NOT deleted or stopped', asy
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
   await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('\x01')
-  await tick()
+  // the removal has landed before the absence of a delete/stop is worth anything
+  await waitFor(() => deps.persistRoster.mock.calls.some((c: any) => c[0].sessions.length === 0))
+  await waitFor(() => lastFrame().includes('a session is asking you something'))
   expect(deps.client.deleteSession).not.toHaveBeenCalled()
   expect(deps.client.abortSession).not.toHaveBeenCalled()
-  expect(deps.persistRoster).toHaveBeenCalledWith(expect.objectContaining({ sessions: [] }))
   expect(lastFrame()).toContain('a session is asking you something')
 })
 
@@ -876,6 +877,9 @@ test('membership filtering: non-member session is invisible in main, visible in 
   const deps = makeDeps()
   deps.roster = { groupBy: 'state', sessions: [] } // s1 not a member
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  // s1 is in the store once the stream connects (setSessions runs first); only then is its
+  // absence from main the filter at work rather than discovery not having finished
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
   await tick()
   expect(lastFrame()).not.toContain('fix tests')
   expect(lastFrame()).toContain('a session is asking you something')
@@ -889,7 +893,7 @@ test('space in browse adds a non-member session to the roster and marks it; spac
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
   await tick()
   stdin.write('\x02')
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // browse is showing the row
   expect(lastFrame()).not.toContain('[roster]')
   stdin.write('\x01')
   await waitFor(() => deps.persistRoster.mock.calls.length > 0 && lastFrame().includes('[roster]'))
@@ -1014,8 +1018,8 @@ test('esc in browse returns to main', async () => {
   stdin.write('\x02')
   await waitFor(() => lastFrame().includes('^a add/remove'))
   stdin.write('\x1B')
-  await tick()
-  expect(lastFrame()).not.toContain('^a add/remove')
+  await waitFor(() => !lastFrame().includes('^a add/remove'))
+  expect(lastFrame()).toContain('^b browse') // the main footer, not a blank frame
 })
 
 // --- peek pane (v3 Task 4) ---
@@ -1185,6 +1189,7 @@ test('stale peek response is discarded once a second session is selected (latest
 
   gate2.resolve([{ info: { role: 'assistant' }, parts: [{ type: 'text', text: 'fresh second' }] }])
   await waitFor(() => lastFrame().includes('fresh second'))
+  expect(lastFrame()).not.toContain('STALE first') // and still not, now that peek has rendered since
 })
 
 test('peek fetch failure shows a peek-local error line and the app stays responsive', async () => {
@@ -1245,14 +1250,12 @@ test('I1: a hanging delete does not resurrect a session removed from the roster 
   stdin.write('\x18')
   await tick()
   stdin.write('\x18') // delete session A — deleteSession hangs on gate.promise
-  await tick()
-  expect(lastFrame()).not.toContain('session A') // optimistically removed already
+  await waitFor(() => !lastFrame().includes('session A')) // optimistically removed already
 
   // while A's delete is still in flight, remove session C from the roster only (^a, no delete)
   expect(lastFrame()).toContain('session C')
   stdin.write('\x01')
-  await tick()
-  expect(lastFrame()).not.toContain('session C')
+  await waitFor(() => !lastFrame().includes('session C'))
   expect(deps.persistRoster).toHaveBeenLastCalledWith(expect.objectContaining({ sessions: [] }))
 
   gate.reject(new Error('down')) // A's delete fails → restore A only
@@ -1510,6 +1513,7 @@ test('I1: respondPermission failure + listPermissions omits the entry (already a
   await waitFor(() => lastFrame().includes('⚠ permission'))
   stdin.write('y')
   await waitFor(() => lastFrame().includes("couldn't answer permission"))
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > 1) // mount seed + the reconcile
   await tick()
   expect(lastFrame()).not.toContain('⚠ permission') // reconcile confirmed it's gone — no re-add
   stdin.write('\x1B[D') // back to roster — row must not be stuck "waiting"
@@ -1572,7 +1576,9 @@ test('M6: respondPermission failure for s1 lands after navigating to s2 — s2 s
   await tick()
   stdin.write('\x1B[B') // navigate to s2 before the reply settles
   await waitFor(() => lastFrame().includes('second'))
+  const seeds = deps.client.listPermissions.mock.calls.length
   gate.reject(new Error('down'))
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > seeds) // the failure ran its reconcile
   await tick()
   expect(lastFrame()).not.toContain("couldn't answer permission") // error belongs to s1, not s2
   stdin.write('\x1B[A') // back to s1 — error was raised before this nav, so it's still cleared (nav resets it)
@@ -2449,15 +2455,18 @@ test('the periodic reseed surfaces a permission whose permission.asked frame was
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), projectPollMs: 60 }))
   await waitFor(() => lastFrame().includes('fix tests'))
   const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  // The server must agree s1 is running. The fixture's default GET /session/status is `{}`, which
+  // tells the 60ms poll s1 is idle — correctly overriding the older busy event — so '1 working'
+  // only rendered when a frame happened to land before the next poll, and the wait below timed
+  // out about half the time.
+  deps.client.sessionStatus = vi.fn(() => Promise.resolve({ s1: { type: 'busy' } }))
   onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
   await waitFor(() => lastFrame().includes('1 working'))
   // it has been pending server-side all along — only its event went missing
   deps.client.listPermissions = vi.fn(() => Promise.resolve([{ id: 'p1', sessionID: 's1', permission: 'bash' }]))
   // Recovery costs a whole poll pass, and the pass is a chained sequence of awaited client calls
-  // that chainSeed serialises per worktree. waitFor's 3s default is enough locally and not enough
-  // on a loaded CI runner with 40 test files competing for the event loop — this timed out once on
-  // macOS. The condition is still polled, only the ceiling moves.
-  await waitFor(() => lastFrame().includes('1 awaiting input'), 15000)
+  // that chainSeed serialises per worktree.
+  await waitFor(() => lastFrame().includes('1 awaiting input'))
 })
 
 test('the periodic reseed does not drop a pending request the server list omits', async () => {
@@ -3253,7 +3262,8 @@ test('a pure-opencode roster never streams another backend', async () => {
   const deps = makeDeps()
   const claude = fakeBackend('claude', {}, [claudeRow()])
   render(React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }))
-  await waitFor(() => deps.client.listSessions.mock.calls.length > 0)
+  // the stream connects at the end of seedAndStream, and the other-backend loop runs right after it
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
   await tick()
   expect(claude.events).not.toHaveBeenCalled()
   expect(claude.listSessions).not.toHaveBeenCalled()
@@ -3756,6 +3766,8 @@ test('#34: a member of an OFFLINE project is not treated as a ghost', async () =
   // And ^x with nothing selected must not have removed it behind the scenes either.
   stdin.write('\x18')
   await tick()
+  stdin.write('z') // keys are handled in order, so once this one shows the ^x has been too
+  await waitFor(() => lastFrame().includes('z█'))
   expect(deps.persistRoster).not.toHaveBeenCalled()
 })
 
@@ -3799,6 +3811,8 @@ test('#43: a member of an OFFLINE project is not ghosted by the no-project-recor
   await waitFor(() => !lastFrame().includes('dispatch into a deleted worktree'))
   stdin.write('\x18')
   await tick()
+  stdin.write('z') // keys are handled in order, so once this one shows the ^x has been too
+  await waitFor(() => lastFrame().includes('z█'))
   expect(deps.persistRoster).not.toHaveBeenCalled()
 })
 
@@ -3812,7 +3826,7 @@ test('#43: no member is ghosted before a successful listProjects round', async (
   }
   deps.client.listProjects = vi.fn(() => Promise.reject(new Error('down')))
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  await waitFor(() => deps.ensureServerImpl.mock.calls.length > 0) // the failed round reached its catch
   await tick()
   expect(lastFrame()).not.toContain('dispatch into a deleted worktree')
 })
@@ -3962,14 +3976,28 @@ test('#60: → and ^X in one stdin read attach the row without aborting it', asy
 // post-resume quiet window — a fragment of the child's terminal-query answers, a mouse report —
 // destroyed the Esc-undo. Unlike clearing the input, that one is not recoverable.
 //
-// RESUME_QUIET_MS is 50ms of real time and Ink's re-render after a detach occasionally takes
-// longer than that on a loaded machine, so the attach/detach is retried until one press really
-// lands inside the window. Retrying can only make the assertion easier to fail, never to pass.
+// The window is widened through the resumeQuietMs prop: at the production 50ms, Ink's re-render
+// after a detach regularly outlasted it on a loaded machine and every attempt missed. The press
+// storm only runs in the first half of the window, so it cannot straddle the edge; a resume that
+// renders too late for that is retried. Retrying can only make the assertion easier to fail.
+const QUIET_MS = 1000
+const pressInsideWindow = async (stdin: any, key: string, resumed: number) => {
+  let sent = 0
+  // A storm of presses, not one: Node can drop the first stdin chunk written after useInput
+  // re-activates (see pressUntil), and a dropped byte would pass on the unfixed code by never
+  // reaching the handler at all.
+  for (; sent < 10 && Date.now() - resumed < QUIET_MS / 2; sent++) {
+    stdin.write(key)
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  await tick() // let the handler see every press before the frame is read
+  return sent > 0
+}
 test('#59: a byte inside the post-resume quiet window does not dismiss the background notice', async () => {
   const deps = makeDeps()
   let detach: any
   const onAction = vi.fn((a: any) => (a.type === 'enter' ? new Promise((r) => { detach = r }) : undefined))
-  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction, resumeQuietMs: QUIET_MS }))
   await waitFor(() => lastFrame().includes('fix tests'))
   const gone = () => !lastFrame().includes('moved to the background')
   let landed = false
@@ -3981,21 +4009,14 @@ test('#59: a byte inside the post-resume quiet window does not dismiss the backg
     const resumed = Date.now()
     settle({ detached: true, sessionId: 's1', worktree: '/x/alpha' })
     await waitFor(() => !gone(), 3000, 1)
-    if (Date.now() - resumed >= 40) {
-      await pressUntil(stdin, '\x1B[B', gone) // missed the window — spend the notice and retry
+    if (!(await pressInsideWindow(stdin, '\x1B[B', resumed))) {
+      await pressUntil(stdin, '\x1B[B', gone, 5000) // missed the window — spend the notice and retry
       continue
-    }
-    // A storm of presses, not one: Node can drop the first stdin chunk written after a detach
-    // re-activates useInput (see pressUntil), and a dropped byte would pass this test on the
-    // unfixed code by never reaching the handler at all.
-    while (Date.now() - resumed < 45) {
-      stdin.write('\x1B[B')
-      await new Promise((r) => setTimeout(r, 2))
     }
     expect(lastFrame()).toContain('moved to the background')
     landed = true
     // Once the window has lapsed the notice dismisses exactly as it always did.
-    await pressUntil(stdin, '\x1B[B', gone)
+    await pressUntil(stdin, '\x1B[B', gone, 5000)
   }
   expect(landed, 'no press landed inside the quiet window').toBe(true)
 }, 30000)
@@ -4008,7 +4029,7 @@ test('#47: Escape inside the post-resume quiet window does not clear the just-ed
   const deps = makeDeps()
   let finishEdit: any
   const onAction = vi.fn((a: any) => (a.type === 'edit' ? new Promise((r) => { finishEdit = r }) : undefined))
-  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction, resumeQuietMs: QUIET_MS }))
   await waitFor(() => lastFrame().includes('fix tests'))
   const cleared = () => !lastFrame().includes('edited prompt text')
   let landed = false
@@ -4019,16 +4040,9 @@ test('#47: Escape inside the post-resume quiet window does not clear the just-ed
     const resumed = Date.now()
     settle('edited prompt text')
     await waitFor(() => !cleared(), 3000, 1)
-    if (Date.now() - resumed >= 40) {
-      await pressUntil(stdin, '\x1B', cleared) // missed the window — clear it and retry
+    if (!(await pressInsideWindow(stdin, '\x1B', resumed))) {
+      await pressUntil(stdin, '\x1B', cleared, 5000) // missed the window — clear it and retry
       continue
-    }
-    // A storm of presses, not one: Node can drop the first stdin chunk written after the editor
-    // hand-back re-activates useInput (see pressUntil), and a dropped byte would pass this test on
-    // the unfixed code by never reaching the handler at all.
-    while (Date.now() - resumed < 45) {
-      stdin.write('\x1B')
-      await new Promise((r) => setTimeout(r, 2))
     }
     expect(lastFrame()).toContain('edited prompt text')
     landed = true
@@ -4036,7 +4050,7 @@ test('#47: Escape inside the post-resume quiet window does not clear the just-ed
   expect(landed, 'no press landed inside the quiet window').toBe(true)
   expect(onAction).not.toHaveBeenCalledWith({ type: 'quit' })
   // And after the window a typed Escape clears it, so the guard is a delay and not a new dead key.
-  await pressUntil(stdin, '\x1B', cleared)
+  await pressUntil(stdin, '\x1B', cleared, 5000)
 }, 30000)
 
 // --- #44: a `fleetview bg` dispatch from another terminal must reach an already-running TUI ---
