@@ -132,6 +132,21 @@ test('the wheel moves the selection without launching anything', async () => {
   await waitFor(() => onAction.mock.calls.some((c) => c[0].type === 'enter' && c[0].sessionId === 's2'))
 })
 
+// Ink 8 drops mouse reports from useInput, so App reads them off stdin itself; a report split across
+// two reads (a slow link) must still land as one click.
+test('a click split across two stdin reads still lands as one click', async () => {
+  const deps = makeDeps()
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+
+  const headerRow = lastFrame().split('\n').findIndex((l: any) => l.trim() === 'completed') + 1
+  stdin.write('\x1b[<0;5')
+  await new Promise((r) => setTimeout(r, 10))
+  stdin.write(`;${headerRow}M`)
+  await waitFor(() => lastFrame().split('\n').some((l: any) => l.includes('completed (2)') && l.includes('▸ collapsed')))
+  expect(lastFrame()).toContain('describe a task') // the tail was not typed into the input
+})
+
 test('a click on the selected row attaches it', async () => {
   const deps = makeDeps()
   const onAction = vi.fn()

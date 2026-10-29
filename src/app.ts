@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
-import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
+import { Box, Text, useInput, useApp, useStdin, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { stripEscapeResidue } from './text-utils.ts'
 import { EMPTY, atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, withCaret, type TextCursor } from './text-cursor.ts'
@@ -1372,10 +1372,11 @@ export function App({
 
   useInput(
     (ch, key) => {
-      // #60: Ink 7 splits one stdin read into several key events and dispatches them all in one
-      // synchronous pass, but `isActive: false` only takes effect at the next render — so a `→`
-      // and a `^X` arriving in the SAME chunk both reach the roster and the ^X stops the row being
-      // attached to. The ref is synchronous, mirroring the same guard in `attach` above.
+      // #60: Ink (7 and 8: build/components/App.js handleReadable) splits one stdin read into
+      // several key events and dispatches them all in one synchronous pass, but `isActive: false`
+      // only takes effect at the next render — so a `→` and a `^X` arriving in the SAME chunk both
+      // reach the roster and the ^X stops the row being attached to. The ref is synchronous,
+      // mirroring the same guard in `attach` above.
       if (attachedRef.current) return
       if (mode !== 'roster') return
       // The "moved to the background" state lasts exactly until the next interaction — any key or
@@ -1591,6 +1592,35 @@ export function App({
     },
     { isActive: mode === 'roster' && serverReady && !attached },
   )
+
+  // Clicks and the wheel. Ink 8 drops SGR mouse reports before any useInput sees them (ink
+  // build/components/App.js handleReadable: a complete CSI sequence that parses to no key name is
+  // discarded, ink #1014), so this taps stdin for them and feeds each one back into Ink's input
+  // emitter, where the roster's useInput above handles it exactly as it did on Ink 7. Ink pulls
+  // input with stdin.read(), and every read() also emits 'data' with the same chunk, so the tap
+  // never competes with Ink for bytes. Going back through Ink, not calling handleMouse here, is
+  // load-bearing: useInput runs its handler inside the reconciler's discreteUpdates, so a click
+  // that attaches commits synchronously and Ink's raw-mode release lands before pty-host's
+  // deferred re-assert. Called from here, that release landed after it and left the attached
+  // child's tty cooked (the detach chord echoed as ^Z). `internal_eventEmitter` is the emitter
+  // useInput subscribes to (build/hooks/use-input.js); it is not in useStdin's public type.
+  // The tail carry rejoins a report a slow link split across two reads.
+  const { stdin, internal_eventEmitter: inkInput } = useStdin() as ReturnType<typeof useStdin> & { internal_eventEmitter: NodeJS.EventEmitter }
+  const mouseTail = useRef('')
+  useEffect(() => {
+    if (mode !== 'roster' || !serverReady || attached) return
+    mouseTail.current = ''
+    const tap = (chunk: string | Buffer) => {
+      const buf = mouseTail.current + String(chunk)
+      mouseTail.current = /\x1b(\[(<[\d;]*)?)?$/.exec(buf)?.[0] ?? ''
+      // Deferred out of the read() that emitted this chunk, so Ink finishes its own pass first.
+      for (const [report] of buf.matchAll(/\x1b\[<\d+;\d+;\d+[Mm]/g)) queueMicrotask(() => inkInput.emit('input', report))
+    }
+    stdin.on('data', tap)
+    return () => {
+      stdin.off('data', tap)
+    }
+  }, [stdin, inkInput, mode, serverReady, attached])
 
   useInput(
     (ch, key) => {
