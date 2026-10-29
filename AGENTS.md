@@ -6,8 +6,9 @@ version of the parts an agent is usually asked to do.
 
 ## Set up fleetview on this machine
 
-1. Prereqs: Node 24+ and [opencode](https://opencode.ai) on `PATH` (`node --version`,
-   `opencode --version`).
+1. Prereqs: Node 24+ and at least one of [opencode](https://opencode.ai), `claude` or `copilot` on
+   `PATH` (`node --version`, then `opencode --version` and so on). opencode is optional; the roster
+   opens on whichever of the others is installed.
 2. `npm install -g fleetview` — the published package is the normal install. Only work from this
    clone when the task is to change fleetview itself: `npm install && npm link` from the
    repository root (install runs `prepare`, which emits `dist/` — the linked `fleetview` bin runs

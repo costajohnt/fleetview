@@ -9,7 +9,8 @@ or the README.
 
 ## Setup
 
-Prereqs: **Node 24+** and [opencode](https://opencode.ai) on your `PATH`.
+Prereqs: **Node 24+**. The test suite needs no agent CLI; running fleetview itself needs at least one
+of [opencode](https://opencode.ai), `claude` or `copilot` on your `PATH`.
 
     git clone https://github.com/costajohnt/fleetview.git
     cd fleetview && npm install && npm link
