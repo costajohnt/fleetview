@@ -9,7 +9,7 @@ import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND, NO_AGENT_CLI, resolveBackend } from './backends/index.ts'
 import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
-import { hasSession, withMember, withoutMember, type Roster as RosterType, type RosterSession as RosterMember } from './roster-store.ts'
+import { hasSession, withMember, withoutMember, type Roster as RosterType } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
 import { DispatchInput, inputRows, INPUT_BOX_ROWS } from './ui/dispatch-input.ts'
@@ -22,6 +22,7 @@ import { useDiscovery } from './use-discovery.ts'
 import { useDispatch } from './use-dispatch.ts'
 import { useRosterKeys, RESUME_QUIET_MS } from './use-roster-keys.ts'
 import { useSlashCommands } from './use-slash-commands.ts'
+import { useShellJobExpiry } from './use-shell-job-expiry.ts'
 import { pickTarget, repoChoices, defaultProjectFromEnv } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
 import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety, mergeBackCommand, isLocalWorktree, removeLocalWorktree } from './worktree.ts'
@@ -132,31 +133,6 @@ export function foldCompleted<G extends FoldGroup>(
   return groups.map((g) =>
     g === completed ? Object.assign({}, g, { sessions: kept, hidden: g.sessions.length - kept.length }) : g,
   )
-}
-
-// "Cleanup ~5 minutes after completion" — agent view's shell jobs clean up after themselves, and
-// a finished `! cmd` row that sits forever is clutter the user has to ^x by hand.
-export const SHELL_JOB_TTL_MS = 5 * 60_000
-
-// Pure: the shell-job members whose sessions have settled long enough ago to clean up. A session
-// still missing from the store (not yet seeded) is left alone rather than guessed at.
-export function expiredShellJobs(
-  roster: { sessions: RosterMember[] },
-  // ReadonlyMap because this only ever asks: a mutable Map<string, RosterSession> is invariant in its
-  // value and would not fit a narrower declaration, while the read-only form takes any richer row.
-  sessionsById: ReadonlyMap<string, { status: string; updatedAt?: number }>,
-  now = Date.now(),
-) {
-  return roster.sessions.filter((m) => {
-    if (!m.shell) return false
-    const s = sessionsById.get(`${m.worktree}:${m.id}`)
-    if (!s || !FINISHED_STATUSES.has(s.status)) return false
-    // #112.2: a store row that returned no server time defaults updatedAt to 0, which would age out
-    // instantly. Fall back to when the member was added so a real 5-minute window always applies;
-    // with no timestamp at all, leave it alone rather than reap before `fleetview logs` can read it.
-    const settledAt = s.updatedAt || (typeof m.addedAt === 'number' ? m.addedAt : 0)
-    return settledAt > 0 && now - settledAt > SHELL_JOB_TTL_MS
-  })
 }
 
 // The host wiring, plus the impls the test corpus injects in place of the real thing. `onAction`
@@ -591,36 +567,9 @@ export function App({
   const promptOf = (s: RosterSession): string | undefined =>
     asString(rosterState.sessions.find((m) => m.worktree === s.projectKey && m.id === s.id)?.prompt)
 
-  // Shell jobs clean up after themselves ~5 minutes after finishing, agent view's rule — the
-  // session is deleted (a job's output is ephemeral by contract; `fleetview logs` reads it before
-  // the window closes) and the row goes with it. In-flight guard: the effect runs per render and
-  // a delete takes longer than one. Keyed to "not before" times: Infinity while a delete is in
-  // flight, and after a failure the next project poll (M13) — the rollback re-renders, which re-runs
-  // this effect, so clearing the key on failure retried a persistently failing delete in a tight
-  // loop of HTTP calls and roster rewrites.
-  const cleaningJobs = useRef(new Map<string, number>())
-  useEffect(() => {
-    const sessionsById = new Map([...byProjectSessions.values()].flat().map((s) => [`${s.projectKey}:${s.id}`, s]))
-    for (const m of expiredShellJobs(rosterState, sessionsById)) {
-      const key = `${m.worktree}:${m.id}`
-      if ((cleaningJobs.current.get(key) ?? 0) > Date.now()) continue
-      cleaningJobs.current.set(key, Infinity)
-      ;(async () => {
-        try {
-          updateRoster((prev) => withoutMember(prev, m.worktree, m.id))
-          await client.deleteSession(m.id, m.worktree)
-          store.apply(m.worktree, { type: 'session.deleted', properties: { info: { id: m.id } } })
-          cleaningJobs.current.delete(key)
-        } catch {
-          cleaningJobs.current.set(key, Date.now() + projectPollMs)
-          // Put it back: a failed delete must not orphan a running server-side session invisibly.
-          // The whole member, not a `{ shell: true }` stand-in — same reason as deleteGroup's
-          // rollback: a rebuilt member loses the row's pin, rank and prompt.
-          updateRoster((prev) => withMember(prev, m.worktree, m.id, m))
-        }
-      })()
-    }
-  })
+  // Shell jobs reap themselves ~5 minutes after finishing — see use-shell-job-expiry.ts.
+  // updateRoster is wrapped because it is declared further down this render.
+  useShellJobExpiry({ rosterState, byProjectSessions, client, store, projectPollMs, updateRoster: (u) => updateRoster(u) })
 
   const stateGroups = () => {
     // #34: ghosts join here rather than in `allMembers`, which is deliberately "every member's

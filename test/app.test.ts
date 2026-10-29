@@ -2966,7 +2966,7 @@ test('a waiting session with an open pull request stays under needs input — no
 })
 
 test('a finished shell job cleans itself up after the TTL; a fresh one stays', async () => {
-  const { expiredShellJobs, SHELL_JOB_TTL_MS } = await import('../src/app.ts')
+  const { expiredShellJobs, SHELL_JOB_TTL_MS } = await import('../src/use-shell-job-expiry.ts')
   const now = 1_000_000_000
   const roster = {
     groupBy: 'state',
@@ -2990,7 +2990,7 @@ test('a finished shell job cleans itself up after the TTL; a fresh one stays', a
 })
 
 test('#112.2: a finished shell job whose store row has updatedAt=0 falls back to addedAt, not insta-reaped', async () => {
-  const { expiredShellJobs, SHELL_JOB_TTL_MS } = await import('../src/app.ts')
+  const { expiredShellJobs, SHELL_JOB_TTL_MS } = await import('../src/use-shell-job-expiry.ts')
   const now = 1_000_000_000
   const roster = {
     groupBy: 'state',
