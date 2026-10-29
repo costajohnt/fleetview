@@ -202,12 +202,13 @@ test('#112.1: a flag the command ignores is an error, not silently dropped', () 
   expect(parseArgs(['ls', '--exec'])).toEqual({ error: '--exec is not valid for ls' })
   expect(parseArgs(['ls', '--model', 'a/b'])).toEqual({ error: '--model is not valid for ls' })
   expect(parseArgs(['attach', 'ses_1', '--name', 'x'])).toEqual({ error: '--name is not valid for attach' })
-  expect(parseArgs(['bg', 'ship', '--backend', 'claude'])).toEqual({ error: '--backend is not valid for bg' })
   expect(parseArgs(['--json', '--exec'])).toEqual({ error: '--exec is not valid for ls' })
 })
 
 test('#112.1: valid flag/command combos still parse', () => {
   expect(parseArgs(['bg', 'ship', '--exec'])).toMatchObject({ command: 'bg', exec: true })
+  // L5: passed through so runBg can say why it refuses a non-opencode backend (cli.test.ts pins that).
+  expect(parseArgs(['bg', 'ship', '--backend', 'claude'])).toMatchObject({ command: 'bg', backend: 'claude' })
   expect(parseArgs(['bg', 'ship', '--name', 'x', '--agent', 'plan', '--model', 'a/b'])).toMatchObject({ command: 'bg' })
   expect(parseArgs(['--model', 'a/b', '--agent', 'plan', '--backend', 'claude'])).toMatchObject({ command: 'ui', backend: 'claude' })
 })
