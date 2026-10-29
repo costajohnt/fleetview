@@ -22,7 +22,7 @@ import { useDiscovery } from './use-discovery.ts'
 import { useDispatch } from './use-dispatch.ts'
 import { pickTarget, repoChoices, defaultProjectFromEnv } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
-import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety, mergeBackCommand } from './worktree.ts'
+import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety, mergeBackCommand, isLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import { fetchPullRequests, branchOf, hasOpenPr } from './pull-requests.ts'
 import { theme } from './ui/theme.ts'
 import { asNumber, asString, isRecord } from './types.ts'
@@ -292,7 +292,11 @@ export function App({
   // The two verbs ^x drives, through the row's adapter — the only thing that knows whether stopping
   // means an HTTP abort or signalling a detached CLI's process group.
   const abortRow = (row: AttachTarget) => backendFor(row).abort(row.id, row.projectKey)
-  const deleteRow = (row: AttachTarget) => backendFor(row).delete(row.id, row.projectKey)
+  // A claude/copilot row in a worktree fleetview made for it (use-dispatch) can't be deleted, but
+  // the worktree can: ^x^x forgets the row and removes the worktree under removeWorktreeFor's
+  // rules. The CLI's own transcript is left alone, as it is everywhere else.
+  const forgetOnly = (row: AttachTarget) => !capabilitiesOf(row).delete && isLocalWorktree(row.projectKey)
+  const deleteRow = (row: AttachTarget) => (forgetOnly(row) ? Promise.resolve() : backendFor(row).delete(row.id, row.projectKey))
   // Selection is a session identity, not a row number: stopping a session moves it from `working`
   // to `completed` mid-keystroke, and an index would silently retarget the second Ctrl+X at
   // whatever slid into that slot. The index is derived from this on every render.
@@ -454,7 +458,7 @@ export function App({
   // Sticky, not rebuilt from scratch: a worktree deleted server-side drops out of its repository's
   // `sandboxes` while its stale project record lives on (mergeProjects never drops — that is what
   // keeps an OFFLINE project's rows), and a fresh-only map would promote that record to a repo (#22).
-  const parents = rememberSandboxes(knownSandboxes.current, projects)
+  const parents = rememberSandboxes(knownSandboxes.current, projects, rosterState.sessions)
   const repoOf = (projectKey: string) => displayProject(parents, projectKey)
 
   // Groups come from the projects list (not the store) so a freshly-discovered,
@@ -1183,7 +1187,9 @@ export function App({
     const safety = worktreeSafetyImpl(projectKey, repo)
     if (!safety.removable) return flash(`kept the worktree — ${safety.reason}`, 5000)
     try {
-      await client.removeWorktree?.(projectKey, repo)
+      // A worktree fleetview made itself (claude/copilot) has no server record: git removes it here.
+      if (repo && isLocalWorktree(projectKey)) removeLocalWorktree(projectKey, repo)
+      else await client.removeWorktree?.(projectKey, repo)
     } catch {
       // The session is already gone; a worktree left behind is untidy, not harmful, and `git
       // worktree list` still shows it. Saying so beats a silent failure.
@@ -1230,7 +1236,7 @@ export function App({
       }
       // A backend that can't delete is skipped rather than throwing into the catch below, which
       // would flag the whole project offline over a session that was never deletable to begin with.
-      if (!capabilitiesOf(row).delete) {
+      if (!capabilitiesOf(row).delete && !forgetOnly(row)) {
         flash(`${backendNameOf(row)} can't delete a session`, 4000)
         continue
       }
@@ -1269,7 +1275,7 @@ export function App({
       // A backend that can't delete (claude/copilot) must not reach deleteRow: it would throw, read
       // as a generic "delete failed", and — worst — flag the whole project offline, blanking the
       // opencode rows sharing the directory. The first ^x already stopped the run; that stays.
-      if (!capabilitiesOf(row).delete) return flash(`${backendNameOf(row)} can't delete a session`, 4000)
+      if (!capabilitiesOf(row).delete && !forgetOnly(row)) return flash(`${backendNameOf(row)} can't delete a session`, 4000)
       const member = takeMember(row.projectKey, row.id) // see deleteGroup: the rollback restores this object, not a bare one
       updateRoster((prev) => withoutMember(prev, row.projectKey, row.id))
       try {

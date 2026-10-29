@@ -1,7 +1,7 @@
 import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
 import { DEFAULT_BACKEND } from './backends/index.ts'
-import { shouldIsolate, worktreeName, logNameCollision } from './worktree.ts'
+import { shouldIsolate, worktreeName, logNameCollision, createLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import type { AttachTarget, Backend, ListedSession, ModelPair, Project, StreamProject, Worktree } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
@@ -72,7 +72,7 @@ export function useDispatch({
   seededProjectKeys: { current: Set<string> }
   setOfflineProjects: (updater: (s: Set<string>) => Set<string>) => void
   streamProjectRef: { current: StreamProject | null }
-  activateBackendRef: { current: ((name: string) => Promise<void>) | null }
+  activateBackendRef: { current: ((name: string, directory?: string) => Promise<void>) | null }
   selectedSessionRef: { current: { projectKey: string; id: string } | null }
   setSelectedKey: (key: string | null) => void
   dirExistsImpl?: (dir: string) => boolean
@@ -96,10 +96,10 @@ export function useDispatch({
   }
 
   // A dispatch onto a process-backed CLI. Deliberately a separate path rather than a generalisation
-  // of the opencode one below: that path carries worktree isolation, shell jobs, a provisional title
-  // written between createSession and promptAsync, and a listSessions refresh — all of it opencode's
-  // own machinery, and all of it covered by a test corpus that must keep passing unchanged. What is
-  // shared is what is genuinely shared (target resolution, roster membership, the notice).
+  // of the opencode one below: that path carries shell jobs, a provisional title written between
+  // createSession and promptAsync, and opencode's own worktree endpoint — all of it covered by a
+  // test corpus that must keep passing unchanged. What is shared is what is genuinely shared
+  // (target resolution, the isolation rule, roster membership, the notice).
   const dispatchOnBackend = async (name: string, rawText: string, { thenAttach = false, agent, repo, shell = false }: DispatchOptions = {}) => {
     const backend = backendRegistry[name]
     if (!backend) return flash(`no ${name} backend`)
@@ -116,13 +116,27 @@ export function useDispatch({
     // Snapshot what was selected when the dispatch left: the auto-select below must not clobber an
     // arrow-key move the user made while the network call was in flight.
     const selAtDispatch = selectedSessionRef.current
+    // Isolation, by the same rule and the same FLEETVIEW_NO_ISOLATE switch as the opencode path, but
+    // made locally with `git worktree add`: these CLIs have nothing like /experimental/worktree.
+    // It matters most here, because copilot runs with --allow-all-tools. A failure falls back to
+    // the checkout and the notice says so, exactly as the opencode path does.
+    const wantIsolation = shouldIsolate(target, projects, parents)
+    let directory = target
+    let isolated = false
+    if (isolate && wantIsolation) {
+      try {
+        directory = createLocalWorktree(target, text)
+        isolated = true
+      } catch {}
+    }
     try {
       // Streaming starts before the dispatch, not after: the run can finish inside the poll interval
-      // and a subscription attached afterwards would miss the whole of it.
-      await activateBackendRef.current?.(name)
+      // and a subscription attached afterwards would miss the whole of it. A fresh worktree is in no
+      // project record, so it is named explicitly.
+      await activateBackendRef.current?.(name, directory)
       const ref = await backend.dispatch({
         prompt: text,
-        directory: target,
+        directory,
         agent: agent ?? initialAgent ?? undefined,
         // `--model` on these CLIs takes their own model name (`sonnet`, `gpt-5`), not opencode's
         // provider/model pair, so only the model half travels. A provider that means nothing to the
@@ -132,33 +146,42 @@ export function useDispatch({
       // Past this point the session exists and is running: anything that fails from here is a
       // refresh problem, not a dispatch problem — same rule as the opencode path below.
       dispatched = true
-      if (name !== DEFAULT_BACKEND) store.noteOrigin(target, ref.id, name)
-      store.setProvisionalTitle(target, ref.id, text)
+      if (name !== DEFAULT_BACKEND) store.noteOrigin(directory, ref.id, name)
+      store.setProvisionalTitle(directory, ref.id, text)
       // `backend` rides the membership so a restart knows which CLI this row belongs to before any
       // event has arrived — the same soft-migration shape as every other member field (absent means
-      // opencode).
-      addMember(target, ref.id, { prompt: text.slice(0, 2000), backend: name })
+      // opencode). `repo` does the same for a local worktree: opencode never lists it, so the
+      // membership is what groups its rows under the repository and lets ^x^x find the parent.
+      addMember(directory, ref.id, { prompt: text.slice(0, 2000), backend: name, ...(isolated ? { repo: target } : {}) })
       // Relist parity with the opencode path (H2): the same per-row origin-tagging the periodic
       // listing does (streamBackend), then the shared tail. A CLI that hasn't written its record
       // yet just lists without the new row, and the next poll catches up.
-      const list = backend.normaliseSessions(await backend.listSessions(target))
-      for (const s of list) store.noteOrigin(target, s.id, name)
-      noteDispatchedProject(target, list)
-      if (thenAttach) attach({ id: ref.id, projectKey: target, backend: name })
-      // No worktree isolation: creating one is opencode's `/experimental/worktree`, and there is no
-      // equivalent to ask claude or copilot for. Said out loud in the notice rather than left for the
-      // user to discover from a dirty checkout.
+      const list = backend.normaliseSessions(await backend.listSessions(directory))
+      for (const s of list) store.noteOrigin(directory, s.id, name)
+      noteDispatchedProject(directory, list)
+      if (thenAttach) attach({ id: ref.id, projectKey: directory, backend: name })
       else {
         // Land the selection on the row this dispatch just created, so Enter attaches to it —
         // unless the selection moved during the awaits above: the user's own navigation wins.
         if (sameSelection(selectedSessionRef.current, selAtDispatch)) {
-          selectedSessionRef.current = { projectKey: target, id: ref.id }
+          selectedSessionRef.current = { projectKey: directory, id: ref.id }
           setSelectedKey(null)
         }
-        flash(`dispatched into ${basename(target) || target} on ${name} — it edits the checkout`, 5000)
+        // Same wording as the opencode path: the repository the user chose, plus a warning only
+        // when a worktree was wanted and the row edits the checkout instead.
+        const why = isolated || !wantIsolation ? '' : isolate ? ' — not isolated, it edits the checkout' : ' — isolation off, it edits the checkout'
+        flash(`dispatched into ${basename(target) || target} on ${name}${why}`, why ? 5000 : undefined)
       }
     } catch {
       if (dispatched) return flash('session started, but the project list is stale')
+      // Nothing ran in the worktree, so it is empty by construction and goes without worktreeSafety:
+      // with no session in it, nothing in the UI could ever reach it again. Best-effort, like the
+      // opencode path's orphan cleanup: the dispatch has already failed either way.
+      if (isolated) {
+        try {
+          removeLocalWorktree(directory, target)
+        } catch {}
+      }
       setInput((current) => (current === '' ? typed : current))
       flash(`${name} dispatch failed`)
     }

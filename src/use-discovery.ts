@@ -329,9 +329,12 @@ export function useDiscovery({
     }
     // Published for the dispatch path: `@claude fix the tests` has to start streaming claude before
     // the row it just created can ever update.
-    activateBackendRef.current = async (name: string) => {
+    // `directory` is a worktree the dispatch just made locally: in no project record yet, or ever.
+    activateBackendRef.current = async (name: string, directory?: string) => {
       activeBackends.add(name)
-      await Promise.all([...knownWorktrees.current].map((w) => streamBackend(name, w)))
+      const dirs = new Set(knownWorktrees.current)
+      if (directory) dirs.add(directory)
+      await Promise.all([...dirs].map((w) => streamBackend(name, w)))
     }
 
     const refreshPullRequests = async (fresh: Project[]) => {
@@ -406,6 +409,16 @@ export function useDiscovery({
       // roster first makes that ordering unconditional.
       syncExternalMembers()
       try {
+        // A claude/copilot session in a worktree fleetview made itself (use-dispatch) lives in no
+        // project record, so the per-project loop below never reaches it: its membership, which
+        // carries `repo`, is what names the directory. Before listProjects, so the #43 ghost arm
+        // never judges one of these rows before its own listing has landed.
+        // Awaited only when there is one: a bare await would push listProjects past the mount tick.
+        const localWorktreeListings = rosterRef.current.sessions.flatMap((m) => {
+          const name = asString(m.backend)
+          return name && name !== DEFAULT_BACKEND && typeof m.repo === 'string' ? [streamBackend(name, m.worktree)] : []
+        })
+        if (localWorktreeListings.length) await Promise.all(localWorktreeListings)
         // Sandboxes included: a worktree is not reliably published as a project row of its own, and
         // a session fleetview never streams is a row that never updates.
         const fresh = allProjectDirectories(await client.listProjects())

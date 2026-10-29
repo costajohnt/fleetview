@@ -7,9 +7,13 @@
 // `opencode/<name>`, under ~/.local/share/opencode/worktree/<repo-hash>/<name>. What it does NOT do
 // is protect anything on the way out — DELETE removes a worktree holding uncommitted changes, and
 // its branch, without complaint (verified by losing a file to it). So the refusal rules live here.
+//
+// claude and copilot have no server to ask, so for them fleetview makes the worktree itself
+// (createLocalWorktree below), laid out the same way.
 import { execFileSync } from 'node:child_process'
-import { statSync, appendFileSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { statSync, appendFileSync, mkdirSync, readdirSync } from 'node:fs'
+import { basename, join, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { GIT_SAFE_ARGS } from './git-safe.ts'
 import { fleetviewDir } from './paths.ts'
@@ -34,8 +38,12 @@ export function sandboxParents(projects: Project[] = []) {
 // pointing at a directory that no longer exists. Once seen as a sandbox, always a sandbox; the
 // record then leaves browse, `@repo` and dispatch candidates by the same worktree filter that
 // already keeps live worktrees out of them.
-export function rememberSandboxes(sticky: Map<string, string>, projects: Project[] = []) {
+//
+// `members` covers the worktrees fleetview made itself for claude/copilot: opencode never lists
+// those, so the roster membership carries the parent (`repo`, written at dispatch) instead.
+export function rememberSandboxes(sticky: Map<string, string>, projects: Project[] = [], members: { worktree: string; repo?: unknown }[] = []) {
   for (const [dir, parent] of sandboxParents(projects)) sticky.set(dir, parent)
+  for (const m of members) if (typeof m.repo === 'string' && m.repo !== m.worktree) sticky.set(m.worktree, m.repo)
   return sticky
 }
 
@@ -149,6 +157,46 @@ export function logNameCollision(entry: { prompt: string; name: string; existing
 // pull-requests.ts uses belong here too; see git-safe.ts.
 const git = (dir: string, args: string[], run = execFileSync) =>
   run('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+
+// Worktrees for the process-backed CLIs, made locally because there is no server to ask. Same shape
+// as opencode's: <data>/fleetview/worktree/<repo>-<hash>/<name> on a branch `fleetview/<name>`, where
+// <data> is $XDG_DATA_HOME or ~/.local/share. The repo's basename keeps the directory readable; the
+// hash of its full path keeps two checkouts that share a basename apart.
+export const localWorktreeRoot = () => join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'fleetview', 'worktree')
+const LOCAL_BRANCH_PREFIX = 'fleetview/'
+export const isLocalWorktree = (dir: string, root = localWorktreeRoot()) => dir.startsWith(root + sep)
+
+// Throws when git does: the caller falls back to the checkout and says so, as the opencode path does.
+export function createLocalWorktree(repo: string, prompt: string, root = localWorktreeRoot(), run = execFileSync) {
+  const home = join(root, `${basename(repo) || 'repo'}-${createHash('sha256').update(repo).digest('hex').slice(0, 8)}`)
+  let dirs: string[] = []
+  try {
+    dirs = readdirSync(home)
+  } catch {} // first worktree for this repository: nothing taken yet
+  // A branch left behind by a kept-then-removed worktree takes its name too, or `-b` would fail on it.
+  // worktreeName keeps what follows the last `/`, so `fleetview/x` claims `x`.
+  const branches = git(repo, ['branch', '--list', `${LOCAL_BRANCH_PREFIX}*`, '--format=%(refname:short)'], run).split('\n').filter(Boolean)
+  const existing = [...dirs, ...branches]
+  const name = worktreeName(prompt, existing)
+  if (name !== worktreeName(prompt)) logNameCollision({ prompt, name, existing })
+  const dir = join(home, name)
+  git(repo, ['worktree', 'add', '-b', `${LOCAL_BRANCH_PREFIX}${name}`, dir, 'HEAD'], run)
+  return dir
+}
+
+// Callers check worktreeSafety first (or know the worktree is empty). Both steps still refuse on
+// their own: `worktree remove` without --force keeps a dirty or untracked tree, and `branch -d`
+// keeps a branch with unmerged commits. Only a `fleetview/` branch is deleted, so a branch the
+// session checked out by name is never touched. A branch -d refusal is not an error: the worktree
+// is gone and the branch, which createLocalWorktree steers around, still holds the commits.
+export function removeLocalWorktree(dir: string, repo: string, run = execFileSync) {
+  const branch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'], run)
+  git(repo, ['worktree', 'remove', dir], run)
+  if (!branch.startsWith(LOCAL_BRANCH_PREFIX)) return
+  try {
+    git(repo, ['branch', '-d', branch], run)
+  } catch {}
+}
 
 // What `^x^x` and `fleetview rm` are allowed to destroy. Agent view: "neither removes a worktree with
 // unpushed commits — it is kept with the session row", and `claude rm <id>` "keeps the worktree if
