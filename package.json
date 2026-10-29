@@ -10,7 +10,6 @@
     "shots": "node scripts/shots.ts",
     "demo": "vhs demo.tape",
     "build": "tsc -p tsconfig.build.json",
-    "prepack": "npm run build",
     "prepare": "npm run build"
   },
   "keywords": [
@@ -30,13 +29,23 @@
   "bin": {
     "fleetview": "dist/preflight.js"
   },
+  "homepage": "https://fleetview.jcosta.tech",
+  "bugs": {
+    "url": "https://github.com/costajohnt/fleetview/issues"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "engines": {
     "node": ">=24"
   },
   "dependencies": {
     "ink": "^7.1.1",
-    "node-pty": "^1.1.0",
     "react": "^19.2.7"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
