@@ -115,9 +115,6 @@ status, one stream per project. Attaching runs `opencode attach <url> -s <id> --
 - `~/.local/state/fleetview/logs/server.log` — the server's stdout/stderr
 - `~/.local/share/opencode/worktree/<repo>/<name>/` — one worktree per dispatched session
 
-`audits/` holds the review record — a parity audit against agent view plus independent security
-passes.
-
 ## Install notes
 
 fleetview is written in TypeScript that Node runs directly by stripping types at load — in a

@@ -64,8 +64,8 @@ fleetview password-protects it with HTTP basic auth automatically. ([how](docs/r
 fleetview is a deliberate port of Claude Code's agent view — the groups, the keys, the two-press
 `^x`, the overloaded input, the worktree isolation and the `--json` state words are all agent
 view's behaviour reproduced against opencode's server. Agent view is the specification; where
-fleetview can't match it, or chooses not to, [the docs say so](docs/guide.md). `docs/audits/`
-holds the review record: a parity audit plus independent security passes.
+fleetview can't match it, or chooses not to, [the docs say so](docs/guide.md). Older audits,
+plans and design notes are kept in [`docs/archive/`](docs/archive/).
 
 ## Keys
 
