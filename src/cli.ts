@@ -1107,15 +1107,16 @@ export async function listSessions(
 }
 
 export async function main() {
-  // Said once, at startup, because a broken native build is an install problem and the raw ESM
-  // import stack it used to surface as named nothing the user could act on.
-  if (!pty) console.error('node-pty failed to build during install — attach will be degraded. Reinstall with a C++ toolchain present (xcode-select --install on macOS).')
   const parsed = parseArgs(process.argv.slice(2))
   if ('error' in parsed) {
     console.error(`${parsed.error}\n\n${USAGE}`)
     process.exitCode = 1
     return
   }
+  // Said once, at roster startup (the only path that attaches through node-pty), because a broken
+  // native build is an install problem and the raw ESM import stack it used to surface as named
+  // nothing the user could act on. Not for --version/--json/status: their output stays clean.
+  if (!pty && parsed.command === 'ui') console.error('node-pty failed to load, so attach falls back to a plain terminal handover. macOS uses prebuilt binaries: reinstall fleetview. Linux builds it at install: reinstall with python3, make and a C++ compiler (g++) present.')
   // #107: relative `--cwd` becomes absolute here, between parsing and doing, so every consumer
   // below (listSessions, rosterLoop, runBg) compares the same absolute path.
   const args = resolveCwd(parsed)

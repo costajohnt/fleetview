@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs this whole workflow as a `needs:` gate, so a tag can't publish a commit that
+  # never passed it.
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -36,11 +39,29 @@ jobs:
       # The 0.2.0 breakage (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING) only shows up when the
       # package runs from under node_modules, so the artifact has to be packed, installed and run —
       # building dist or running it in-tree would have stayed green through it.
+      # --version alone can't see a broken node-pty: the CLI only warns and still exits 0, and with
+      # node-pty optional a failed native build no longer fails the install either. So the smoke also
+      # loads node-pty from the installed tree and runs a child under a real pty.
       - name: Pack-and-install smoke
         run: |
           npm pack
           npm i ./fleetview-*.tgz --prefix "$RUNNER_TEMP/smoke"
           "$RUNNER_TEMP/smoke/node_modules/.bin/fleetview" --version
+          cd "$RUNNER_TEMP/smoke"
+          node -e "import('node-pty').then((p) => new Promise((ok, fail) => p.spawn('/bin/sh', ['-c', 'exit 0'], {}).onExit(({ exitCode }) => (exitCode === 0 ? ok() : fail(new Error('pty child exited ' + exitCode)))))).then(() => console.log('node-pty ok'), (e) => { console.error(e); process.exit(1) })"
+      # npm 11 only warns about unreviewed install scripts today and says a future release will block
+      # them, which would cost Linux its node-pty build and fleetview its spawn-helper chmod. This is
+      # that future: strict mode with exactly the allow list the README tells users to pass. Global
+      # (-g) because --allow-scripts is an error on a project-scoped install. Users name the package
+      # (`fleetview`); a local tarball only matches by its file: spec.
+      - name: Strict allow-scripts install smoke
+        run: |
+          mkdir -p "$RUNNER_TEMP/strict/lib"
+          npm i -g ./fleetview-*.tgz --prefix "$RUNNER_TEMP/strict" --strict-allow-scripts \
+            --allow-scripts="node-pty,file:$(ls "$PWD"/fleetview-*.tgz)"
+          "$RUNNER_TEMP/strict/bin/fleetview" --version
+          cd "$RUNNER_TEMP/strict/lib/node_modules/fleetview"
+          node -e "import('node-pty').then((p) => new Promise((ok, fail) => p.spawn('/bin/sh', ['-c', 'exit 0'], {}).onExit(({ exitCode }) => (exitCode === 0 ? ok() : fail(new Error('pty child exited ' + exitCode)))))).then(() => console.log('node-pty ok'), (e) => { console.error(e); process.exit(1) })"
       # Visual regression: previews are committed; a UI change must update them in the same PR,
       # which makes the change reviewable as a before/after diff.
       - run: npm run preview && git diff --exit-code docs/previews

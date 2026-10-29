@@ -1,5 +1,6 @@
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
+import { tick, waitFor } from './helpers.ts'
 import { render as inkRender } from 'ink-testing-library'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -84,11 +85,6 @@ function makeDeps(): any {
   }
 }
 
-const tick = () => new Promise((r) => setTimeout(r, 20))
-
-// polls a condition instead of sleeping a fixed window — real-timer async chains in this
-// environment don't run at a predictable wall-clock pace, so fixed-window assertions on a
-// toggling state (banner shown, then cleared) are flaky.
 // Writes a key until the condition holds. Node 24 drops the first stdin chunk written after an
 // attach/detach cycle re-activates useInput (Node 26 delivers it; the same drop is what made the
 // click-after-detach test unpinnable) — a retry makes the tests version-proof without hiding a
@@ -101,19 +97,6 @@ const pressUntil = async (stdin: any, key: string, fn: () => any, timeoutMs = 30
     await new Promise((r) => setTimeout(r, 50))
     if (fn()) return
     if (Date.now() - start > timeoutMs) throw new Error(`pressUntil timed out for ${JSON.stringify(key)}`)
-  }
-}
-
-// 15s default, not 3s: the ceiling only bounds failure-detection latency — the condition is polled
-// and a passing wait returns as soon as it holds. 3s was repeatedly not enough on a loaded macOS CI
-// runner with 40 test files competing for the event loop (the reseed tests carried per-call 15000
-// overrides for exactly this; the default then flaked on their EARLIER waits instead).
-const waitFor = async (fn: () => any, timeoutMs = 15000, stepMs = 10) => {
-  const start = Date.now()
-  for (;;) {
-    if (fn()) return
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((r) => setTimeout(r, stepMs))
   }
 }
 
@@ -203,7 +186,7 @@ test('typing a prompt and pressing Enter dispatches createSession + promptAsync 
   stdin.write('do a thing')
   await tick()
   stdin.write('\r') // input holds text → dispatch, not attach
-  await tick()
+  await waitFor(() => deps.client.promptAsync.mock.calls.length > 0)
   // no title: opencode names it. agent/model ride along, unset unless @agent or /model said so.
   expect(deps.client.createSession).toHaveBeenCalledWith({ agent: undefined, model: null }, '/x/alpha')
   expect(deps.client.promptAsync).toHaveBeenCalledWith('s9', 'do a thing', '/x/alpha')
@@ -219,7 +202,7 @@ test('launch --model / --agent seed the dispatch model and default agent (#87)',
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
-  await tick()
+  await waitFor(() => deps.client.createSession.mock.calls.length > 0)
   expect(deps.client.createSession).toHaveBeenCalledWith({ agent: 'reviewer', model }, '/x/alpha')
 })
 
@@ -263,7 +246,7 @@ test('dispatch auto-adds the new session to the roster and persists before promp
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
-  await tick()
+  await waitFor(() => order.length >= 3)
   expect(order[0]).toBe('createSession')
   expect(order[1]).toContain('persistRoster')
   expect(order[1]).toContain('s9')
@@ -325,7 +308,7 @@ test('dispatch membership survives a promptAsync failure', async () => {
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
-  await tick()
+  await waitFor(() => deps.persistRoster.mock.calls.some((c: any) => c[0].sessions.some((s: any) => s.id === 's9')))
   expect(deps.persistRoster).toHaveBeenCalledWith(
     expect.objectContaining({
       sessions: expect.arrayContaining([expect.objectContaining({ worktree: '/x/alpha', id: 's9' })]),
@@ -342,7 +325,7 @@ test('browse: ^x twice deletes selected session (stop, then delete)', async () =
   stdin.write('\x18')
   await tick()
   stdin.write('\x18')
-  await tick()
+  await waitFor(() => deps.client.deleteSession.mock.calls.length > 0)
   expect(deps.client.deleteSession).toHaveBeenCalledWith('s1', '/x/alpha')
 })
 
@@ -355,7 +338,7 @@ test('browse: ^x twice also prunes the ghost roster membership + persists (F1)',
   stdin.write('\x18')
   await tick()
   stdin.write('\x18')
-  await tick()
+  await waitFor(() => deps.client.deleteSession.mock.calls.length > 0 && deps.persistRoster.mock.calls.some((c: any) => c[0].sessions.length === 0))
   expect(deps.client.deleteSession).toHaveBeenCalledWith('s1', '/x/alpha')
   expect(deps.persistRoster).toHaveBeenCalledWith(expect.objectContaining({ sessions: [] }))
 })
@@ -379,7 +362,7 @@ test('main: ^x twice removes from roster AND deletes the session', async () => {
   stdin.write('\x18')
   await tick()
   stdin.write('\x18')
-  await tick()
+  await waitFor(() => deps.client.deleteSession.mock.calls.length > 0 && deps.persistRoster.mock.calls.some((c: any) => c[0].sessions.length === 0))
   expect(deps.client.deleteSession).toHaveBeenCalledWith('s1', '/x/alpha')
   expect(deps.persistRoster).toHaveBeenCalledWith(expect.objectContaining({ sessions: [] }))
 })
@@ -406,7 +389,7 @@ test('main: a single ^x stops without deleting, and says a second press would de
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
   await tick()
   stdin.write('\x18')
-  await tick()
+  await waitFor(() => deps.client.abortSession.mock.calls.length > 0 && lastFrame().includes('^x again to delete'))
   expect(deps.client.abortSession).toHaveBeenCalledWith('s1', '/x/alpha')
   expect(deps.client.deleteSession).not.toHaveBeenCalled()
   expect(deps.persistRoster).not.toHaveBeenCalled()
@@ -448,7 +431,7 @@ test('r renames selected session', async () => {
   stdin.write(' v2')
   await tick()
   stdin.write('\r')
-  await tick()
+  await waitFor(() => deps.client.renameSession.mock.calls.length > 0)
   expect(deps.client.renameSession).toHaveBeenCalledWith('s1', 'fix tests v2', '/x/alpha')
 })
 
@@ -463,7 +446,7 @@ test('#112.3: rename input strips control bytes and escape residue from a paste'
   stdin.write(' v2\x00\x07\x1f') // NUL, BEL, and a C0 unit-separator byte from a paste
   await tick()
   stdin.write('\r')
-  await tick()
+  await waitFor(() => deps.client.renameSession.mock.calls.length > 0)
   expect(deps.client.renameSession).toHaveBeenCalledWith('s1', 'fix tests v2', '/x/alpha')
 })
 
@@ -480,7 +463,7 @@ test('M3: backspace in the rename input after an emoji removes the whole emoji, 
   stdin.write('\x7F') // backspace
   await tick()
   stdin.write('\r')
-  await tick()
+  await waitFor(() => deps.client.renameSession.mock.calls.length > 0)
   expect(deps.client.renameSession).toHaveBeenCalledWith('s1', 'fix tests', '/x/alpha')
   expect(deps.client.renameSession.mock.calls[0][1].isWellFormed()).toBe(true) // no lone surrogate left behind
 })
@@ -558,7 +541,7 @@ test('session.deleted SSE event prunes roster membership and persists (explicit 
   await waitFor(() => lastFrame().includes('fix tests'))
   const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
   onEvent('/x/alpha', { type: 'session.deleted', properties: { info: { id: 's1' } } })
-  await tick()
+  await waitFor(() => deps.persistRoster.mock.calls.some((c: any) => c[0].sessions.length === 0))
   expect(deps.persistRoster).toHaveBeenCalledWith(expect.objectContaining({ sessions: [] }))
 })
 
@@ -880,7 +863,7 @@ test('esc quits from the unreachable screen (F6)', async () => {
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
   await waitFor(() => lastFrame().includes('(esc to quit)'))
   stdin.write('\x1B')
-  await tick()
+  await waitFor(() => onAction.mock.calls.some((c: any) => c[0].type === 'quit'))
   expect(onAction).toHaveBeenCalledWith({ type: 'quit' })
 })
 
@@ -906,13 +889,13 @@ test('space in browse adds a non-member session to the roster and marks it; spac
   await tick()
   expect(lastFrame()).not.toContain('[roster]')
   stdin.write('\x01')
-  await tick()
+  await waitFor(() => deps.persistRoster.mock.calls.length > 0 && lastFrame().includes('[roster]'))
   expect(deps.persistRoster).toHaveBeenCalledWith(
     expect.objectContaining({ sessions: [expect.objectContaining({ worktree: '/x/alpha', id: 's1' })] }),
   )
   expect(lastFrame()).toContain('[roster]')
   stdin.write('\x01')
-  await tick()
+  await waitFor(() => deps.persistRoster.mock.lastCall?.[0].sessions.length === 0)
   expect(deps.persistRoster).toHaveBeenLastCalledWith(expect.objectContaining({ sessions: [] }))
   expect(lastFrame()).not.toContain('[roster]')
 })
@@ -923,11 +906,11 @@ test('s toggles main groupBy between state and project, persists, and switches r
   await tick()
   expect(lastFrame().split('\n').some((l) => l.trim().replace(/^\u276f /, '').startsWith('alpha'))).toBe(false) // state mode: no project header
   stdin.write('\x13')
-  await tick()
+  await waitFor(() => deps.persistRoster.mock.calls.some((c: any) => c[0].groupBy === 'project') && lastFrame().split('\n').some((l) => l.trim().replace(/^\u276f /, '').startsWith('alpha')))
   expect(deps.persistRoster).toHaveBeenCalledWith(expect.objectContaining({ groupBy: 'project' }))
   expect(lastFrame().split('\n').some((l) => l.trim().replace(/^\u276f /, '').startsWith('alpha'))).toBe(true) // project mode: v2-style project header
   stdin.write('\x13')
-  await tick()
+  await waitFor(() => deps.persistRoster.mock.lastCall?.[0].groupBy === 'state')
   expect(deps.persistRoster).toHaveBeenLastCalledWith(expect.objectContaining({ groupBy: 'state' }))
 })
 
@@ -1213,7 +1196,7 @@ test('peek fetch failure shows a peek-local error line and the app stays respons
   stdin.write('\x1B') // esc — app must still be responsive
   await waitFor(() => lastFrame().includes('^b browse')) // main footer only — distinct from peek's footer
   stdin.write('\x1B')
-  await tick()
+  await waitFor(() => onAction.mock.calls.some((c: any) => c[0].type === 'quit'))
   expect(onAction).toHaveBeenCalledWith({ type: 'quit' })
 })
 
@@ -1249,7 +1232,7 @@ test('I1: a hanging delete does not resurrect a session removed from the roster 
   const gate = deferred()
   deps.client.deleteSession = vi.fn(() => gate.promise)
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('session A') && lastFrame().includes('session C'))
   // both idle → sorted by updatedAt desc: session C (200) first, session A (100) second
   expect(lastFrame()).toContain('session A')
   expect(lastFrame()).toContain('session C')
@@ -1293,7 +1276,7 @@ test('mount seeds live status + pending permissions per project via sessionStatu
   deps.client.sessionStatus = vi.fn(() => Promise.resolve({ s1: { type: 'busy' } }))
   deps.client.listPermissions = vi.fn(() => Promise.resolve([{ id: 'p1', sessionID: 's1', permission: 'bash' }]))
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => deps.client.sessionStatus.mock.calls.length > 0 && deps.client.listPermissions.mock.calls.length > 0)
   expect(deps.client.sessionStatus).toHaveBeenCalledWith('/x/alpha')
   expect(deps.client.listPermissions).toHaveBeenCalledWith('/x/alpha')
   await waitFor(() => lastFrame().includes('needs input')) // seeded pending permission → waiting badge, pre-SSE
@@ -1305,7 +1288,7 @@ test('I1: mount seeds pending questions via listQuestions — seeded question sh
   const deps = makeDeps()
   deps.client.listQuestions = vi.fn(() => Promise.resolve([{ id: 'q1', sessionID: 's1', questions: [{ question: 'proceed?', header: 'proceed', options: [] }] }]))
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => deps.client.listQuestions.mock.calls.length > 0)
   expect(deps.client.listQuestions).toHaveBeenCalledWith('/x/alpha')
   await waitFor(() => lastFrame().includes('needs input'))
 })
@@ -1328,7 +1311,7 @@ test('I2: connectEvents connects immediately on the launch path, without waiting
   let resolveStatus: any
   deps.client.sessionStatus = vi.fn(() => new Promise((r) => { resolveStatus = r }))
   render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => deps.client.sessionStatus.mock.calls.length > 0 && deps.connectEventsImpl.mock.calls.length > 0)
   expect(deps.client.sessionStatus).toHaveBeenCalledWith('/x/alpha')
   expect(deps.connectEventsImpl).toHaveBeenCalled() // connects without waiting on the still-pending seed
   resolveStatus({}) // let the seed settle so it doesn't leak into later tests
@@ -1344,7 +1327,7 @@ test('I2: a permission applied live while the mount seed is still in flight surv
   const gate = deferred()
   deps.client.listPermissions = vi.fn(() => gate.promise)
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => deps.client.listPermissions.mock.calls.length > 0)
   expect(deps.client.listPermissions).toHaveBeenCalledWith('/x/alpha') // seed in flight, gated
   const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
   onEvent('/x/alpha', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
@@ -1361,7 +1344,7 @@ test('onOnline reconnect resync also reseeds session status + permissions', asyn
   deps.client.listPermissions.mockClear()
   const onOnline = deps.connectEventsImpl.mock.calls[0][1].onOnline
   onOnline('/x/alpha')
-  await tick()
+  await waitFor(() => deps.client.sessionStatus.mock.calls.length > 0 && deps.client.listPermissions.mock.calls.length > 0)
   expect(deps.client.sessionStatus).toHaveBeenCalledWith('/x/alpha')
   expect(deps.client.listPermissions).toHaveBeenCalledWith('/x/alpha')
 })
@@ -1402,7 +1385,7 @@ test('peek: pending permission banner renders (id fallback); y answers the oldes
   expect(lastFrame()).toContain('⚠ permission: bash') // real schema: labeled by `permission`, not id
   expect(lastFrame()).toContain('y allow · a always · d deny')
   stdin.write('y')
-  await tick()
+  await waitFor(() => deps.client.respondPermission.mock.calls.length > 0)
   expect(deps.client.respondPermission).toHaveBeenCalledWith('p1', 'once', '/x/alpha')
   expect(lastFrame()).not.toContain('⚠ permission') // optimistic clear, no need to wait on the network call
 })
@@ -1417,7 +1400,7 @@ test('peek: a answers "always"', async () => {
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('⚠ permission'))
   stdin.write('a')
-  await tick()
+  await waitFor(() => deps.client.respondPermission.mock.calls.length > 0)
   expect(deps.client.respondPermission).toHaveBeenCalledWith('p1', 'always', '/x/alpha')
 })
 
@@ -1431,7 +1414,7 @@ test('peek: d answers "reject"', async () => {
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('⚠ permission'))
   stdin.write('d')
-  await tick()
+  await waitFor(() => deps.client.respondPermission.mock.calls.length > 0)
   expect(deps.client.respondPermission).toHaveBeenCalledWith('p1', 'reject', '/x/alpha')
 })
 
@@ -1446,7 +1429,7 @@ test('peek: multiple pending permissions show "(+N more)" and answer oldest firs
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('(+1 more)'))
   stdin.write('y')
-  await tick()
+  await waitFor(() => deps.client.respondPermission.mock.calls.length > 0 && lastFrame().includes('⚠ permission: edit'))
   expect(deps.client.respondPermission).toHaveBeenCalledWith('p1', 'once', '/x/alpha')
   expect(lastFrame()).toContain('⚠ permission: edit') // still one left, but no "(+N more)" now
   expect(lastFrame()).not.toContain('more')
@@ -1484,7 +1467,7 @@ test('I1: respondPermission failure + listPermissions failure (server unreachabl
   await waitFor(() => lastFrame().includes("couldn't answer permission"))
   expect(lastFrame()).toContain('⚠ permission: bash') // rolled back, not left cleared
   stdin.write('y') // keys still active — retrying should behave exactly as the first attempt did
-  await tick()
+  await waitFor(() => deps.client.respondPermission.mock.calls.length >= 2)
   expect(deps.client.respondPermission).toHaveBeenCalledTimes(2)
 })
 
@@ -1527,7 +1510,7 @@ test('I1: respondPermission failure + listPermissions omits the entry (already a
   await tick()
   expect(lastFrame()).not.toContain('⚠ permission') // reconcile confirmed it's gone — no re-add
   stdin.write('\x1B[D') // back to roster — row must not be stuck "waiting"
-  await tick()
+  await waitFor(() => sectionBody(lastFrame(), 'needs input').includes('a session is asking you something'))
   expect(sectionBody(lastFrame(), 'needs input')).toContain('a session is asking you something') // not stuck under needs input
 })
 
@@ -1724,7 +1707,7 @@ test('main: ^x on a running session calls abortSession, roster membership unchan
   onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
   await tick()
   stdin.write('\x18')
-  await tick()
+  await waitFor(() => deps.client.abortSession.mock.calls.length > 0)
   expect(deps.client.abortSession).toHaveBeenCalledWith('s1', '/x/alpha')
   expect(deps.client.deleteSession).not.toHaveBeenCalled()
   expect(deps.persistRoster).not.toHaveBeenCalled() // no roster mutation on stop
@@ -1741,7 +1724,7 @@ test('I3: ^x on a waiting session calls abortSession', async () => {
   onEvent('/x/alpha', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
   await tick()
   stdin.write('\x18')
-  await tick()
+  await waitFor(() => deps.client.abortSession.mock.calls.length > 0)
   expect(deps.client.abortSession).toHaveBeenCalledWith('s1', '/x/alpha')
 })
 
@@ -1762,7 +1745,7 @@ test('M4: successful stop on a heuristic-waiting session clears the heuristic �
   onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
   await waitFor(() => sectionBody(lastFrame(), 'needs input').includes('fix tests')) // heuristic engaged, row under needs input
   stdin.write('\x18')
-  await tick()
+  await waitFor(() => deps.client.abortSession.mock.calls.length > 0)
   expect(deps.client.abortSession).toHaveBeenCalledWith('s1', '/x/alpha')
   // The notice reads stopped, not completed — the user stopped it, no result. It lands while the
   // row is still held in needs input by the pending second ^x (#15).

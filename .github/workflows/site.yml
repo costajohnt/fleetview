@@ -6,6 +6,7 @@ on:
     paths:
       - site/**
       - docs/images/**
+      - docs/demo.gif
       - .github/workflows/site.yml
   workflow_dispatch:
 

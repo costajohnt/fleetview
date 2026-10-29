@@ -1,12 +1,15 @@
 import { test, expect, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { mkdtempSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
+import { promisify } from 'node:util'
 import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
 import { OPENCODE_MISSING } from '../src/backends/opencode/server-manager.ts'
+
+const execFileAsync = promisify(execFile)
 
 // #57: the exit/signal path (restoreScreen, registered on `exit` and reached from SIGTERM/HUP/INT)
 // used to put back only the screen, leaving bracketed paste, focus reporting, DECCKM, modifyOtherKeys
@@ -1067,12 +1070,12 @@ test('a retry under the saved password that fails restores the user\'s password'
 // Driven through the real binary because the thing being asserted is main()'s wiring — runServer
 // takes no ensureServer, so no unit-level fake could prove main() doesn't hand it one.
 test('server status never spawns an opencode server, even when nothing is running', async () => {
+  // Hold the port for the whole test with a listener that is not an opencode server (it resets
+  // every connection), instead of closing a probe and hoping nothing else grabs the freed port
+  // before the CLI looks at it. The CLI runs async below so this process can keep resetting.
+  const squatter = createServer((socket) => socket.destroy())
   const port = await new Promise((resolve) => {
-    const probe = createServer()
-    probe.listen(0, '127.0.0.1', () => {
-      const { port: p } = probe.address() as any
-      probe.close(() => resolve(p))
-    })
+    squatter.listen(0, '127.0.0.1', () => resolve((squatter.address() as any).port))
   })
   const configDir = mkdtempSync(join(tmpdir(), 'fleetview-config-'))
   writeFileSync(join(configDir, 'server.json'), JSON.stringify({ host: '127.0.0.1', port, pid: null }))
@@ -1083,15 +1086,18 @@ test('server status never spawns an opencode server, even when nothing is runnin
   let status = 0
   let stdout = ''
   try {
-    stdout = execFileSync('node', [resolvePath(import.meta.dirname, '../src/cli.ts'), 'server', 'status'], {
-      env: { ...process.env, ROOST_CONFIG_DIR: configDir, PATH: `${binDir}:${process.env.PATH}` },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).toString()
+    stdout = (
+      await execFileAsync('node', [resolvePath(import.meta.dirname, '../src/cli.ts'), 'server', 'status'], {
+        env: { ...process.env, FLEETVIEW_CONFIG_DIR: configDir, PATH: `${binDir}:${process.env.PATH}` },
+      })
+    ).stdout
   } catch (e: any) {
-    status = e.status
-    stdout = e.stdout.toString()
+    status = e.code
+    stdout = e.stdout
+  } finally {
+    squatter.close()
   }
-  expect(status).toBe(1) // nothing listening on that port
+  expect(status).toBe(1) // no opencode server on that port
   expect(stdout).toContain(`port     ${port}`)
   expect(stdout).toContain('healthy  no')
   expect(existsSync(marker)).toBe(false)
@@ -1250,7 +1256,7 @@ test('--version prints the package.json version, not a hardcoded literal', () =>
   const pkg = JSON.parse(readFileSync(resolvePath(import.meta.dirname, '../package.json'), 'utf8'))
   const configDir = mkdtempSync(join(tmpdir(), 'fleetview-config-'))
   const out = execFileSync('node', [resolvePath(import.meta.dirname, '../src/cli.ts'), '--version'], {
-    env: { ...process.env, ROOST_CONFIG_DIR: configDir },
+    env: { ...process.env, FLEETVIEW_CONFIG_DIR: configDir },
   })
   expect(out.toString().trim()).toBe(pkg.version)
 })
@@ -1258,7 +1264,7 @@ test('--version prints the package.json version, not a hardcoded literal', () =>
 test('--help prints the usage and exits 0, without touching the roster', () => {
   const configDir = mkdtempSync(join(tmpdir(), 'fleetview-config-'))
   const out = execFileSync('node', [resolvePath(import.meta.dirname, '../src/cli.ts'), '--help'], {
-    env: { ...process.env, ROOST_CONFIG_DIR: configDir },
+    env: { ...process.env, FLEETVIEW_CONFIG_DIR: configDir },
   })
   expect(out.toString()).toContain('fleetview --cwd <path>')
   expect(out.toString()).toContain('fleetview attach <id>')
@@ -1272,7 +1278,7 @@ test('an unrecognised command explains itself and exits non-zero', () => {
   let stderr = ''
   try {
     execFileSync('node', [resolvePath(import.meta.dirname, '../src/cli.ts'), 'frobnicate'], {
-      env: { ...process.env, ROOST_CONFIG_DIR: configDir },
+      env: { ...process.env, FLEETVIEW_CONFIG_DIR: configDir },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
   } catch (e: any) {
@@ -1291,7 +1297,7 @@ test('runs through a symlink to the binary (npm link scenario)', () => {
   const link = join(linkDir, 'fleetview-link.ts')
   symlinkSync(resolvePath(import.meta.dirname, '../src/cli.ts'), link)
   const out = execFileSync('node', [link, '--help'], {
-    env: { ...process.env, ROOST_CONFIG_DIR: configDir },
+    env: { ...process.env, FLEETVIEW_CONFIG_DIR: configDir },
   })
   expect(out.toString()).toContain('fleetview: one roster for opencode, claude and copilot sessions')
 })

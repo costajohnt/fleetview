@@ -5,7 +5,16 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # The full CI workflow (both OSes, previews, pack-and-install smokes) has to pass on the exact
+  # commit being published. Without it a tag on an unchecked commit, or a workflow_dispatch from any
+  # branch, published after an ubuntu-only typecheck and test.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   publish:
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -22,6 +31,4 @@ jobs:
       # No npm upgrade: node 24 bundles npm >= 11.5.1, which is all trusted publishing needs, and
       # `npm@latest` is both unpinned supply chain and what broke the node-pty gyp build here.
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
       - run: npm publish --provenance --access public
