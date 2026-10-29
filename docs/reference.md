@@ -22,11 +22,22 @@ screen-by-screen tour see the [guide](guide.md).
     fleetview server status      the opencode server: host, port, pid, health
     fleetview server stop        stop that server (sessions stop streaming until restart)
 
-These shell commands (`ls`, `--json`, `attach`, `logs`, `add`, `answer`, `watch`, `status`, `stop`, `rm`, `bg`) act on opencode
-sessions only — they talk to the opencode server directly. The roster TUI is the only view that
-shows sessions from every backend (opencode, claude, copilot).
+`ls`, `--json`, `status`, `attach`, `logs`, `stop` and `rm` act on sessions from every backend
+(opencode, claude, copilot). opencode sessions come from its server. Claude Code and Copilot
+sessions are found the way the roster finds them, by asking each CLI's state directory about the
+directories fleetview already knows: opencode's projects, the roster's worktrees, and the current
+directory (or `--cwd`). A session in some other directory is not listed. If opencode is not
+installed or its server can't be reached, these commands print one line saying so on stderr and
+carry on with claude and copilot. `add`, `answer`, `watch` and `bg` act on opencode sessions only.
 
-Session ids can be abbreviated to any unique prefix. In the roster, `--cwd` does not filter rows:
+Two verbs can't do everything for claude and copilot sessions. `rm` refuses, because neither CLI
+can delete a stored session (`stop` ends a running one). `logs` refuses, because their transcripts
+are not readable over a wire, and points at `attach` instead. `stop` on one with nothing running
+says so rather than claiming it stopped something.
+
+Session ids can be abbreviated to any unique prefix, across all backends. A prefix that matches
+more than one session lists every candidate, with its backend when it isn't opencode, and acts on
+none of them. In the roster, `--cwd` does not filter rows:
 it stands in for the directory fleetview was started in, so a bare dispatch prefers that repository
 and `@repo` also offers the repositories directly inside it. With `ls` and `--json` it lists only
 sessions under the path. A relative path (`--cwd .`) is resolved against the current directory
@@ -46,7 +57,8 @@ looks. `watch` prints new output as it arrives and returns when the session goes
 States are reported in agent view's words — `working`, `blocked`, `failed`, `done`, `stopped`,
 `idle` — so a script written against `claude agents --json` reads fleetview's output too. `cwd`
 is the repository; when a session runs in its own worktree, that path comes along as `worktree`.
-`kind` is always `background`, and `waitingFor` (`permission prompt` or `input needed`) is present
+`kind` is always `background`, `backend` names the agent CLI the session belongs to (`opencode`,
+`claude` or `copilot`; fleetview's own field, not agent view's), and `waitingFor` (`permission prompt` or `input needed`) is present
 while a session is blocked on a reported request.
 
 Three of agent view's documented fields have no fleetview equivalent and are deliberately omitted

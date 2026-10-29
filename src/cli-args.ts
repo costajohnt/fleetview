@@ -18,9 +18,9 @@ export const USAGE = `fleetview: one roster for opencode, claude and copilot ses
   fleetview --cwd <path>         open it as if started in <path>: a bare dispatch
                                  prefers it and @repo offers the repos inside it
 
-  The shell commands below (ls/--json/attach/logs/add/answer/watch/status/
-  stop/rm/bg) act on opencode sessions only; the roster TUI shows sessions
-  from every backend.
+  ls/--json/status/attach/logs/stop/rm act on every backend's sessions, and
+  still work for claude and copilot when opencode is missing. add/answer/
+  watch/bg act on opencode sessions only.
 
   fleetview --json [--all]       print sessions as JSON instead of opening the roster
   fleetview ls [--all]           the same list, one line per session
