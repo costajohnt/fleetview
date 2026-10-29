@@ -255,6 +255,10 @@ export function sessionJson(session: ShellSession, { repo, worktree }: { repo?: 
     // interactive-session concept the way agent view has one — so this is a constant, present so a
     // script that switches on `kind` still finds the field agent view documents.
     kind: 'background',
+    // Which agent CLI the session belongs to. The store tags every non-opencode row with its origin
+    // and leaves opencode's untagged, so absent means opencode (the literal, not DEFAULT_BACKEND,
+    // to keep this module free of the backend registry).
+    backend: typeof session.origin === 'string' ? session.origin : 'opencode',
     state: STATE_WORDS[session.status] ?? session.status,
     // The repository, not the worktree it happens to run in — the same thing the rows say.
     cwd: repo ?? session.projectKey,

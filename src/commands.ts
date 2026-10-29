@@ -8,18 +8,20 @@ import { resolve } from 'node:path'
 import { OpencodeClient } from './backends/opencode/client.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
-import { loadServer } from './registry.ts'
+import { loadServer, childEnv } from './registry.ts'
+import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { loadSeen, defaultSeenFile } from './seen-store.ts'
 import { loadRoster, saveRoster, withRosterLock, defaultRosterFile } from './roster-store.ts'
 import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
+import type { SessionStore } from './session-store.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { summarise } from './ui/header.ts'
 import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories } from './worktree.ts'
 import { sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem } from './cli-args.ts'
 import { stripControl } from './text-utils.ts'
 import type { ParsedArgs } from './cli-args.ts'
-import { isListedSession } from './types.ts'
-import type { ListedSession, ServerRef } from './types.ts'
+import { isListedSession, isRecord } from './types.ts'
+import type { Backend, ListedSession, Project, ServerRef } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { RosterSession as RosterMember } from './roster-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
@@ -49,6 +51,11 @@ type RunBgDeps = {
   setExitCode?(code: number): void
 }
 
+// The process-backed adapters (claude, copilot), keyed by backend name. opencode is never in here:
+// it is reached through the server each command resolves, and its adapter is built from that
+// connection. Empty means "opencode only", which is what every caller that passes nothing gets.
+export type Backends = Record<string, Backend>
+
 type ListSessionsDeps = {
   createClient?(url: string): RosterClient
   loadSeenImpl?(file: string): SeenMap
@@ -56,6 +63,7 @@ type ListSessionsDeps = {
   seenFile?(): string
   loadRosterImpl?(file: string): { sessions: RosterMember[] }
   rosterFile?(): string
+  backends?: Backends
   log?(message: string): void
   error?(message: string): void
   setExitCode?(code: number): void
@@ -89,6 +97,7 @@ type RunRmDeps = {
   createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'deleteSession' | 'removeWorktree'>
   rosterFile?: string
   worktreeSafetyImpl?(dir: string, parentDir: string): { removable: boolean; reason: string | null }
+  backends?: Backends
   log?(message: string): void
   error?(message: string): void
   setExitCode?(code: number): void
@@ -110,6 +119,8 @@ type RunStatusDeps = {
   createClient?(url: string): Pick<RosterClient, 'listProjects' | 'listSessions' | 'sessionStatus' | 'listPermissions' | 'listQuestions'>
   loadSeenImpl?(file: string): SeenMap
   seenFile?(): string
+  backends?: Backends
+  rosterFile?: string
   log?(message: string): void
   error?(message: string): void
   setExitCode?(code: number): void
@@ -271,6 +282,7 @@ export async function runRm(
     createClient = (url: string) => new OpencodeClient(url),
     rosterFile = defaultRosterFile(),
     worktreeSafetyImpl = worktreeSafety,
+    backends = {},
     log = console.log,
     error = console.error,
     setExitCode = (code: number) => {
@@ -278,32 +290,50 @@ export async function runRm(
     },
   }: RunRmDeps,
 ) {
-  const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
+  const found = await findSession(args.id, { ensureServer, serverFile, createClient, backends, rosterFile, error, setExitCode })
   if (!found) return
-  const client = found.client as ReturnType<NonNullable<RunRmDeps['createClient']>>
-  await client.deleteSession(found.session.id, found.worktree)
-  // #105: the session is gone server-side, but the roster still lists it — the next TUI shows a
-  // ghost completed row for a session that no longer exists. Drop the member (matched by the same
-  // worktree+id key the store uses) from roster.json. A missing/corrupt roster is nothing to
-  // prune, so failures here are swallowed — the delete already succeeded.
-  try {
-    withRosterLock(rosterFile, () => {
-      const roster = loadRoster(rosterFile)
-      const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.session.id))
-      if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
-    })
-  } catch {}
+  // #105: the session is gone, but the roster still lists it — the next TUI shows a ghost completed
+  // row for a session that no longer exists. Drop the member (matched by the same worktree+id key
+  // the store uses) from roster.json. A missing/corrupt roster is nothing to prune, so failures
+  // here are swallowed — the delete already succeeded.
+  const prune = () => {
+    try {
+      withRosterLock(rosterFile, () => {
+        const roster = loadRoster(rosterFile)
+        const kept = roster.sessions.filter((m) => !(m.worktree === found.worktree && m.id === found.id))
+        if (kept.length !== roster.sessions.length) saveRoster(rosterFile, { ...roster, sessions: kept })
+      })
+    } catch {}
+  }
+  if (!found.opencode) {
+    // A process-backed session: no worktree of fleetview's making to clean up, and the adapter says
+    // whether its CLI can delete at all. Neither claude nor copilot can today, so this says so
+    // rather than calling a delete that only throws.
+    const adapter = backends[found.backend]
+    if (!adapter.capabilities.delete) {
+      error(`${found.backend} cannot delete a session (its CLI has no way to); fleetview stop ${found.id} ends a running one`)
+      setExitCode(1)
+      return
+    }
+    await adapter.delete(found.id, found.worktree)
+    prune()
+    log(`removed ${found.id}`)
+    return
+  }
+  const { client } = found.opencode
+  await client.deleteSession(found.id, found.worktree)
+  prune()
   // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
   // commits that exist nowhere else too (worktreeSafety). Reported either way, because a worktree
   // left behind is something the user should know about.
   if (found.worktree !== found.repo) {
-    const kept = (reason: string) => log(`removed ${found.session.id} — kept its worktree (${reason}): ${found.worktree}`)
+    const kept = (reason: string) => log(`removed ${found.id} — kept its worktree (${reason}): ${found.worktree}`)
     // The TUI's guard (app.ts removeWorktreeFor): only the last session in a worktree takes it with
     // it — a /fork sibling still runs there. Counted excluding the deleted id rather than trusting
     // the server to have dropped it already; a listing that fails is not proof of "nobody left".
     const listed = await client.listSessions(found.worktree).catch(() => null)
     if (!Array.isArray(listed)) return kept('could not list its sessions')
-    const others = listed.filter((s) => isListedSession(s) && s.id !== found.session.id).length
+    const others = listed.filter((s) => isListedSession(s) && s.id !== found.id).length
     if (others > 0) return kept(`${others} other session${others === 1 ? '' : 's'} still use${others === 1 ? 's' : ''} it`)
     const safety = worktreeSafetyImpl(found.worktree, found.repo)
     if (!safety.removable) return kept(safety.reason ?? 'not safe to remove')
@@ -313,10 +343,10 @@ export async function runRm(
     } catch (e) {
       return kept(`removal failed: ${stripControl(e instanceof Error ? e.message : String(e))}`)
     }
-    log(`removed ${found.session.id} and its worktree`)
+    log(`removed ${found.id} and its worktree`)
     return
   }
-  log(`removed ${found.session.id}`)
+  log(`removed ${found.id}`)
 }
 
 // `fleetview add <id>`: adopt an existing opencode session into the roster without opening the TUI.
@@ -524,146 +554,71 @@ export async function runWatch(
   ;(conn as ReturnType<typeof connect> | null)?.stop()
 }
 
-// `fleetview status`: the header's counts line, once, for a shell prompt or tmux status-right.
-// Exits 0 when something awaits input and 1 when nothing does — grep's convention, so
-// `fleetview status && notify-send "fleet needs you"` reads the way it looks.
-export async function runStatus(
-  args: ParsedArgs,
-  {
-    ensureServer,
-    serverFile,
-    createClient = (url: string) => new OpencodeClient(url),
-    loadSeenImpl = loadSeen,
-    seenFile = defaultSeenFile,
-    log = console.log,
-    error = console.error,
-    setExitCode = (code: number) => {
-      process.exitCode = code
-    },
-  }: RunStatusDeps,
-) {
+// --- Every backend: ls/--json, status, attach, logs, stop, rm ---
+
+type Say = (message: string) => void
+
+// opencode if it can be reached. Without any process-backed adapter its absence is the whole answer
+// (the error line and exit 1 these commands always gave). With them, opencode missing or down is one
+// stderr line and the command carries on with claude and copilot — stderr, so `--json` stays JSON.
+async function connectOpencode<C extends Pick<RosterClient, 'listProjects'>>({
+  ensureServer,
+  serverFile,
+  createClient,
+  backends,
+  error,
+  setExitCode,
+}: {
+  ensureServer: EnsureServer
+  serverFile: string
+  createClient: (url: string) => C
+  backends: Backends
+  error: Say
+  setExitCode: (code: number) => void
+}): Promise<{ opencode: { client: C; server: ServerRef; projects: Project[] } | null } | null> {
   const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
-  if (!r.ok) {
-    error(r.reason ?? 'opencode server unreachable')
+  if (r.ok) {
+    const client = createClient(`http://${r.server.host}:${r.server.port}`)
+    return { opencode: { client, server: r.server, projects: allProjectDirectories(await client.listProjects()) } }
+  }
+  const reason = r.reason ?? 'opencode server unreachable'
+  const others = Object.keys(backends)
+  if (others.length === 0) {
+    error(reason)
     setExitCode(1)
-    return
+    return null
   }
-  const client = createClient(`http://${r.server.host}:${r.server.port}`)
-  const projects = allProjectDirectories(await client.listProjects())
-  const parents = sandboxParents(projects)
-  const store = createStore()
-  const seen = loadSeenImpl(seenFile())
-  // The same three seeding rounds `ls` runs, and for the same reason: sessions alone have no
-  // status, and statuses alone have no pending permission/question — summarise counts both.
-  const lists = await Promise.all(projects.map((p) => client.listSessions(p.worktree).catch(() => null)))
-  lists.forEach((sessions, i) => sessions && store.setSessions(projects[i].worktree, sessions, seen))
-  const statuses = await Promise.all(projects.map((p) => client.sessionStatus(p.worktree).catch(() => null)))
-  statuses.forEach((s, i) => s && store.seedStatuses(projects[i].worktree, s))
-  const mark = store.seedMark()
-  await Promise.all(
-    projects.flatMap((p) => [
-      client.listPermissions(p.worktree).then((x) => store.seedPermissions(p.worktree, x, mark)).catch(() => {}),
-      client.listQuestions(p.worktree).then((x) => store.seedQuestions(p.worktree, x, mark)).catch(() => {}),
-    ]),
-  )
-  const sessions = []
-  for (const group of store.byProject()) {
-    const repo = displayProject(parents, group.projectKey)
-    if (!underCwd(repo, args.cwd) && !underCwd(group.projectKey, args.cwd)) continue
-    sessions.push(...group.sessions)
-  }
-  log(summarise(sessions))
-  setExitCode(sessions.some((s) => s.status === 'waiting' && Boolean(s.pendingRequest)) ? 0 : 1)
+  const why = r.reason === OPENCODE_MISSING ? 'is not installed' : `is unavailable (${reason})`
+  error(`fleetview: opencode ${why}; showing ${others.join(' and ')} sessions only`)
+  return { opencode: null }
 }
 
-// The shell commands. Each one needs a healthy server and a session id, so they share this: resolve
-// the server, find the session across every project, and hand both to the caller. Exits with a
-// message rather than a stack when the id doesn't match anything — or matches more than one thing —
-// because these are things people type by hand from a listing.
-async function withSession(id: string, ensureServer: EnsureServer, serverFile: string) {
-  // #33: said before anything is spawned or asked — a degenerate id is a usage mistake, and
-  // starting a server to tell the user their shell variable was unset helps nobody.
-  const problem = sessionIdProblem(id)
-  if (problem) {
-    console.error(`fleetview: ${problem}`)
-    process.exitCode = 1
-    return null
-  }
-  const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
-  if (!r.ok) {
-    console.error(r.reason ?? 'opencode server unreachable')
-    process.exitCode = 1
-    return null
-  }
-  const client = new OpencodeClient(`http://${r.server.host}:${r.server.port}`)
-  const projects = allProjectDirectories(await client.listProjects())
-  const parents = sandboxParents(projects)
-  const matches = await matchSessions(client, projects, id)
-  if (matches.length === 0) {
-    console.error(`no session matching ${id}`)
-    process.exitCode = 1
-    return null
-  }
-  if (matches.length > 1) {
-    // Listed, not resolved: the caller is about to attach to, stop, or delete one of these, and
-    // guessing which is exactly the failure this replaces.
-    console.error(
-      [`${id} matches ${matches.length} sessions — use more of the id:`, ...matches.map((m) => `  ${m.session.id}  ${m.worktree}`)].join('\n'),
-    )
-    process.exitCode = 1
-    return null
-  }
-  const { session, worktree } = matches[0]
-  return { client, server: r.server, session, worktree, repo: displayProject(parents, worktree) }
-}
+// Where claude and copilot are asked for sessions. Both adapters list per directory (Claude Code
+// files transcripts by cwd, copilot records the cwd of each session), so this is the set fleetview
+// already knows: opencode's project directories, the roster's worktrees, and the directory the
+// command runs in (or --cwd).
+// ponytail: no crawl of ~/.claude/projects or ~/.copilot/session-state, so a session in a directory
+// none of these name is not listed; add a crawl if that gap turns out to matter.
+const processDirs = (projects: Project[], rosterWorktrees: string[], cwd: string | undefined) => [
+  ...new Set([...projects.map((p) => p.worktree), ...rosterWorktrees, cwd ?? process.cwd()]),
+]
 
-// `fleetview --json` / `fleetview ls`: what is running, without opening anything.
-// Takes its collaborators the same way `runBg` does, so the listing can be driven end to end in a
-// test without a server — the seeding rounds below are where `ls` decides a session's state, and
-// asserting on the printed rows is the only way to know they all ran.
-export async function listSessions(
-  { all, json, cwd: rawCwd }: ParsedArgs,
-  ensureServer: EnsureServer,
-  serverFile: string,
-  {
-    createClient = (url: string) => new OpencodeClient(url),
-    loadSeenImpl = loadSeen,
-    seenFile = defaultSeenFile,
-    loadRosterImpl = loadRoster,
-    rosterFile = defaultRosterFile,
-    log = console.log,
-    error = console.error,
-    setExitCode = (code: number) => {
-      process.exitCode = code
-    },
-  }: ListSessionsDeps = {},
-) {
-  const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
-  if (!r.ok) {
-    error(r.reason ?? 'opencode server unreachable')
-    setExitCode(1)
-    return
-  }
-  // #107: resolve `--cwd` the same way the roster (resolve at cli.ts) and `bg` (realpathSync) do,
-  // so `ls`/`--json` scope against the absolute project paths the roster stores rather than a raw
-  // relative string that matches nothing. Resolved once, here, rather than at each underCwd call.
-  const cwd = rawCwd === undefined ? undefined : resolve(rawCwd)
-  const client = createClient(`http://${r.server.host}:${r.server.port}`)
-  const projects = allProjectDirectories(await client.listProjects())
-  const parents = sandboxParents(projects)
-  const store = createStore()
-  // Read once, not once per project: the file is the same on every iteration, so re-reading and
-  // re-parsing it per project bought nothing and cost a stat + parse per project.
-  const seen = loadSeenImpl(seenFile())
-  // #32: read-only, and once, for the same reason — the roster is what remembers the dispatch
-  // prompt behind a session the server never named (a `! cmd` job never takes a model turn, so
-  // opencode's rename never fires and the row reads "New session - <timestamp>"). Keyed the same
-  // `worktree:id` way the roster store keys members. A corrupt roster is not a reason to fail a
-  // listing — `ls` only wants nicer titles out of it.
-  let members = new Map<string, RosterMember>()
+const rosterWorktrees = (load: () => { sessions: RosterMember[] }) => {
   try {
-    members = new Map(loadRosterImpl(rosterFile()).sessions.map((m) => [`${m.worktree}:${m.id}`, m]))
-  } catch {}
+    return load().sessions.map((m) => m.worktree)
+  } catch {
+    return [] // a corrupt roster narrows discovery; it is not a reason to fail the command
+  }
+}
+
+// The three seeding rounds that give an opencode session its state: sessions, then statuses (which
+// only attach once the sessions are in), then pending permissions/questions.
+async function seedOpencode(
+  store: SessionStore,
+  client: Pick<RosterClient, 'listSessions' | 'sessionStatus' | 'listPermissions' | 'listQuestions'>,
+  projects: Project[],
+  seen: SeenMap,
+) {
   // Concurrent, because these are independent HTTP calls against one server and `ls` is something
   // people wait on — serially it took the sum of every project's round trip.
   const lists = await Promise.all(projects.map((p) => client.listSessions(p.worktree).catch(() => null)))
@@ -691,6 +646,89 @@ export async function listSessions(
         .catch(() => {}),
     ]),
   )
+}
+
+// The roster's discovery for a process-backed backend (use-discovery's streamBackend), run once per
+// directory: one pass of the adapter's events() for run state, then its listing for titles and
+// times. Both adapters read every session synchronously when subscribed (claude's poll loop does its
+// first pass before it first sleeps, copilot ticks once up front), so stopping straight away keeps
+// exactly that pass.
+async function seedProcessBackends(store: SessionStore, backends: Backends, dirs: string[], seen: SeenMap) {
+  await Promise.all(
+    Object.entries(backends).flatMap(([name, backend]) =>
+      dirs.map(async (dir) => {
+        try {
+          const normalise = backend.createNormaliser()
+          const sub = backend.events(
+            { directory: dir },
+            {
+              onEvent: (directory, event) => {
+                for (const e of normalise(event)) {
+                  const id = (e.properties as { sessionID?: string }).sessionID
+                  if (id) store.noteOrigin(directory, id, name)
+                  store.apply(directory, e)
+                }
+              },
+            },
+          )
+          sub.stop()
+          await sub.done
+          const list = backend.normaliseSessions(await backend.listSessions(dir))
+          for (const s of list) store.noteOrigin(dir, s.id, name)
+          store.setSessions(dir, list, seen)
+        } catch {
+          // A CLI that isn't installed, or a state directory that doesn't exist: no sessions here.
+        }
+      }),
+    ),
+  )
+}
+
+// `fleetview --json` / `fleetview ls`: what is running, without opening anything.
+// Takes its collaborators the same way `runBg` does, so the listing can be driven end to end in a
+// test without a server — the seeding rounds are where `ls` decides a session's state, and
+// asserting on the printed rows is the only way to know they all ran.
+export async function listSessions(
+  { all, json, cwd: rawCwd }: ParsedArgs,
+  ensureServer: EnsureServer,
+  serverFile: string,
+  {
+    createClient = (url: string) => new OpencodeClient(url),
+    loadSeenImpl = loadSeen,
+    seenFile = defaultSeenFile,
+    loadRosterImpl = loadRoster,
+    rosterFile = defaultRosterFile,
+    backends = {},
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: ListSessionsDeps = {},
+) {
+  const conn = await connectOpencode({ ensureServer, serverFile, createClient, backends, error, setExitCode })
+  if (!conn) return
+  // #107: resolve `--cwd` the same way the roster (resolve at cli.ts) and `bg` (realpathSync) do,
+  // so `ls`/`--json` scope against the absolute project paths the roster stores rather than a raw
+  // relative string that matches nothing. Resolved once, here, rather than at each underCwd call.
+  const cwd = rawCwd === undefined ? undefined : resolve(rawCwd)
+  const projects = conn.opencode?.projects ?? []
+  const parents = sandboxParents(projects)
+  const store = createStore()
+  // Read once, not once per project: the file is the same on every iteration, so re-reading and
+  // re-parsing it per project bought nothing and cost a stat + parse per project.
+  const seen = loadSeenImpl(seenFile())
+  // #32: read-only, and once, for the same reason — the roster is what remembers the dispatch
+  // prompt behind a session the server never named (a `! cmd` job never takes a model turn, so
+  // opencode's rename never fires and the row reads "New session - <timestamp>"). Keyed the same
+  // `worktree:id` way the roster store keys members. A corrupt roster is not a reason to fail a
+  // listing — `ls` only wants nicer titles out of it.
+  let members = new Map<string, RosterMember>()
+  try {
+    members = new Map(loadRosterImpl(rosterFile()).sessions.map((m) => [`${m.worktree}:${m.id}`, m]))
+  } catch {}
+  if (conn.opencode) await seedOpencode(store, conn.opencode.client, projects, seen)
+  await seedProcessBackends(store, backends, processDirs(projects, [...members.values()].map((m) => m.worktree), cwd), seen)
   const rows = []
   for (const group of store.byProject()) {
     const repo = displayProject(parents, group.projectKey)
@@ -710,28 +748,169 @@ export async function listSessions(
   for (const row of visible) log(formatRow(row))
 }
 
+// `fleetview status`: the header's counts line, once, for a shell prompt or tmux status-right.
+// Exits 0 when something awaits input and 1 when nothing does — grep's convention, so
+// `fleetview status && notify-send "fleet needs you"` reads the way it looks.
+export async function runStatus(
+  args: ParsedArgs,
+  {
+    ensureServer,
+    serverFile,
+    createClient = (url: string) => new OpencodeClient(url),
+    loadSeenImpl = loadSeen,
+    seenFile = defaultSeenFile,
+    backends = {},
+    rosterFile = defaultRosterFile(),
+    log = console.log,
+    error = console.error,
+    setExitCode = (code: number) => {
+      process.exitCode = code
+    },
+  }: RunStatusDeps,
+) {
+  const conn = await connectOpencode({ ensureServer, serverFile, createClient, backends, error, setExitCode })
+  if (!conn) return
+  const projects = conn.opencode?.projects ?? []
+  const parents = sandboxParents(projects)
+  const store = createStore()
+  const seen = loadSeenImpl(seenFile())
+  // The same seeding `ls` runs, and for the same reason: sessions alone have no status, and
+  // statuses alone have no pending permission/question — summarise counts both.
+  if (conn.opencode) await seedOpencode(store, conn.opencode.client, projects, seen)
+  if (Object.keys(backends).length) await seedProcessBackends(store, backends, processDirs(projects, rosterWorktrees(() => loadRoster(rosterFile)), args.cwd), seen)
+  const sessions = []
+  for (const group of store.byProject()) {
+    const repo = displayProject(parents, group.projectKey)
+    if (!underCwd(repo, args.cwd) && !underCwd(group.projectKey, args.cwd)) continue
+    sessions.push(...group.sessions)
+  }
+  log(summarise(sessions))
+  setExitCode(sessions.some((s) => s.status === 'waiting' && Boolean(s.pendingRequest)) ? 0 : 1)
+}
+
+// The shell commands that take an id (attach, logs, stop, rm) share this: find the session across
+// every backend — exactly, or by prefix, because ids are long and nobody retypes one in full — and
+// hand back where it lives. Exits with a message rather than a stack when the id matches nothing,
+// or more than one thing, because these are things people type by hand from a listing.
+async function findSession<C extends Pick<RosterClient, 'listProjects' | 'listSessions'>>(
+  id: string | undefined,
+  deps: { ensureServer: EnsureServer; serverFile: string; createClient: (url: string) => C; backends: Backends; rosterFile: string; cwd?: string; error: Say; setExitCode: (code: number) => void },
+) {
+  const { backends, error, setExitCode } = deps
+  // #33: said before anything is spawned or asked — a degenerate id is a usage mistake, and
+  // starting a server to tell the user their shell variable was unset helps nobody.
+  const problem = sessionIdProblem(id)
+  if (problem) {
+    error(`fleetview: ${problem}`)
+    setExitCode(1)
+    return null
+  }
+  const want = id!
+  const conn = await connectOpencode(deps)
+  if (!conn) return null
+  const projects = conn.opencode?.projects ?? []
+  const matches: { backend: string; id: string; worktree: string }[] = []
+  if (conn.opencode) {
+    for (const m of await matchSessions(conn.opencode.client, projects, want)) matches.push({ backend: DEFAULT_BACKEND, id: m.session.id, worktree: m.worktree })
+  }
+  if (Object.keys(backends).length) {
+    const dirs = processDirs(projects, rosterWorktrees(() => loadRoster(deps.rosterFile)), deps.cwd)
+    await Promise.all(
+      Object.entries(backends).flatMap(([name, backend]) =>
+        dirs.map(async (dir) => {
+          for (const s of await backend.listSessions(dir).catch(() => [])) {
+            if (s.id === want || s.id.startsWith(want)) matches.push({ backend: name, id: s.id, worktree: dir })
+          }
+        }),
+      ),
+    )
+  }
+  // A whole id the user typed is never ambiguous, even when it happens to also prefix a longer one.
+  const exact = matches.filter((m) => m.id === want)
+  const hits = exact.length === 1 ? exact : matches
+  if (hits.length === 0) {
+    error(`no session matching ${want}`)
+    setExitCode(1)
+    return null
+  }
+  if (hits.length > 1) {
+    // Listed, not resolved: the caller is about to attach to, stop, or delete one of these, and
+    // guessing which is exactly the failure this replaces.
+    const line = (m: (typeof hits)[number]) => `  ${m.id}  ${m.worktree}${m.backend === DEFAULT_BACKEND ? '' : `  (${m.backend})`}`
+    error([`${want} matches ${hits.length} sessions — use more of the id:`, ...hits.map(line)].join('\n'))
+    setExitCode(1)
+    return null
+  }
+  const hit = hits[0]
+  return {
+    ...hit,
+    repo: displayProject(sandboxParents(projects), hit.worktree),
+    // Set only for an opencode hit, which is what tells the callers which family they are acting on.
+    opencode: hit.backend === DEFAULT_BACKEND && conn.opencode ? { client: conn.opencode.client, server: conn.opencode.server } : null,
+  }
+}
+
+type SessionCommandDeps = {
+  ensureServer: EnsureServer
+  serverFile: string
+  createClient?(url: string): RosterClient
+  backends?: Backends
+  rosterFile?: string
+  spawnSyncImpl?: typeof spawnSync
+  log?(message: string): void
+  error?(message: string): void
+  setExitCode?(code: number): void
+}
+
+const withDefaults = ({
+  createClient = (url: string) => new OpencodeClient(url),
+  backends = {},
+  rosterFile = defaultRosterFile(),
+  spawnSyncImpl = spawnSync,
+  log = console.log,
+  error = console.error,
+  setExitCode = (code: number) => {
+    process.exitCode = code
+  },
+  ...rest
+}: SessionCommandDeps) => ({ ...rest, createClient, backends, rosterFile, spawnSyncImpl, log, error, setExitCode })
+
+// The adapter that owns a found session: opencode's is built from the connection that found it.
+const adapterFor = (found: { backend: string; opencode: { client: RosterClient; server: ServerRef } | null }, backends: Backends) =>
+  found.opencode ? createOpencodeBackend(found.opencode) : backends[found.backend]
+
 // `fleetview attach <id>`: straight handover. No roster to suspend, so this is the plain form of
 // what `→` does.
-export async function runAttach(args: ParsedArgs, { ensureServer, serverFile }: { ensureServer: EnsureServer; serverFile: string }) {
-  const found = await withSession(args.id!, ensureServer, serverFile)
+export async function runAttach(args: ParsedArgs, deps: SessionCommandDeps) {
+  const d = withDefaults(deps)
+  const found = await findSession(args.id, { ...d, cwd: args.cwd })
   if (!found) return
-  const [command, ...argv] = createOpencodeBackend({ server: found.server, client: found.client })
-    .attach({ id: found.session.id, directory: found.worktree })
+  const [command, ...argv] = adapterFor(found, d.backends).attach({ id: found.id, directory: found.worktree })
   // cwd is the session's worktree: a process-backed resume (`claude --resume <id>`) is cwd-scoped
   // and fails "No conversation found" from fleetview's own directory. Harmless for opencode, which
-  // carries the directory in its argv.
-  const result = spawnSync(command, argv, { stdio: 'inherit', cwd: found.worktree })
+  // carries the directory in its argv. The env follows attachLoop's rule: only opencode's attach
+  // gets the server password (it authenticates with it); a process-backed child gets childEnv().
+  const result = d.spawnSyncImpl(command, argv, { stdio: 'inherit', cwd: found.worktree, env: found.opencode ? process.env : childEnv() })
   if (result.error) {
-    console.error(`couldn't launch opencode: ${result.error.message}`)
-    process.exitCode = 1
+    d.error(`couldn't launch ${found.backend}: ${result.error.message}`)
+    d.setExitCode(1)
   }
 }
 
 // `fleetview logs <id> [--all]`: a session's recent output, printed once.
-export async function runLogs(args: ParsedArgs, { ensureServer, serverFile }: { ensureServer: EnsureServer; serverFile: string }) {
-  const found = await withSession(args.id!, ensureServer, serverFile)
+export async function runLogs(args: ParsedArgs, deps: SessionCommandDeps) {
+  const d = withDefaults(deps)
+  const found = await findSession(args.id, { ...d, cwd: args.cwd })
   if (!found) return
-  const messages = await found.client.listMessages(found.session.id, found.worktree).catch(() => [])
+  if (!found.opencode) {
+    // capabilities.messages is false for both process backends: the transcript is a file in the
+    // CLI's own state directory, not something fleetview can fetch, which is also why peek says
+    // "attach to read it" for these rows.
+    d.error(`${found.backend} sessions have no transcript fleetview can read; fleetview attach ${found.id} to read it`)
+    d.setExitCode(1)
+    return
+  }
+  const messages = await found.opencode.client.listMessages(found.id, found.worktree).catch(() => [])
   // "Print recent output" — the whole transcript of a long session is pages of text nobody asked
   // for, and the first thing in it is usually a prompt the user wrote themselves. --all overrides.
   const recent = args.all ? (messages ?? []) : (messages ?? []).slice(-RECENT_MESSAGES)
@@ -743,19 +922,23 @@ export async function runLogs(args: ParsedArgs, { ensureServer, serverFile }: { 
     // text goes straight to stdout with no Ink backstop, so an escape in a reply (OSC 52 clipboard
     // write, OSC 0/2 title spoof) would drive the terminal.
     const text = messageBody(m, '')
-    if (text.trim()) console.log(`${role === 'user' ? 'you' : 'opencode'}: ${text}`)
+    if (text.trim()) d.log(`${role === 'user' ? 'you' : 'opencode'}: ${text}`)
     // #24: a failed turn's only content is `info.error` — without this, `logs` on a session that
     // failed every dispatch printed the user's own prompt and nothing else. errorLabel strips it
     // for the same reason the body above is stripped.
     const failure = errorLabel(m?.info?.error)
-    if (failure) console.log(`error: ${failure}`)
+    if (failure) d.log(`error: ${failure}`)
   }
 }
 
 // `fleetview stop <id>`: abort the running turn, leaving the session in the list.
-export async function runStop(args: ParsedArgs, { ensureServer, serverFile }: { ensureServer: EnsureServer; serverFile: string }) {
-  const found = await withSession(args.id!, ensureServer, serverFile)
+export async function runStop(args: ParsedArgs, deps: SessionCommandDeps) {
+  const d = withDefaults(deps)
+  const found = await findSession(args.id, { ...d, cwd: args.cwd })
   if (!found) return
-  await found.client.abortSession(found.session.id, found.worktree)
-  console.log(`stopped ${found.session.id}`)
+  const result = await adapterFor(found, d.backends).abort(found.id, found.worktree)
+  // A process backend answers {aborted:false} when nothing of this session's is running (no pid, a
+  // pid that is no longer this run, or one that already exited); "stopped" would claim otherwise.
+  d.log(isRecord(result) && result.aborted === false ? `nothing running to stop on ${found.id}` : `stopped ${found.id}`)
 }
+

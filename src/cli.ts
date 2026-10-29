@@ -24,8 +24,7 @@ import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { App } from './app.ts'
 import { OpencodeClient } from './backends/opencode/client.ts'
-import { createOpencodeBackend } from './backends/opencode/index.ts'
-import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, defaultBackendName, fallbackBackend, isBackendName, resolveBackend } from './backends/index.ts'
+import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, createProcessBackends, defaultBackendName, fallbackBackend, isBackendName, resolveBackend } from './backends/index.ts'
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer, OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
@@ -446,14 +445,17 @@ export async function main() {
   if (args.command === 'add') return runAdd(args, { ensureServer: ensureServerForCommands, serverFile })
   if (args.command === 'answer') return runAnswer(args, { ensureServer: ensureServerForCommands, serverFile })
   if (args.command === 'watch') return runWatch(args, { ensureServer: ensureServerForCommands, serverFile })
-  if (args.command === 'status') return runStatus(args, { ensureServer: ensureServerForCommands, serverFile })
   // No ensureServer passed on purpose — `server` is the one command that must never spawn one.
   if (args.command === 'server') return runServer(args, { serverFile, probeServerImpl: probeServer })
-  if (args.command === 'ls') return listSessions(args, ensureServerForCommands, serverFile)
-  if (args.command === 'attach') return runAttach(args, { ensureServer: ensureServerForCommands, serverFile })
-  if (args.command === 'logs') return runLogs(args, { ensureServer: ensureServerForCommands, serverFile })
-  if (args.command === 'stop') return runStop(args, { ensureServer: ensureServerForCommands, serverFile })
-  if (args.command === 'rm') return runRm(args, { ensureServer: ensureServerForCommands, serverFile })
+  // These act on every backend: opencode through the server, claude and copilot through their
+  // adapters, so they still work for those two when opencode is missing or down.
+  const all = { ensureServer: ensureServerForCommands, serverFile, backends: createProcessBackends() }
+  if (args.command === 'status') return runStatus(args, all)
+  if (args.command === 'ls') return listSessions(args, ensureServerForCommands, serverFile, { backends: all.backends })
+  if (args.command === 'attach') return runAttach(args, all)
+  if (args.command === 'logs') return runLogs(args, all)
+  if (args.command === 'stop') return runStop(args, all)
+  if (args.command === 'rm') return runRm(args, all)
 
   // --model / --agent given to the bare command set the defaults every dispatch from this run
   // inherits (agent view seeds them the same way when the view opens). Validate --model here, before
