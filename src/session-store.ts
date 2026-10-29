@@ -359,7 +359,9 @@ export function createStore() {
         // server reports a stopped session as plain idle, so this is fleetview-side memory of the
         // abort — cleared the moment the session runs again.
         stopped: false,
-        pendingClearedSeq: 0, // nothing has been answered on a record that has just been created
+        // Nothing has been answered on a record that has just been created. -1, not 0: seedMark()
+        // is 0 until the first live event, and `0 >= 0` would make the additive seed skip it.
+        pendingClearedSeq: -1,
       })
     }
     return sessions.get(k)
@@ -540,7 +542,7 @@ export function createStore() {
           // Carried for the same reason as statusSeq: this path rebuilds the record wholesale, and
           // resetting it to 0 would fail the additive seed's guard open — re-arming exactly the
           // resurrection that guard exists to prevent, on any tick where a relist and a reply race.
-          pendingClearedSeq: prev?.pendingClearedSeq ?? 0,
+          pendingClearedSeq: prev?.pendingClearedSeq ?? -1, // -1: see upsert
           runStartedAt: prev?.runStartedAt ?? 0,
           runEndedAt: prev?.runEndedAt ?? 0,
           // A restored error is anchored at the listing that restored it, so the live retirement
