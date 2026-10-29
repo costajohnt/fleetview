@@ -2449,15 +2449,18 @@ test('the periodic reseed surfaces a permission whose permission.asked frame was
   const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), projectPollMs: 60 }))
   await waitFor(() => lastFrame().includes('fix tests'))
   const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  // The server must agree s1 is running. The fixture's default GET /session/status is `{}`, which
+  // tells the 60ms poll s1 is idle — correctly overriding the older busy event — so '1 working'
+  // only rendered when a frame happened to land before the next poll, and the wait below timed
+  // out about half the time.
+  deps.client.sessionStatus = vi.fn(() => Promise.resolve({ s1: { type: 'busy' } }))
   onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
   await waitFor(() => lastFrame().includes('1 working'))
   // it has been pending server-side all along — only its event went missing
   deps.client.listPermissions = vi.fn(() => Promise.resolve([{ id: 'p1', sessionID: 's1', permission: 'bash' }]))
   // Recovery costs a whole poll pass, and the pass is a chained sequence of awaited client calls
-  // that chainSeed serialises per worktree. waitFor's 3s default is enough locally and not enough
-  // on a loaded CI runner with 40 test files competing for the event loop — this timed out once on
-  // macOS. The condition is still polled, only the ceiling moves.
-  await waitFor(() => lastFrame().includes('1 awaiting input'), 15000)
+  // that chainSeed serialises per worktree.
+  await waitFor(() => lastFrame().includes('1 awaiting input'))
 })
 
 test('the periodic reseed does not drop a pending request the server list omits', async () => {
