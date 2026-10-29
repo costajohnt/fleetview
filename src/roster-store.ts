@@ -54,6 +54,19 @@ export function hasSession(roster: Roster, worktree: string, id: string) {
   return roster.sessions.some((s) => s.worktree === worktree && s.id === id)
 }
 
+// Pure roster-mutation helpers mirroring addSession/removeSession semantics — without the file IO,
+// because App only persists via its `persistRoster` callback and needs the updated object back to
+// update local render state too.
+export const withMember = (roster: Roster, worktree: string, id: string, extra: Record<string, unknown> = {}): Roster =>
+  hasSession(roster, worktree, id)
+    ? roster
+    : { ...roster, sessions: [...roster.sessions, { worktree, id, addedAt: Date.now(), ...extra }] }
+
+export const withoutMember = (roster: Roster, worktree: string, id: string): Roster => ({
+  ...roster,
+  sessions: roster.sessions.filter((s) => !(s.worktree === worktree && s.id === id)),
+})
+
 // Same `worktree:id` identity the session store keys on, and unambiguous for the reason
 // makePersistSeen documents: session ids never contain ':', so no two members share a key.
 const memberKey = (m: RosterSession) => `${m.worktree}:${m.id}`

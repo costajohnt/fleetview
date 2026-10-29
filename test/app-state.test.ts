@@ -4,7 +4,9 @@ import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
 import { waitFor } from './helpers.ts'
 import { render as inkRender } from 'ink-testing-library'
-import { App, foldCompleted, SHELL_JOB_TTL_MS } from '../src/app.ts'
+import { App } from '../src/app.ts'
+import { foldCompleted } from '../src/state-groups.ts'
+import { SHELL_JOB_TTL_MS } from '../src/use-shell-job-expiry.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
 
 const live: any[] = []
