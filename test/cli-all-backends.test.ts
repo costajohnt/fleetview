@@ -156,6 +156,49 @@ test('rm on a claude session refuses, because claude cannot delete one, and leav
   expect(readFileSync(h.rosterFile, 'utf8')).toBe(before)
 })
 
+// A claude dispatch fleetview isolated in a local worktree: rm forgets the row and takes the worktree
+// with it, under the same guards as ^x^x.
+function localWorktreeRoster(h: ReturnType<typeof setup>, extra: object[] = []) {
+  writeFileSync(
+    h.rosterFile,
+    JSON.stringify({ groupBy: 'state', collapsed: [], sessions: [{ worktree: '/x/beta', id: CLAUDE_ID, addedAt: 1, backend: 'claude', repo: '/x/repo' }, ...extra] }),
+  )
+}
+
+test('rm on a claude session in a local worktree forgets it and removes a clean worktree', async () => {
+  const h = setup()
+  localWorktreeRoster(h)
+  const removeLocalWorktreeImpl = vi.fn()
+  const worktreeSafetyImpl = vi.fn(() => ({ removable: true, reason: null }))
+  await runRm({ command: 'rm', id: CLAUDE_ID }, { ...h.deps, isLocalWorktreeImpl: () => true, removeLocalWorktreeImpl, worktreeSafetyImpl })
+  expect(worktreeSafetyImpl).toHaveBeenCalledWith('/x/beta', '/x/repo')
+  expect(removeLocalWorktreeImpl).toHaveBeenCalledWith('/x/beta', '/x/repo')
+  expect(h.out).toEqual([`removed ${CLAUDE_ID} and its worktree`])
+  expect(h.codes).toEqual([])
+  expect(JSON.parse(readFileSync(h.rosterFile, 'utf8')).sessions).toEqual([])
+})
+
+test('rm on a claude session in a local worktree keeps a worktree with work in it', async () => {
+  const h = setup()
+  localWorktreeRoster(h)
+  const removeLocalWorktreeImpl = vi.fn()
+  await runRm(
+    { command: 'rm', id: CLAUDE_ID },
+    { ...h.deps, isLocalWorktreeImpl: () => true, removeLocalWorktreeImpl, worktreeSafetyImpl: () => ({ removable: false, reason: 'uncommitted changes' }) },
+  )
+  expect(removeLocalWorktreeImpl).not.toHaveBeenCalled()
+  expect(h.out).toEqual([`removed ${CLAUDE_ID} — kept its worktree (uncommitted changes): /x/beta`])
+})
+
+test('rm on a claude session in a local worktree keeps it while another session uses it', async () => {
+  const h = setup()
+  localWorktreeRoster(h, [{ worktree: '/x/beta', id: 'c1a0de00-0000-4000-8000-000000000002', addedAt: 2, backend: 'claude', repo: '/x/repo' }])
+  const removeLocalWorktreeImpl = vi.fn()
+  await runRm({ command: 'rm', id: CLAUDE_ID }, { ...h.deps, isLocalWorktreeImpl: () => true, removeLocalWorktreeImpl, worktreeSafetyImpl: () => ({ removable: true, reason: null }) })
+  expect(removeLocalWorktreeImpl).not.toHaveBeenCalled()
+  expect(h.out).toEqual([`removed ${CLAUDE_ID} — kept its worktree (1 other session still uses it): /x/beta`])
+})
+
 test('attach on a claude session runs claude --resume in its directory without the server password', async () => {
   const h = setup({ opencodeUp: false })
   const spawnSyncImpl = vi.fn(() => ({}) as any)

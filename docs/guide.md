@@ -99,7 +99,8 @@ none of the three CLIs installed, fleetview says so and stops there.
 | sessions started outside fleetview | yes | yes | yes |
 | live events | yes | polled, ~0.5s | polled, ~1.5s |
 | answer a question or permission from the roster | yes | no, attach to approve | no, denials are silent |
-| rename (`^r`), `/fork`, delete (`^x^x`), `!` shell jobs, worktree isolation | yes | no | no |
+| worktree isolation | yes | yes | yes |
+| rename (`^r`), `/fork`, delete (`^x^x`), `!` shell jobs | yes | no | no |
 
 Pick one for a dispatch with `@claude`/`@copilot`, or for the whole run with `--backend <name>` /
 `FLEETVIEW_BACKEND`. `@` resolves a subagent first, then a repository, then a backend — so a project
@@ -121,8 +122,9 @@ Keys a backend can't do are refused with a one-line reason instead of failing qu
 session with no message API says so in peek rather than showing a load error.
 
 One trust note: a `@copilot` dispatch runs the Copilot CLI headless with `--allow-all-tools`, so
-it auto-approves every tool call — shell and file writes included — directly in the checkout, with
-no worktree isolation and denials it never surfaces. That is the same authority as running
+it auto-approves every tool call, shell and file writes included, with denials it never surfaces.
+Worktree isolation keeps its edits off your checkout, but it is not a sandbox: a shell command can
+still reach anything your user can. That is the same authority as running
 `copilot` yourself, but worth knowing before you point it at an untrusted repo. `@claude` runs
 without skip-permissions, so it denies by default.
 
@@ -241,10 +243,10 @@ Clicking a row attaches in one press, clicking a group header collapses it, and 
 the selection. Mouse reporting takes over the terminal's own text selection, so hold Shift to
 select text the usual way, or set `FLEETVIEW_NO_MOUSE=1` to turn mouse handling off entirely.
 
-## opencode sessions get their own worktree
+## Every dispatch gets its own worktree
 
 Dispatching three sessions into one repository would otherwise mean three agents editing the same
-working copy. Each opencode dispatch runs in its own git worktree instead, made before the session exists
+working copy. Each dispatch runs in its own git worktree instead, made before the session exists
 — the same thing agent view does when it moves a background session into `.claude/worktrees/`
 "before editing files".
 
@@ -257,12 +259,16 @@ on a finished isolated session spells that command out with the repository and b
 (`merge back: git -C <repo> merge opencode/<name>`) to copy; it stops short of running it, because a
 merge can conflict and the checkout it lands in may have work of your own in it.
 
-Claude Code and Copilot dispatches are never isolated: worktree creation is opencode's endpoint,
-and those CLIs have no equivalent, so they edit the checkout and the dispatch line says so.
+Claude Code and Copilot have no worktree endpoint, so for their dispatches fleetview runs
+`git worktree add` itself: a branch named `fleetview/<name>` under
+`~/.local/share/fleetview/worktree/<repo>-<hash>/<name>` (`$XDG_DATA_HOME` replaces
+`~/.local/share` when set), named from your prompt the same way. The CLI is then started in that
+worktree, and the rows show under the repository like opencode's.
 
-Three cases skip isolation for opencode too, matching agent view: a directory that isn't a git repository, one
-that is already a linked worktree, and a server with no worktree support — the last says `not
-isolated, it edits the checkout` on the dispatch line rather than failing.
+Three cases skip isolation, matching agent view: a directory that isn't a git repository, one
+that is already a linked worktree, and a worktree that could not be made (a server with no
+worktree support, or `git worktree add` failing). The last says `not isolated, it edits the
+checkout` on the dispatch line rather than failing.
 
 To turn isolation off entirely — a single-session flow, or a build that depends on paths in the
 main working tree — set `FLEETVIEW_NO_ISOLATE=1`. Every dispatch then edits the checkout directly
@@ -274,3 +280,11 @@ and its branch holds no commits that exist nowhere else. Otherwise the worktree 
 message says why, for example `kept the worktree — 2 unpushed commits`. `fleetview rm` also keeps
 a worktree another session still uses. opencode's own endpoint has no such check, so fleetview
 checks before calling it.
+
+A claude or copilot session can't be deleted (its transcript belongs to the CLI), so on one of
+those rows in its own worktree `^x^x` drops the row from the roster and removes the worktree under
+the same rules, plus a sibling check: another session still running there keeps it. The removal
+is `git worktree remove` without `--force`, then `git branch -d` on the `fleetview/` branch only,
+so git refuses on its own as well. `fleetview rm <id>` does the same for such a session from the
+shell. On a claude or copilot session outside a fleetview worktree it refuses, since there is
+nothing for it to delete.

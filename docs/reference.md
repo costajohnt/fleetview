@@ -125,13 +125,15 @@ status, one stream per project. Attaching runs `opencode attach <url> -s <id> --
 - `~/.config/fleetview/roster.json` — the roster and the grouping mode
 - `~/.local/state/fleetview/seen.json` — per-session read/watermark state
 - `~/.local/state/fleetview/logs/server.log` — the server's stdout/stderr
-- `~/.local/share/opencode/worktree/<repo>/<name>/` — one worktree per dispatched session
+- `~/.local/share/opencode/worktree/<repo>/<name>/` — one worktree per dispatched opencode session
+- `~/.local/share/fleetview/worktree/<repo>-<hash>/<name>/` — one worktree per dispatched claude or
+  copilot session, on branch `fleetview/<name>` (under `$XDG_DATA_HOME` when set)
 
 ## Install notes
 
 fleetview needs at least one of the `opencode`, `claude` or `copilot` CLIs on `PATH`. opencode is
 needed for the opencode backend and everything only it can do (answering from the roster, `!`
-shell jobs, `/fork`, `/model`, worktree isolation, browse over opencode's projects); the roster
+shell jobs, `/fork`, `/model`, browse over opencode's projects); the roster
 opens without it on whichever of the other two is installed.
 
 fleetview is written in TypeScript that Node runs directly by stripping types at load — in a

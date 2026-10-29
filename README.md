@@ -23,8 +23,8 @@ that session, and `^z` detaches and leaves it running in the background.
 
 Requirements: Node 24 or newer, macOS or Linux, and at least one of the `opencode`, `claude` or
 `copilot` CLIs on `PATH`. opencode is optional but is the full experience: it is the default
-backend, and answering questions from the roster, `!` shell jobs, `/fork`, `/model` and worktree
-isolation all need it. No registration: on first run fleetview spawns one detached
+backend, and answering questions from the roster, `!` shell jobs, `/fork` and `/model`
+all need it. No registration: on first run fleetview spawns one detached
 `opencode serve`, and browse (`^b`) lists every directory you have ever run opencode in, grouped
 by project with live status. Without opencode the roster opens on claude and copilot alone,
 watching the directory you launched it in plus any directory already on the roster.
@@ -49,11 +49,10 @@ a subagent, `@claude`/`@copilot` another backend, `! cmd` runs a shell job, `s:b
 
 ![The dispatch input with `@` typed, listing subagents, repositories, and the claude/copilot backends to complete to](docs/images/dispatch-suggestions.png)
 
-**opencode dispatches are isolated.** An opencode session dispatched into a git repository runs
-in its own git worktree on an ordinary branch, created before the session exists, so three agents
+**Every dispatch is isolated.** A session dispatched into a git repository, on any backend, runs
+in its own git worktree on an ordinary branch, created before the session starts, so three agents
 in one repository never fight over one working copy. Merge back with `git merge` or a pull
-request. Claude Code and Copilot dispatches run in the checkout itself.
-([details](docs/guide.md#opencode-sessions-get-their-own-worktree))
+request. ([details](docs/guide.md#every-dispatch-gets-its-own-worktree))
 
 **Three backends, honestly compared.** opencode is the default and the most capable — it has a
 server behind it. Claude Code and Copilot sessions are detached headless runs fleetview reads;

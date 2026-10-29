@@ -2,7 +2,7 @@ import { test, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   sandboxParents,
   rememberSandboxes,
@@ -15,6 +15,9 @@ import {
   logNameCollision,
   worktreeSafety,
   gitKindOf,
+  createLocalWorktree,
+  removeLocalWorktree,
+  isLocalWorktree,
 } from '../src/worktree.ts'
 
 // The shape GET /project really returns — verified live against opencode 1.18.4, where creating a
@@ -334,4 +337,95 @@ test('mergeBackCommand yields nothing when there is nothing to merge back', () =
   expect(mergeBackCommand('/wt/one', '/x/repo', null)).toBe(null) // detached HEAD or no git
   // an unisolated session works IN the repository, so there is no branch to merge into it
   expect(mergeBackCommand('/x/repo', '/x/repo', 'main')).toBe(null)
+})
+
+// --- M9: worktrees fleetview makes itself, for claude and copilot ---
+
+const dataRoot = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleetview-data-'))
+  repos.push(dir)
+  return join(dir, 'fleetview', 'worktree')
+}
+const gitOut = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim()
+
+test('createLocalWorktree makes a linked worktree on a fleetview/ branch under the data root', () => {
+  const repo = makeRepo()
+  const root = dataRoot()
+  const wt = createLocalWorktree(repo.dir, 'Fix the tests', root)
+  expect(wt.startsWith(join(root, basename(repo.dir) + '-'))).toBe(true)
+  expect(basename(wt)).toBe('fix-the-tests')
+  expect(gitKindOf(wt)).toBe('worktree')
+  expect(gitOut(wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('fleetview/fix-the-tests')
+  expect(isLocalWorktree(wt, root)).toBe(true)
+  expect(isLocalWorktree(repo.dir, root)).toBe(false)
+  // Fresh from HEAD: nothing to lose, so the removal guard would let it go.
+  expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: true })
+})
+
+test('createLocalWorktree steers around taken directories and leftover branches', () => {
+  const repo = makeRepo()
+  const root = dataRoot()
+  expect(basename(createLocalWorktree(repo.dir, 'fix tests', root))).toBe('fix-tests')
+  expect(basename(createLocalWorktree(repo.dir, 'fix tests', root))).toBe('fix-tests-2')
+  // A branch kept after its worktree went (branch -d refused) still claims its name.
+  repo.g('branch', 'fleetview/lint')
+  expect(basename(createLocalWorktree(repo.dir, 'lint', root))).toBe('lint-2')
+})
+
+test('createLocalWorktree throws outside a repository, so dispatch can fall back', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleetview-norepo-'))
+  repos.push(dir)
+  expect(() => createLocalWorktree(dir, 'x', dataRoot())).toThrow()
+})
+
+test("createLocalWorktree runs none of the repository's hooks", () => {
+  const repo = makeRepo()
+  const marker = join(repo.dir, 'PWNED')
+  writeFileSync(join(repo.dir, '.git', 'hooks', 'post-checkout'), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 })
+  createLocalWorktree(repo.dir, 'x', dataRoot())
+  expect(existsSync(marker)).toBe(false)
+})
+
+test('removeLocalWorktree removes a clean worktree and its fleetview/ branch', () => {
+  const repo = makeRepo()
+  const wt = createLocalWorktree(repo.dir, 'done', dataRoot())
+  removeLocalWorktree(wt, repo.dir)
+  expect(existsSync(wt)).toBe(false)
+  expect(gitOut(repo.dir, 'branch', '--list', 'fleetview/*')).toBe('')
+})
+
+test('removeLocalWorktree never forces: uncommitted work keeps the worktree', () => {
+  const repo = makeRepo()
+  const wt = createLocalWorktree(repo.dir, 'dirty', dataRoot())
+  writeFileSync(join(wt, 'new.txt'), 'untracked work\n')
+  expect(() => removeLocalWorktree(wt, repo.dir)).toThrow()
+  expect(readFileSync(join(wt, 'new.txt'), 'utf8')).toBe('untracked work\n')
+})
+
+test('removeLocalWorktree keeps a branch with commits that exist nowhere else, and any non-fleetview branch', () => {
+  const repo = makeRepo()
+  const root = dataRoot()
+  const wt = createLocalWorktree(repo.dir, 'work', root)
+  writeFileSync(join(wt, 'b.txt'), 'work\n')
+  execFileSync('git', ['-C', wt, 'add', '-A'], { stdio: 'ignore' })
+  execFileSync('git', ['-C', wt, 'commit', '-qm', 'real work'], { stdio: 'ignore' })
+  removeLocalWorktree(wt, repo.dir) // the tree is clean, so it goes; the commit stays on the branch
+  expect(gitOut(repo.dir, 'log', '-1', '--format=%s', 'fleetview/work')).toBe('real work')
+
+  const named = createLocalWorktree(repo.dir, 'named', root)
+  execFileSync('git', ['-C', named, 'checkout', '-qb', 'mine'], { stdio: 'ignore' })
+  removeLocalWorktree(named, repo.dir)
+  expect(gitOut(repo.dir, 'branch', '--list', 'mine')).toContain('mine')
+})
+
+test('rememberSandboxes takes a local worktree parent from the roster membership', () => {
+  const parents = rememberSandboxes(new Map(), projects, [
+    { worktree: '/data/fleetview/worktree/alpha-1/fix', repo: '/repo/alpha' },
+    { worktree: '/repo/beta' }, // an ordinary member: no repo, no entry
+    { worktree: '/repo/gamma', repo: 42 }, // a hand-edited roster: not a path, ignored
+  ])
+  expect(displayProject(parents, '/data/fleetview/worktree/alpha-1/fix')).toBe('/repo/alpha')
+  expect(isSandbox(parents, '/repo/beta')).toBe(false)
+  expect(isSandbox(parents, '/repo/gamma')).toBe(false)
+  expect(isSandbox(parents, '/wt/alpha/one')).toBe(true) // opencode's sandboxes still count
 })

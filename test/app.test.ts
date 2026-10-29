@@ -2,9 +2,11 @@ import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
 import { tick, waitFor } from './helpers.ts'
 import { render as inkRender } from 'ink-testing-library'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+import { createLocalWorktree, gitKindOf, localWorktreeRoot } from '../src/worktree.ts'
 import { App } from '../src/app.ts'
 import { makePersistRoster } from '../src/roster-store.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
@@ -3454,6 +3456,158 @@ test('attaching a claude row tells the host which backend to launch', async () =
   stdin.write('\r') // empty input → attach the selected row
   await waitFor(() => onAction.mock.calls.length > 0)
   expect((onAction.mock.calls as any)[0][0]).toMatchObject({ sessionId: 'c1', worktree: '/x/alpha', backend: 'claude' })
+})
+
+// --- M9: claude/copilot dispatches get a worktree fleetview makes itself, in real git repositories ---
+
+// A real repository as the only project, and XDG_DATA_HOME pointed at a temp dir so the worktrees
+// land somewhere disposable. Restored after each test by the afterEach below.
+const prevDataHome = process.env.XDG_DATA_HOME
+afterEach(() => {
+  if (prevDataHome === undefined) delete process.env.XDG_DATA_HOME
+  else process.env.XDG_DATA_HOME = prevDataHome
+})
+const localRepoDeps = () => {
+  const repo = mkdtempSync(join(tmpdir(), 'fleetview-app-repo-'))
+  const g = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { stdio: 'ignore' })
+  g('init', '-q', '-b', 'main')
+  g('config', 'user.email', 't@t')
+  g('config', 'user.name', 't')
+  writeFileSync(join(repo, 'a.txt'), 'hello\n')
+  g('add', '-A')
+  g('commit', '-qm', 'init')
+  process.env.XDG_DATA_HOME = mkdtempSync(join(tmpdir(), 'fleetview-app-data-'))
+  const deps = makeDeps()
+  deps.client.listProjects = vi.fn(() => Promise.resolve([{ id: 'r', worktree: repo, vcs: 'git', time: { created: 1, updated: 1 } }]))
+  deps.client.listSessions = vi.fn(() => Promise.resolve([]))
+  deps.roster = { groupBy: 'state', sessions: [] }
+  return { deps, repo, root: localWorktreeRoot() }
+}
+const gitOut = (dir: string, ...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim()
+
+test('@claude into a git repository runs in a fresh worktree, streamed and remembered with its repo', async () => {
+  const { deps, repo, root } = localRepoDeps()
+  const claude = fakeBackend('claude')
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }))
+  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  await tick()
+  stdin.write('@claude fix the tests')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => claude.dispatch.mock.calls.length > 0)
+  const { directory } = (claude.dispatch.mock.calls as any)[0][0]
+  expect(directory.startsWith(root)).toBe(true)
+  expect(gitKindOf(directory)).toBe('worktree')
+  expect(gitOut(directory, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('fleetview/fix-the-tests')
+  // Streaming was asked for the worktree itself, which no project record names.
+  expect(claude.events).toHaveBeenCalledWith({ directory }, expect.anything())
+  await waitFor(() => lastFrame().includes(`dispatched into ${basename(repo)} on claude`))
+  expect(lastFrame()).not.toContain('edits the checkout')
+  expect(deps.persistRoster).toHaveBeenCalledWith(
+    expect.objectContaining({ sessions: [expect.objectContaining({ worktree: directory, id: 'claude-9', backend: 'claude', repo })] }),
+  )
+})
+
+test('FLEETVIEW_NO_ISOLATE (isolate=false) sends a claude dispatch into the checkout and says so', async () => {
+  const { deps, repo } = localRepoDeps()
+  const claude = fakeBackend('claude')
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), isolate: false, backends: { opencode: opencodeStub(deps), claude } }))
+  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  await tick()
+  stdin.write('@claude fix the tests')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => claude.dispatch.mock.calls.length > 0)
+  expect((claude.dispatch.mock.calls as any)[0][0].directory).toBe(repo)
+  await waitFor(() => lastFrame().includes('isolation off, it edits the checkout'))
+})
+
+test('a failed claude dispatch removes the worktree it made and hands the prompt back', async () => {
+  const { deps, repo, root } = localRepoDeps()
+  const claude = fakeBackend('claude')
+  claude.dispatch.mockImplementation(async () => {
+    throw new Error('spawn claude ENOENT')
+  })
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }))
+  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  await tick()
+  stdin.write('@claude fix the tests')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('claude dispatch failed'))
+  const { directory } = (claude.dispatch.mock.calls as any)[0][0]
+  expect(directory.startsWith(root)).toBe(true)
+  expect(existsSync(directory)).toBe(false)
+  expect(gitOut(repo, 'branch', '--list', 'fleetview/*')).toBe('')
+  expect(lastFrame()).toContain('@claude fix the tests')
+})
+
+// A member left by an earlier dispatch: the worktree exists, the roster names its repo.
+const localMember = async (repo: string, root: string, sessions = [{ id: 'c1', title: 'claude work' }]) => {
+  const wt = createLocalWorktree(repo, 'claude work', root)
+  const claude = fakeBackend('claude')
+  ;(claude.listSessions as any).mockImplementation(async (dir: string) => (dir === wt ? sessions.map((s) => ({ ...s, directory: wt, updatedAt: Date.now() })) : []))
+  return { wt, claude, members: sessions.map((s) => ({ worktree: wt, id: s.id, addedAt: 1, backend: 'claude', repo })) }
+}
+
+test('a claude row in a local worktree groups under its repository, not the worktree', async () => {
+  const { deps, repo, root } = localRepoDeps()
+  const { wt, claude, members } = await localMember(repo, root)
+  const { lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), roster: { groupBy: 'project', sessions: members }, backends: { opencode: opencodeStub(deps), claude } }),
+  )
+  await waitFor(() => lastFrame().includes('claude work'))
+  expect(lastFrame()).toContain(basename(repo))
+  expect(lastFrame()).not.toContain(basename(join(wt, '..')))
+})
+
+test('^x^x on a claude row in its own clean worktree drops the row and removes the worktree and branch', async () => {
+  const { deps, repo, root } = localRepoDeps()
+  const { wt, claude, members } = await localMember(repo, root)
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), roster: { groupBy: 'state', sessions: members }, backends: { opencode: opencodeStub(deps), claude } }),
+  )
+  await waitFor(() => lastFrame().includes('claude work'))
+  stdin.write('\x18')
+  await waitFor(() => claude.abort.mock.calls.length > 0)
+  stdin.write('\x18')
+  await waitFor(() => !existsSync(wt))
+  expect(gitOut(repo, 'branch', '--list', 'fleetview/*')).toBe('')
+  expect(claude.delete).not.toHaveBeenCalled() // the transcript is the CLI's; only the worktree goes
+  await waitFor(() => !lastFrame().includes('claude work'))
+})
+
+test('^x^x keeps a local worktree holding uncommitted work, and says why', async () => {
+  const { deps, repo, root } = localRepoDeps()
+  const { wt, claude, members } = await localMember(repo, root)
+  writeFileSync(join(wt, 'a.txt'), 'edited by the agent\n')
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), roster: { groupBy: 'state', sessions: members }, backends: { opencode: opencodeStub(deps), claude } }),
+  )
+  await waitFor(() => lastFrame().includes('claude work'))
+  stdin.write('\x18')
+  await waitFor(() => claude.abort.mock.calls.length > 0)
+  stdin.write('\x18')
+  await waitFor(() => lastFrame().includes('kept the worktree — uncommitted changes'))
+  expect(existsSync(join(wt, 'a.txt'))).toBe(true)
+})
+
+test('^x^x keeps a local worktree another session still runs in', async () => {
+  const { deps, repo, root } = localRepoDeps()
+  const { wt, claude, members } = await localMember(repo, root, [
+    { id: 'c1', title: 'claude work' },
+    { id: 'c2', title: 'sibling work' },
+  ])
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), roster: { groupBy: 'state', sessions: members }, backends: { opencode: opencodeStub(deps), claude } }),
+  )
+  await waitFor(() => lastFrame().includes('claude work') && lastFrame().includes('sibling work'))
+  stdin.write('\x18')
+  await waitFor(() => claude.abort.mock.calls.length > 0)
+  stdin.write('\x18')
+  await waitFor(() => lastFrame().includes('sibling work') && !lastFrame().includes('claude work'))
+  await tick()
+  expect(existsSync(wt)).toBe(true)
 })
 
 // --- agent-view parity: the moved-to-background notice and Esc-returns ---
