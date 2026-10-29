@@ -125,7 +125,9 @@ status, one stream per project. Attaching runs `opencode attach <url> -s <id> --
 - `~/.config/fleetview/roster.json` — the roster and the grouping mode
 - `~/.local/state/fleetview/seen.json` — per-session read/watermark state
 - `~/.local/state/fleetview/logs/server.log` — the server's stdout/stderr
-- `~/.local/share/opencode/worktree/<repo>/<name>/` — one worktree per dispatched session
+- `~/.local/share/opencode/worktree/<repo>/<name>/` — one worktree per dispatched opencode session
+- `~/.local/share/fleetview/worktree/<repo>-<hash>/<name>/` — one worktree per dispatched claude or
+  copilot session, on branch `fleetview/<name>` (under `$XDG_DATA_HOME` when set)
 
 ## Install notes
 
