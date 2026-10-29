@@ -5,6 +5,7 @@ import { parseMouseEvents } from './ui/mouse.ts'
 import { questionOptions, suggestedReply } from './ui/peek.ts'
 import { OPENCODE_CAPABILITIES } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
+import { STILL_WORKING } from './backends/ps.ts'
 import type { AttachTarget, Backend, BackendCapabilities, OpencodeMessage, SeedChain } from './types.ts'
 import type { SessionStore } from './session-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
@@ -140,7 +141,10 @@ export function usePeek({
       else await backend.prompt(row.id, body, row.projectKey)
       replyEpochs.current.set(key, (replyEpochs.current.get(key) ?? 0) + 1) // M15: supersedes any in-flight flush
       savedReplies.current.delete(key)
-    } catch {
+    } catch (e) {
+      // M15: a process backend refuses a follow-up while its run is still going — say that, not
+      // "refused the resume", so the user knows waiting (or ^x) is the fix.
+      if (e instanceof Error && e.message === STILL_WORKING) return setPeekError({ id: row.id, message: STILL_WORKING })
       if (bang) {
         // A shell command that arrives minutes later is a different instruction than the one meant.
         setPeekError({ id: row.id, message: "couldn't run it — shell commands aren't saved" })

@@ -11,7 +11,7 @@ import { copilotNormaliser, normaliseCopilotSessions } from '../../backend-norma
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { foldEvents, initialRun, parseJsonlChunk, type CopilotStatus, type RunState } from './events.ts'
 import { listSessions, lockInfo, runningPid, sessionStateDir } from './sessions.ts'
-import { psInfo, sameRun, type PidInfo } from '../ps.ts'
+import { isLiveRun, psInfo, sameRun, STILL_WORKING, type PidInfo } from '../ps.ts'
 import { reapRunLogs } from '../run-logs.ts'
 import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
 import { assertSessionId } from '../session-id.ts'
@@ -150,7 +150,11 @@ export function createCopilotBackend({
     // Resume is a second spawn, not a message to a running process: verified that
     // `--resume=<id> -p …` continues the same session (it recalled the previous turn) and appends to
     // the same on-disk transcript rather than starting a new one.
+    // Refused while a run of this session is still alive (M15) — the one this fleetview started, or
+    // whoever holds copilot's session lock: a second resume is a second writer on one session.
     async prompt(id, text, directory) {
+      assertSessionId(id) // before the lock read, which builds a path from it
+      if (isLiveRun(started.get(id)?.pid, id, psImpl) || isLiveRun(lockInfo(join(stateDir, id))?.pid, id, psImpl)) throw new Error(STILL_WORKING)
       return { id, pid: run(id, [`--resume=${assertSessionId(id)}`], text, directory, []) }
     },
 
