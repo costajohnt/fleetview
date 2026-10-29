@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { App } from '../src/app.ts'
 import { makePersistRoster } from '../src/roster-store.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
+import { OPENCODE_MISSING } from '../src/backends/opencode/server-manager.ts'
 import { claudeNormaliser, copilotNormaliser, normaliseClaudeSessions, normaliseCopilotSessions } from '../src/backend-normalise.ts'
 import { headerRows } from '../src/ui/header.ts'
 
@@ -144,6 +145,19 @@ test('server unreachable renders only the restart message', async () => {
   expect(frame).toContain('opencode server unreachable — restart fleetview')
   expect(frame).toContain('server did not become healthy')
   expect(frame).not.toContain('move')
+  expect(deps.client.listProjects).not.toHaveBeenCalled()
+})
+
+// M6: a missing opencode CLI is not fixed by a restart, so it gets its own headline.
+test('opencode missing leads with the install message, not the restart one', async () => {
+  const deps = makeDeps()
+  deps.serverReady = false
+  deps.serverFailReason = OPENCODE_MISSING
+  const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await tick()
+  const frame = lastFrame().replace(/\s+/g, ' ')
+  expect(frame).toContain('fleetview needs the opencode CLI. Install it from https://opencode.ai and run fleetview again.')
+  expect(frame).not.toContain('restart fleetview')
   expect(deps.client.listProjects).not.toHaveBeenCalled()
 })
 
