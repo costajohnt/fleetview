@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
-import { Box, Text, useInput, useApp, useStdin, useStdout, useWindowSize } from 'ink'
+import { Box, Text, useInput, useApp, useStdout, useWindowSize } from 'ink'
 import { createStore, FINISHED_STATUSES } from './session-store.ts'
 import { stripEscapeResidue } from './text-utils.ts'
 import { EMPTY, atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, withCaret, type TextCursor } from './text-cursor.ts'
@@ -10,7 +10,7 @@ import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND, NO_AGENT_CLI, resolveBackend } from './backends/index.ts'
 import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { hasSession, withMember, withoutMember, type Roster as RosterType } from './roster-store.ts'
-import { Roster, flattenGroups, navigableRows, buildLines, windowLines } from './ui/roster.ts'
+import { Roster, flattenGroups, navigableRows } from './ui/roster.ts'
 import { parseMouseEvents } from './ui/mouse.ts'
 import { DispatchInput, inputRows, INPUT_BOX_ROWS } from './ui/dispatch-input.ts'
 import { Header, headerRows } from './ui/header.ts'
@@ -23,13 +23,14 @@ import { useDispatch } from './use-dispatch.ts'
 import { useRosterKeys, RESUME_QUIET_MS } from './use-roster-keys.ts'
 import { useSlashCommands } from './use-slash-commands.ts'
 import { useShellJobExpiry } from './use-shell-job-expiry.ts'
+import { useMouse } from './use-mouse.ts'
 import { pickTarget, repoChoices, defaultProjectFromEnv } from './dispatch-target.ts'
 import { parseInput, suggestFor, applyFilter } from './dispatch-parse.ts'
 import { rememberSandboxes, isRootProject, displayProject, isSandbox, worktreeSafety, mergeBackCommand, isLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import { fetchPullRequests, branchOf, hasOpenPr } from './pull-requests.ts'
 import { theme } from './ui/theme.ts'
 import { asNumber, asString, isRecord, isThenable } from './types.ts'
-import type { AppAction, AttachSibling, AttachTarget, Backend, BackendCapabilities, ModelPair, MouseEvent as SgrMouseEvent, Project, PullRequest, SeedChain, ServerRef, StreamProject } from './types.ts'
+import type { AppAction, AttachSibling, AttachTarget, Backend, BackendCapabilities, ModelPair, Project, PullRequest, SeedChain, ServerRef, StreamProject } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
 import type { RosterClient, AgentInfo, CommandInfo, ProviderInfo } from './backends/opencode/client.ts'
@@ -1226,37 +1227,6 @@ export function App({
     }
   }
 
-  // Click-to-act, mirroring the keyboard: a click selects a row, a click on the selected row
-  // attaches (Enter's empty-input verb), a click on a header toggles its collapse, and the wheel
-  // moves the selection like arrows. Mapping y back to a line reuses the exact buildLines +
-  // windowLines pair the Roster draws from, so a click can never land on a row that isn't there.
-  const handleMouse = (ev: SgrMouseEvent) => {
-    if (ev.kind === 'wheel-up' || ev.kind === 'wheel-down') {
-      if (!navRows.length) return
-      const next = ev.kind === 'wheel-up' ? Math.max(0, navSel - 1) : Math.min(navRows.length - 1, navSel + 1)
-      return setSelectedKey(navRows[next].key)
-    }
-    if (ev.kind !== 'press' || ev.button !== 0) return
-    const lines = buildLines(groups, offlineProjects, collapsed)
-    const selIdx = Math.max(0, lines.findIndex((l) => l.key === navRow?.key))
-    const { slice, above } = windowLines(lines, selIdx, maxRows)
-    // Terminal rows are 1-based; the roster starts under the header block, plus the `↑ N more`
-    // indicator row when it is drawn, plus the "moved to the background" notice line. The closure
-    // still holds this press's notice state (the clear above is an async state update), which is
-    // the frame the user actually clicked on.
-    const line = slice[ev.y - headerRows(columns) - 1 - (above > 0 ? 1 : 0) - backgroundedNoticeRows]
-    if (!line) return
-    if (line.type === 'header') {
-      setSelectedKey(line.key)
-      return toggleCollapsed(line.projectKey)
-    }
-    if (line.type !== 'session') return
-    // One click launches: select and attach in the same press (John's ask; the old
-    // select-then-click-again dance made the first click feel dead).
-    setSelectedKey(line.key)
-    return attach(line.session)
-  }
-
   // The roster's keyboard lives in use-roster-keys.ts: a pure `rosterKey` decision plus the hook
   // that performs it. Everything it reads or drives is handed over here.
   useRosterKeys({
@@ -1268,7 +1238,9 @@ export function App({
     resumedAt,
     backgrounded,
     setBackgrounded,
-    handleMouse,
+    // useMouse is called below, after this hook, so the stdin tap keeps registering after the
+    // roster's useInput exactly as it did inline; the call only happens on input, post-render.
+    handleMouse: (ev) => handleMouse(ev),
     input,
     setInput,
     setEdit,
@@ -1299,34 +1271,22 @@ export function App({
     flash,
   })
 
-  // Clicks and the wheel. Ink 8 drops SGR mouse reports before any useInput sees them (ink
-  // build/components/App.js handleReadable: a complete CSI sequence that parses to no key name is
-  // discarded, ink #1014), so this taps stdin for them and feeds each one back into Ink's input
-  // emitter, where the roster's useInput above handles it exactly as it did on Ink 7. Ink pulls
-  // input with stdin.read(), and every read() also emits 'data' with the same chunk, so the tap
-  // never competes with Ink for bytes. Going back through Ink, not calling handleMouse here, is
-  // load-bearing: useInput runs its handler inside the reconciler's discreteUpdates, so a click
-  // that attaches commits synchronously and Ink's raw-mode release lands before pty-host's
-  // deferred re-assert. Called from here, that release landed after it and left the attached
-  // child's tty cooked (the detach chord echoed as ^Z). `internal_eventEmitter` is the emitter
-  // useInput subscribes to (build/hooks/use-input.js); it is not in useStdin's public type.
-  // The tail carry rejoins a report a slow link split across two reads.
-  const { stdin, internal_eventEmitter: inkInput } = useStdin() as ReturnType<typeof useStdin> & { internal_eventEmitter: NodeJS.EventEmitter }
-  const mouseTail = useRef('')
-  useEffect(() => {
-    if (mode !== 'roster' || !serverReady || attached) return
-    mouseTail.current = ''
-    const tap = (chunk: string | Buffer) => {
-      const buf = mouseTail.current + String(chunk)
-      mouseTail.current = /\x1b(\[(<[\d;]*)?)?$/.exec(buf)?.[0] ?? ''
-      // Deferred out of the read() that emitted this chunk, so Ink finishes its own pass first.
-      for (const [report] of buf.matchAll(/\x1b\[<\d+;\d+;\d+[Mm]/g)) queueMicrotask(() => inkInput.emit('input', report))
-    }
-    stdin.on('data', tap)
-    return () => {
-      stdin.off('data', tap)
-    }
-  }, [stdin, inkInput, mode, serverReady, attached])
+  // Clicks, the wheel, and the Ink 8 stdin tap that delivers them — see use-mouse.ts.
+  const handleMouse = useMouse({
+    active: mode === 'roster' && serverReady && !attached,
+    groups,
+    offlineProjects,
+    collapsed,
+    navRows,
+    navSel,
+    navRow,
+    maxRows,
+    columns,
+    backgroundedNoticeRows,
+    setSelectedKey,
+    toggleCollapsed,
+    attach,
+  })
 
   useInput(
     (ch, key) => {
