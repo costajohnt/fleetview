@@ -102,8 +102,9 @@ A backend other than opencode is streamed only once something has asked for it: 
 opencode and the roster is exactly what it always was. When a second backend does have sessions,
 every row grows a dim backend name after its title.
 
-Only the roster TUI spans every backend. The shell commands (`ls`, `--json`, `attach`, `logs`,
-`stop`, `rm`, `bg`) talk to the opencode server directly and so act on opencode sessions only.
+Only the roster TUI spans every backend. The shell commands (all listed in `fleetview --help` and
+the [reference](reference.md#from-the-shell)) talk to the opencode server directly and so act on
+opencode sessions only.
 
 ![A roster with opencode, claude, and copilot sessions, each row carrying its dim backend name](images/backends.png)
 
@@ -231,10 +232,10 @@ Clicking a row attaches in one press, clicking a group header collapses it, and 
 the selection. Mouse reporting takes over the terminal's own text selection, so hold Shift to
 select text the usual way, or set `FLEETVIEW_NO_MOUSE=1` to turn mouse handling off entirely.
 
-## Every session gets its own worktree
+## opencode sessions get their own worktree
 
 Dispatching three sessions into one repository would otherwise mean three agents editing the same
-working copy. Each dispatch runs in its own git worktree instead, made before the session exists
+working copy. Each opencode dispatch runs in its own git worktree instead, made before the session exists
 — the same thing agent view does when it moves a background session into `.claude/worktrees/`
 "before editing files".
 
@@ -247,7 +248,10 @@ on a finished isolated session spells that command out with the repository and b
 (`merge back: git -C <repo> merge opencode/<name>`) to copy; it stops short of running it, because a
 merge can conflict and the checkout it lands in may have work of your own in it.
 
-Three cases skip isolation, matching agent view: a directory that isn't a git repository, one
+Claude Code and Copilot dispatches are never isolated: worktree creation is opencode's endpoint,
+and those CLIs have no equivalent, so they edit the checkout and the dispatch line says so.
+
+Three cases skip isolation for opencode too, matching agent view: a directory that isn't a git repository, one
 that is already a linked worktree, and a server with no worktree support — the last says `not
 isolated, it edits the checkout` on the dispatch line rather than failing.
 

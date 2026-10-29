@@ -12,7 +12,8 @@ fleetview and the sessions keep running — reopen and pick up where you left of
     npm i -g fleetview
     fleetview
 
-Or try it without installing: `npx fleetview` — same thing, nothing left behind.
+Or try it without installing: `npx fleetview`. Nothing is installed globally, but the opencode
+server it starts keeps running after you quit; `fleetview server stop` stops it.
 
 Type a task and press ⏎: a session starts on it. With the input empty, ⏎ on a row attaches to
 that session, and `^z` detaches and leaves it running in the background.
@@ -42,9 +43,11 @@ a subagent, `@claude`/`@copilot` another backend, `! cmd` runs a shell job, `s:b
 
 ![The dispatch input with `@` typed, listing subagents, repositories, and the claude/copilot backends to complete to](docs/images/dispatch-suggestions.png)
 
-**Every dispatch is isolated.** Each session runs in its own git worktree on an ordinary branch,
-created before the session exists, so three agents in one repository never fight over one working
-copy. Merge back with `git merge` or a pull request. ([details](docs/guide.md#every-session-gets-its-own-worktree))
+**opencode dispatches are isolated.** An opencode session dispatched into a git repository runs
+in its own git worktree on an ordinary branch, created before the session exists, so three agents
+in one repository never fight over one working copy. Merge back with `git merge` or a pull
+request. Claude Code and Copilot dispatches run in the checkout itself.
+([details](docs/guide.md#opencode-sessions-get-their-own-worktree))
 
 **Three backends, honestly compared.** opencode is the default and the most capable — it has a
 server behind it. Claude Code and Copilot sessions are detached headless runs fleetview reads;
@@ -52,8 +55,8 @@ what they can't do, the roster says so instead of pretending. ([full table](docs
 
 **Scriptable.** `fleetview bg "<prompt>"` dispatches from any terminal, `fleetview --json`
 reports states in the same words as `claude agents --json`, so scripts written against agent
-view read fleetview too. The shell commands (`ls`, `--json`, `attach`, `logs`, `stop`, `rm`,
-`bg`) act on opencode sessions only; the roster TUI is the view that spans every backend.
+view read fleetview too. The shell commands (`fleetview --help` lists them all) talk to the opencode
+server and so act on opencode sessions only; the roster TUI is the view that spans every backend.
 ([CLI reference](docs/reference.md#from-the-shell))
 
 **Locked down by default.** The opencode server fleetview spawns exposes shell execution, so
