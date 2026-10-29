@@ -15,6 +15,9 @@ fleetview and the sessions keep running — reopen and pick up where you left of
 Or try it without installing: `npx fleetview`. Nothing is installed globally, but the opencode
 server it starts keeps running after you quit; `fleetview server stop` stops it.
 
+npm 11 warns about the install scripts of `fleetview` and `node-pty` (the terminal attach
+helper). To approve just those two, install with `npm i -g fleetview --allow-scripts=node-pty,fleetview`.
+
 Type a task and press ⏎: a session starts on it. With the input empty, ⏎ on a row attaches to
 that session, and `^z` detaches and leaves it running in the background.
 
