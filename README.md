@@ -17,10 +17,10 @@ Or try it without installing: `npx fleetview` — same thing, nothing left behin
 Type a task and press ⏎: a session starts on it. With the input empty, ⏎ on a row attaches to
 that session, and `^z` detaches and leaves it running in the background.
 
-Requirements: Node 24 or newer, macOS or Linux, and at least one of the `opencode`, `claude` or
-`copilot` CLIs on `PATH` (each optional, one is enough). No registration: on first run fleetview
-spawns one detached `opencode serve` and every directory you have ever run opencode in shows up
-automatically, grouped by project with live status.
+Requirements: Node 24 or newer, macOS or Linux, and the `opencode` CLI on `PATH` (the roster
+runs on its server). The `claude` and `copilot` CLIs are optional. No registration: on first run
+fleetview spawns one detached `opencode serve`, and browse (`^b`) lists every directory you have
+ever run opencode in, grouped by project with live status.
 
 ## What you get
 
