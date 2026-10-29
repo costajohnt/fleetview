@@ -688,16 +688,26 @@ export async function runRm(
     })
   } catch {}
   // "`claude rm <id>` keeps the worktree if it has uncommitted changes" — and fleetview keeps it for
-  // commits that exist nowhere else, which is the case that actually loses work. Reported either
-  // way, because a worktree left behind is something the user should know about.
+  // commits that exist nowhere else too (worktreeSafety). Reported either way, because a worktree
+  // left behind is something the user should know about.
   if (found.worktree !== found.repo) {
+    const kept = (reason: string) => log(`removed ${found.session.id} — kept its worktree (${reason}): ${found.worktree}`)
+    // The TUI's guard (app.ts removeWorktreeFor): only the last session in a worktree takes it with
+    // it — a /fork sibling still runs there. Counted excluding the deleted id rather than trusting
+    // the server to have dropped it already; a listing that fails is not proof of "nobody left".
+    const listed = await client.listSessions(found.worktree).catch(() => null)
+    if (!Array.isArray(listed)) return kept('could not list its sessions')
+    const others = listed.filter((s) => isListedSession(s) && s.id !== found.session.id).length
+    if (others > 0) return kept(`${others} other session${others === 1 ? '' : 's'} still use${others === 1 ? 's' : ''} it`)
     const safety = worktreeSafetyImpl(found.worktree, found.repo)
-    if (safety.removable) {
-      await client.removeWorktree?.(found.worktree, found.repo).catch(() => {})
-      log(`removed ${found.session.id} and its worktree`)
-    } else {
-      log(`removed ${found.session.id} — kept its worktree (${safety.reason}): ${found.worktree}`)
+    if (!safety.removable) return kept(safety.reason ?? 'not safe to remove')
+    if (!client.removeWorktree) return kept('this server cannot remove worktrees')
+    try {
+      await client.removeWorktree(found.worktree, found.repo)
+    } catch (e) {
+      return kept(`removal failed: ${stripControl(e instanceof Error ? e.message : String(e))}`)
     }
+    log(`removed ${found.session.id} and its worktree`)
     return
   }
   log(`removed ${found.session.id}`)
