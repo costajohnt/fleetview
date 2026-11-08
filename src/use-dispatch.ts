@@ -159,19 +159,19 @@ export function useDispatch({
       const list = backend.normaliseSessions(await backend.listSessions(directory))
       for (const s of list) store.noteOrigin(directory, s.id, name)
       noteDispatchedProject(directory, list)
-      if (thenAttach) attach({ id: ref.id, projectKey: directory, backend: name })
-      else {
-        // Land the selection on the row this dispatch just created, so Enter attaches to it —
-        // unless the selection moved during the awaits above: the user's own navigation wins.
-        if (sameSelection(selectedSessionRef.current, selAtDispatch)) {
-          selectedSessionRef.current = { projectKey: directory, id: ref.id }
-          setSelectedKey(null)
-        }
-        // Same wording as the opencode path: the repository the user chose, plus a warning only
-        // when a worktree was wanted and the row edits the checkout instead.
-        const why = isolated || !wantIsolation ? '' : isolate ? ' — not isolated, it edits the checkout' : ' — isolation off, it edits the checkout'
-        flash(`dispatched into ${basename(target) || target} on ${name}${why}`, why ? 5000 : undefined)
+      // No attach here even for ⇧⏎ (audit 2026-11-07 H1): the headless run is still working, and
+      // an interactive --resume beside it is a second writer, so the backend refuses it anyway.
+      // Land the selection on the row this dispatch just created instead, so ^x and a later Enter
+      // act on it, unless the selection moved during the awaits above: the user's own navigation wins.
+      if (sameSelection(selectedSessionRef.current, selAtDispatch)) {
+        selectedSessionRef.current = { projectKey: directory, id: ref.id }
+        setSelectedKey(null)
       }
+      // Same wording as the opencode path: the repository the user chose, plus a warning only
+      // when a worktree was wanted and the row edits the checkout instead.
+      const why = isolated || !wantIsolation ? '' : isolate ? ' — not isolated, it edits the checkout' : ' — isolation off, it edits the checkout'
+      const when = thenAttach ? '; attach when it finishes' : ''
+      flash(`dispatched into ${basename(target) || target} on ${name}${when}${why}`, why || when ? 5000 : undefined)
     } catch {
       if (dispatched) return flash('session started, but the project list is stale')
       // Nothing ran in the worktree, so it is empty by construction and goes without worktreeSafety:

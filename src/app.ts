@@ -605,6 +605,7 @@ export function App({
     })
     if (isThenable(done)) {
       // Set on attach, not detach, so a hard exit of the attached PTY still leaves the marker.
+      const previous = lastAttached.current
       lastAttached.current = { id: row.id, projectKey: row.projectKey }
       attachedRef.current = true
       setAttached(true)
@@ -632,6 +633,9 @@ export function App({
         // An attach that failed without drawing anything is otherwise indistinguishable from a
         // keypress that didn't register.
         const message = asString(result?.message)
+        // A message without a detach is an attach that never happened (refused STILL_WORKING, a
+        // launch failure, an instant silent death), so the row was never attached to.
+        if (message && !result?.detached) lastAttached.current = previous
         if (message) flash(message, 4000)
       }
       done.then(back, () => back())
@@ -1064,7 +1068,7 @@ export function App({
           { dimColor: true },
           '↑↓ next/prev · ⏎ send, or attach when the reply is empty · → attach · ← back',
         )
-      : React.createElement(DispatchInput, { value: input, cursor: edit.cursor, view, notice, kind: parsed.kind, suggestions, columns, focused: mode === 'roster' }),
+      : React.createElement(DispatchInput, { value: input, cursor: edit.cursor, view, notice, kind: parsed.kind, attachable: ((parsed.kind === 'dispatch' && parsed.backend) || initialBackend) === DEFAULT_BACKEND, suggestions, columns, focused: mode === 'roster' }),
     serverDown
       ? React.createElement(
           Text,

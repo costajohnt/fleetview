@@ -9,7 +9,7 @@ import type { HelpLine } from './view-types.ts'
 const SHORTCUTS = [
   ['↑ / ↓', 'move between rows'],
   ['⏎', 'attach to the selected session, or dispatch if there is text in the input'],
-  ['⇧⏎ / ⌥⏎', 'dispatch and attach immediately'],
+  ['⇧⏎ / ⌥⏎', 'dispatch and attach (opencode; claude/copilot: attach when done)'],
   ['space', 'peek at the selected session (types a space when the input has text)'],
   ['1..9', 'in peek, answer the pending question with that choice'],
   ['y / a / d', 'in peek, allow once / always allow / deny a permission'],
