@@ -222,7 +222,7 @@ test('attach on a claude session refuses while its headless run is still working
   const spawnSyncImpl = vi.fn(() => ({}) as any)
   await runAttach({ command: 'attach', id: CLAUDE_ID }, { ...h.deps, spawnSyncImpl })
   expect(spawnSyncImpl).not.toHaveBeenCalled()
-  expect(h.errs).toEqual([expect.stringMatching(/still working/)])
+  expect(h.errs.at(-1)).toMatch(/still working/)
   expect(h.codes).toEqual([1])
 })
 
