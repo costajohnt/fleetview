@@ -214,6 +214,18 @@ test('attach on a claude session runs claude --resume in its directory without t
   expect(options.env.OPENCODE_SERVER_PASSWORD).toBe(undefined)
 })
 
+// H1 (audit 2026-11-07): the recorded headless run is alive (setup's psImpl says so), so a second
+// interactive --resume would be a second writer on the session.
+test('attach on a claude session refuses while its headless run is still working', async () => {
+  const h = setup({ opencodeUp: false })
+  writeFileSync(join(h.runDir, `${CLAUDE_ID}.json`), JSON.stringify({ id: CLAUDE_ID, directory: '/x/beta', pid: 4242, startedAt: 1 }))
+  const spawnSyncImpl = vi.fn(() => ({}) as any)
+  await runAttach({ command: 'attach', id: CLAUDE_ID }, { ...h.deps, spawnSyncImpl })
+  expect(spawnSyncImpl).not.toHaveBeenCalled()
+  expect(h.errs).toEqual([expect.stringMatching(/still working/)])
+  expect(h.codes).toEqual([1])
+})
+
 test('logs on a claude session points at attach instead of printing nothing', async () => {
   const h = setup()
   await runLogs({ command: 'logs', id: CLAUDE_ID }, h.deps)

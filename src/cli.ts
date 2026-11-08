@@ -784,9 +784,20 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
   // Without a working PTY there is no way to sit between the terminal and opencode, so fleetview hands
   // the terminal over wholesale and waits. Streams stop for the duration, exactly as they did
   // before the resident host existed; detaching means exiting opencode.
+  // A refusal from the backend (STILL_WORKING while its headless run is alive, a malformed id) is
+  // reported on the roster rather than spawned.
+  const argvFor = (target: AttachRequest): string[] | { message: string } => {
+    try {
+      return backendFor(target).attach({ id: target.sessionId, directory: target.worktree })
+    } catch (error) {
+      return { message: error instanceof Error ? error.message : String(error) }
+    }
+  }
   if (!pty) {
+    const spelled = argvFor(action)
+    if (!Array.isArray(spelled)) return spelled
     out.close()
-    const [command, ...argv] = backendFor(action).attach({ id: action.sessionId, directory: action.worktree })
+    const [command, ...argv] = spelled
     // cwd matches the pty path below: a process-backed resume is cwd-scoped, so without it
     // `claude --resume` fails "No conversation found" from fleetview's directory.
     const result = spawnSync(command, argv, { stdio: 'inherit', cwd: action.worktree, env: envFor(action) })
@@ -795,7 +806,9 @@ export async function attachLoop(action: AttachRequest, out: TerminalGate, insta
   }
   let target = action
   for (;;) {
-    const [command, ...argv] = backendFor(target).attach({ id: target.sessionId, directory: target.worktree })
+    const spelled = argvFor(target)
+    if (!Array.isArray(spelled)) return spelled
+    const [command, ...argv] = spelled
     const reason: AttachEnd = await attachPty({
       command,
       args: argv,
