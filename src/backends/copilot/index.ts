@@ -130,6 +130,9 @@ export function createCopilotBackend({
     }
   }
 
+  // A run of this session is alive: the one this fleetview started, or whoever holds copilot's lock.
+  const busy = (id: string) => isLiveRun(started.get(id)?.pid, id, psImpl) || isLiveRun(lockInfo(join(stateDir, id))?.pid, id, psImpl)
+
   return {
     name: 'copilot',
     capabilities: CAPABILITIES,
@@ -154,7 +157,7 @@ export function createCopilotBackend({
     // whoever holds copilot's session lock: a second resume is a second writer on one session.
     async prompt(id, text, directory) {
       assertSessionId(id) // before the lock read, which builds a path from it
-      if (isLiveRun(started.get(id)?.pid, id, psImpl) || isLiveRun(lockInfo(join(stateDir, id))?.pid, id, psImpl)) throw new Error(STILL_WORKING)
+      if (busy(id)) throw new Error(STILL_WORKING)
       return { id, pid: run(id, [`--resume=${assertSessionId(id)}`], text, directory, []) }
     },
 
@@ -294,7 +297,12 @@ export function createCopilotBackend({
     // wrong repository whether or not it errors.
     // The id is re-asserted because it becomes argv: parseWorkspace already refuses separators at
     // discovery, but this is the last line before a spawn (session-id.ts).
-    attach: ({ id, directory }) => ['copilot', '-C', directory, `--resume=${assertSessionId(id)}`],
+    // Refused while a run is alive, like prompt(): attaching is a second writer on the session too.
+    attach: ({ id, directory }) => {
+      assertSessionId(id)
+      if (busy(id)) throw new Error(STILL_WORKING)
+      return ['copilot', '-C', directory, `--resume=${id}`]
+    },
 
     async abort(id) {
       const own = started.get(id)

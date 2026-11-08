@@ -3206,6 +3206,27 @@ test('@backend routes the dispatch to that backend, never to the opencode client
   expect(deps.client.createSession).not.toHaveBeenCalled()
 })
 
+// Audit 2026-11-07 H1: a process backend's headless run can't be attached to while it works, so
+// alt+enter must not attach (it would be refused) and must not leave the selection on the old row,
+// where the "^x to stop it" advice would stop the wrong session. It selects the new row instead.
+test('alt+enter on a claude dispatch selects the new row instead of attaching', async () => {
+  const deps = withVocab(makeDeps())
+  const claude = fakeBackend('claude', {}, [claudeRow('claude-9', 'do a thing')])
+  const onAction = vi.fn()
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction, backends: { opencode: opencodeStub(deps), claude }, initialBackend: 'claude' }),
+  )
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('do a thing')
+  await waitFor(() => lastFrame().includes('do a thing█'))
+  stdin.write('\x1B\r') // alt+enter: dispatch and attach
+  await waitFor(() => lastFrame().includes('attach when it finishes'))
+  expect(onAction.mock.calls.some((c: any) => c[0].type === 'enter')).toBe(false)
+  // empty input + Enter acts on the selected row: the one just dispatched, not s1
+  await pressUntil(stdin, '\r', () => onAction.mock.calls.some((c: any) => c[0].type === 'enter'))
+  expect((onAction.mock.calls as any).at(-1)[0]).toMatchObject({ type: 'enter', sessionId: 'claude-9' })
+})
+
 test('an unprefixed dispatch still goes to opencode when a second backend is merely available', async () => {
   const deps = makeDeps()
   const claude = fakeBackend('claude')

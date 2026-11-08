@@ -60,3 +60,22 @@ test('the no-pty attach fallback clears the screen on the way back', async () =>
   expect(instance.clear).toHaveBeenCalled()
   expect(out.write).toHaveBeenCalledWith('\x1b[2J\x1b[3J\x1b[H')
 })
+
+// H1 (audit 2026-11-07): a backend that refuses to spell the attach (STILL_WORKING while its
+// headless run is alive) must come back to the roster as a message, with nothing spawned and the
+// terminal never handed over.
+test('a refused attach is reported, not spawned', async () => {
+  spawnSync.mockClear()
+  const out = { close: vi.fn(), open: vi.fn(), write: vi.fn() }
+  const backends = {
+    claude: {
+      attach: () => {
+        throw new Error('still working')
+      },
+    },
+  } as any
+  const result = await attachLoop({ backend: 'claude', sessionId: 'c1', worktree: '/repo/alpha' }, out, null, backends)
+  expect(result).toEqual({ message: 'still working' })
+  expect(spawnSync).not.toHaveBeenCalled()
+  expect(out.close).not.toHaveBeenCalled()
+})
