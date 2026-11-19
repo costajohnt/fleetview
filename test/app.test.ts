@@ -715,8 +715,7 @@ test('repoll recovers from a dead server: shows a banner then clears it once hea
     React.createElement(App, { ...deps, onAction: vi.fn(), projectPollMs: 10 }),
   )
   try {
-    await tick() // let the initial seed land
-    expect(lastFrame()).toContain('fix tests')
+    await waitFor(() => lastFrame().includes('fix tests')) // the initial seed has landed (a fixed tick raced it under load)
     listProjectsFailing = true // next repoll tick fails, driving the recovery attempt
     await waitFor(() => lastFrame().includes('opencode server unreachable — will keep retrying'))
     expect(deps.ensureServerImpl.mock.calls.length).toBeGreaterThanOrEqual(1)
@@ -1040,7 +1039,7 @@ test('space opens peek: loading then content (text parts only — reasoning excl
   const gate = deferred()
   deps.client.listMessages = vi.fn(() => gate.promise)
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // a space before the row exists peeks nothing
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('loading…'))
   expect(deps.client.listMessages).toHaveBeenCalledWith('s1', '/x/alpha')
