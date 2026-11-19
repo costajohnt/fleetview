@@ -1,5 +1,6 @@
 import type { Session, ListedSession, OpencodeMessage, Project, PermissionAsked, QuestionAsked, OpencodeSessionStatus, Worktree } from '../../types.ts'
 import { stripControl } from '../../text-utils.ts'
+import { isRecord } from '../../types.ts'
 import { OpencodeV2Client } from './client-v2.ts'
 
 // The three catalogue endpoints, named for the one field each caller reads off them (an agent's or
@@ -35,18 +36,26 @@ export function authHeader(env: NodeJS.ProcessEnv = process.env): string | undef
 
 // Which server API is on the other end. opencode 2.x replaced 1.x's API outright (JSON lives under
 // /api, everything else is its web app), so the client and the event stream ask once per server
-// and speak whichever it is. A 2.x server answers GET /api/info with JSON even when it refuses
-// (401) or is still booting (503); a 1.x server has no such route.
-// ponytail: memoized per base URL for the process lifetime; a server swapped for another major on
-// the same port is only picked up by a restart, which fleetview's reconnect already does.
+// and speak whichever it is. 2.x answers GET /api/info with its UnauthorizedError when asked
+// without a credential, and with {version, pid, ...} otherwise (200, 503 booting, 500 boot failed).
+// 1.x has no such route.
+//
+// Asked WITHOUT a credential: a 1.x server whose web UI isn't embedded proxies unknown paths,
+// authorization header included, to app.opencode.ai (opencode v1.19.6 shared/ui.ts). Judged by
+// body, not status, for the same reason: whatever that site answers must not read as 2.x.
+// ponytail: memoized per base URL for the process lifetime; an opencode upgraded in place while
+// fleetview runs is picked up when fleetview restarts.
 const apiByUrl = new Map<string, Promise<1 | 2>>()
 export function opencodeApi(baseUrl: string, fetchImpl: typeof fetch = globalThis.fetch): Promise<1 | 2> {
   const known = apiByUrl.get(baseUrl)
   if (known) return known
-  const auth = authHeader()
-  const asked = fetchImpl(`${baseUrl}/api/info`, { headers: auth ? { authorization: auth } : {}, signal: AbortSignal.timeout(10_000) }).then((res) =>
-    (res.headers?.get('content-type') ?? '').includes('application/json') && [200, 401, 503].includes(res.status) ? 2 : 1,
-  )
+  const asked = fetchImpl(`${baseUrl}/api/info`, { signal: AbortSignal.timeout(10_000) })
+    .then((res) => (typeof res.json === 'function' ? res.json() : null))
+    .then(
+      (body): 1 | 2 =>
+        isRecord(body) && (body._tag === 'UnauthorizedError' || (typeof body.version === 'string' && typeof body.pid === 'number')) ? 2 : 1,
+      () => 1, // a body that isn't JSON: not 2.x
+    )
   apiByUrl.set(baseUrl, asked)
   asked.then((api) => settledApi.set(baseUrl, api), () => apiByUrl.delete(baseUrl)) // unreachable is not an answer; ask again next time
   return asked

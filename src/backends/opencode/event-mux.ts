@@ -1,5 +1,5 @@
 import { authHeader, opencodeApi } from './client.ts'
-import { OpencodeV2Client, v1Error, v1Permission, v1Question } from './client-v2.ts'
+import { OpencodeV2Client, isSessionForm, v1Error, v1Permission, v1Question } from './client-v2.ts'
 import type { OpencodeEvent } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 
@@ -144,6 +144,7 @@ export function createV2Translator() {
     const touched = (): OpencodeEvent[] =>
       typeof frame.created === 'number' ? [{ type: 'session.updated', properties: { info: { id: sessionID, time: { updated: frame.created } } } }] : []
     const messageID = asString(d.assistantMessageID)
+    const idle: OpencodeEvent = { type: 'session.status', properties: { sessionID, status: { type: 'idle' } } }
     switch (frame.type) {
       case 'session.status':
         return [{ type: 'session.status', properties: { sessionID, status: isRecord(d.status) ? (d.status as { type: string }) : undefined } }]
@@ -166,18 +167,25 @@ export function createV2Translator() {
         else texts.set(key, text)
         return [{ type: 'message.part.updated', properties: { sessionID, part: { type: 'text', text, messageID } } }]
       }
+      // opencode 2.3.2 publishes no session.status (core/session/execution.ts sends only these
+      // execution events, and opencode's own client derives busy/idle from them), so busy and idle
+      // come from here. Idle after the error, as 1.x ordered them.
+      case 'session.execution.started':
+        return [{ type: 'session.status', properties: { sessionID, status: { type: 'busy' } } }]
+      case 'session.execution.succeeded':
+        return [idle]
       case 'session.execution.failed':
-        return [{ type: 'session.error', properties: { sessionID, error: v1Error(d.error) } }]
-      // 1.x reported a stop as an error named MessageAbortedError, which the store records as
-      // stopped rather than failed.
+        return [{ type: 'session.error', properties: { sessionID, error: v1Error(d.error) } }, idle]
+      // 1.x reported a user's stop as an error named MessageAbortedError, which the store records as
+      // stopped rather than failed. A shutdown, supersede or inactivity stop is just the end.
       case 'session.execution.interrupted':
-        return [{ type: 'session.error', properties: { sessionID, error: { name: 'MessageAbortedError', data: { message: asString(d.reason) ?? '' } } } }]
+        return d.reason === 'user' ? [{ type: 'session.error', properties: { sessionID, error: { name: 'MessageAbortedError', data: { message: 'user' } } } }, idle] : [idle]
       case 'permission.asked':
         return [{ type: 'permission.asked', properties: v1Permission(d) }]
       case 'permission.replied':
         return [{ type: 'permission.replied', properties: { sessionID, requestID: asString(d.requestID) ?? '', reply: d.reply as 'once' | 'always' | 'reject' } }]
       case 'form.created':
-        return isRecord(d.form) ? [{ type: 'question.asked', properties: v1Question(d.form) }] : []
+        return isRecord(d.form) && isSessionForm(d.form) ? [{ type: 'question.asked', properties: v1Question(d.form) }] : []
       case 'form.replied':
         return [{ type: 'question.replied', properties: { sessionID, requestID: asString(d.id) ?? '' } }]
       case 'form.cancelled':

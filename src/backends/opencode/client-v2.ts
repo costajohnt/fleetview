@@ -64,17 +64,23 @@ export function v1Question(form: Record<string, unknown>): QuestionAsked {
   }
 }
 
+// MCP servers can raise forms owned by no session (sessionID "global", opencode v2.3.2
+// schema/form.ts); there is no row to put them on.
+export const isSessionForm = (form: Record<string, unknown>) => typeof form.sessionID === 'string' && form.sessionID !== 'global'
+
 // 1.x answers are positional, one array of option labels per question. 2.x wants a map keyed by
 // field, holding option values: a string for single choice, an array for multiselect. A label
 // that matches no option is a custom answer and goes as typed.
 export function v2Answer(form: Record<string, unknown>, answers: unknown) {
   const rows = Array.isArray(answers) ? answers : []
-  const answer: Record<string, string | string[]> = {}
+  const answer: Record<string, string | string[] | number | boolean> = {}
   records(form.fields).forEach((f, i) => {
     const picked = (Array.isArray(rows[i]) ? rows[i] : []).map(String)
     const options = records(f.options)
     const values = picked.map((label) => asString(options.find((o) => o.label === label)?.value) ?? label)
-    answer[String(f.key)] = f.type === 'multiselect' ? values : (values[0] ?? '')
+    const first = values[0] ?? ''
+    answer[String(f.key)] =
+      f.type === 'multiselect' ? values : f.type === 'boolean' ? first === 'true' : f.type === 'number' || f.type === 'integer' ? Number(first) : first
   })
   return answer
 }
@@ -176,7 +182,7 @@ export class OpencodeV2Client {
   }
 
   async listQuestions(directory?: string) {
-    return records(unwrap(await this.req('GET', '/api/form', undefined, directory))).map(v1Question)
+    return records(unwrap(await this.req('GET', '/api/form', undefined, directory))).filter(isSessionForm).map(v1Question)
   }
 
   async listMessages(id: string): Promise<OpencodeMessage[]> {
@@ -256,8 +262,12 @@ export class OpencodeV2Client {
     return this.req('DELETE', '/api/worktree', { projectID, directory: worktreeDirectory, force: true }, directory)
   }
 
+  // 2.x's `name` is a display name ("Build"); the id is what a session runs as and what `@build`
+  // matches, and `hidden` replaces 1.x's convention of internal agent names.
   async listAgents() {
-    return records(unwrap(await this.req('GET', '/api/agent'))) as AgentInfo[]
+    return records(unwrap(await this.req('GET', '/api/agent')))
+      .filter((a) => a.hidden !== true)
+      .map((a) => ({ ...a, name: String(a.id ?? a.name) })) as AgentInfo[]
   }
   async listCommands() {
     return records(unwrap(await this.req('GET', '/api/command'))) as CommandInfo[]

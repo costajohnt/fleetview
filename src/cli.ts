@@ -442,6 +442,11 @@ export async function main() {
   // #107: relative `--cwd` becomes absolute here, between parsing and doing, so every consumer
   // below (listSessions, rosterLoop, runBg) compares the same absolute path.
   const args = resolveCwd(parsed)
+  // opencode 2.x reads OPENCODE_PASSWORD before OPENCODE_SERVER_PASSWORD; 1.x and fleetview's own
+  // requests read only the latter. Aliasing it here keeps server, client and attach on one password
+  // instead of fleetview minting a second one the 2.x child would ignore (a 401 on every request).
+  // ponytail: both set to different values is left alone; a 2.x server then 401s fleetview.
+  if (process.env.OPENCODE_PASSWORD && !process.env.OPENCODE_SERVER_PASSWORD) process.env.OPENCODE_SERVER_PASSWORD = process.env.OPENCODE_PASSWORD
   const serverFile = defaultServerFile()
   const ensureServerForCommands = makeEnsureServer({ isServerHealthy, isAuthEnforced, probeServer, spawnServer, saveServer, serverFile })
 

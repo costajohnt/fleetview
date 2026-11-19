@@ -173,7 +173,6 @@ test('2.x events translate to the 1.x events the store handles', () => {
   expect(t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm', ordinal: 0, delta: 'lo' } })).toEqual([
     { type: 'message.part.updated', properties: { sessionID: 's', part: { type: 'text', text: 'Hello', messageID: 'm' } } },
   ])
-  expect(t({ type: 'session.execution.interrupted', data: { sessionID: 's', reason: 'user' } })[0]).toMatchObject({ type: 'session.error', properties: { error: { name: 'MessageAbortedError' } } })
   expect(t({ type: 'session.execution.failed', data: { sessionID: 's', error: { type: 'APIError', message: 'x' } } })[0]).toEqual({ type: 'session.error', properties: { sessionID: 's', error: { name: 'APIError', data: { message: 'x' } } } })
   expect(t({ type: 'form.created', data: { form } })[0]).toMatchObject({ type: 'question.asked', properties: { id: 'frm_1', sessionID: 'ses_1' } })
   expect(t({ type: 'form.replied', data: { id: 'frm_1', sessionID: 'ses_1' } })).toEqual([{ type: 'question.replied', properties: { sessionID: 'ses_1', requestID: 'frm_1' } }])
@@ -198,4 +197,61 @@ test('attach on a 2.x server opens its TUI with --server and the directory', asy
   await c.listSessions('/repo') // the roster has always listed before anything can be attached
   const backend = createOpencodeBackend({ server: { host: '127.0.0.1', port: p }, client: c })
   expect(backend.attach({ id: 'ses_1', directory: '/repo' } as any)).toEqual(['opencode', '--server', `http://127.0.0.1:${p}`, '-s', 'ses_1', '/repo'])
+})
+
+// Review findings on the first cut.
+test('busy and idle come from 2.x execution events, which is all 2.3.2 publishes', () => {
+  const t = createV2Translator()
+  const status = (type: string) => ({ type: 'session.status', properties: { sessionID: 's', status: { type } } })
+  expect(t({ type: 'session.execution.started', data: { sessionID: 's' } })).toEqual([status('busy')])
+  expect(t({ type: 'session.execution.succeeded', data: { sessionID: 's' } })).toEqual([status('idle')])
+  expect(t({ type: 'session.execution.failed', data: { sessionID: 's', error: { type: 'E', message: 'm' } } }).map((e) => e.type)).toEqual(['session.error', 'session.status'])
+  expect(t({ type: 'session.execution.interrupted', data: { sessionID: 's', reason: 'user' } })).toEqual([
+    { type: 'session.error', properties: { sessionID: 's', error: { name: 'MessageAbortedError', data: { message: 'user' } } } },
+    status('idle'),
+  ])
+  // only the user's own stop reads as stopped
+  expect(t({ type: 'session.execution.interrupted', data: { sessionID: 's', reason: 'shutdown' } })).toEqual([status('idle')])
+})
+
+test('forms owned by no session (MCP, "global") never become questions', async () => {
+  const t = createV2Translator()
+  expect(t({ type: 'form.created', data: { form: { ...form, sessionID: 'global' } } })).toEqual([])
+  const { c } = client({ 'GET /api/form': { data: [form, { ...form, id: 'frm_g', sessionID: 'global' }] } })
+  expect((await c.listQuestions('/repo')).map((q) => q.id)).toEqual(['frm_1'])
+})
+
+test('boolean and number fields are answered with their own types', () => {
+  const typed = { fields: [{ key: 'b', type: 'boolean' }, { key: 'n', type: 'integer' }] }
+  expect(v2Answer(typed, [['true'], ['3']])).toEqual({ b: true, n: 3 })
+})
+
+test('agents are named by id, and hidden ones are left out', async () => {
+  const { c } = client({ 'GET /api/agent': { data: [{ id: 'build', name: 'Build', hidden: false }, { id: 'compaction', name: 'Compaction', hidden: true }] } })
+  expect((await c.listAgents()).map((a) => a.name)).toEqual(['build'])
+})
+
+test('the API probe carries no credential, and only 2.x bodies read as 2.x', async () => {
+  const seen: any[] = []
+  const answer = (body: unknown, status: number) => (url: string, init: any) => {
+    seen.push(init?.headers)
+    return json(body, status)
+  }
+  const base = () => `http://127.0.0.1:${port++}`
+  const { opencodeApi } = await import('../src/backends/opencode/client.ts')
+  process.env.OPENCODE_SERVER_PASSWORD = 'secret'
+  try {
+    expect(await opencodeApi(base(), answer({ _tag: 'UnauthorizedError', message: 'Authentication required' }, 401) as any)).toBe(2)
+    expect(await opencodeApi(base(), answer({ version: '2.3.2', pid: 1 }, 500) as any)).toBe(2) // boot failed is still 2.x
+    expect(await opencodeApi(base(), answer({ error: 'not found' }, 404) as any)).toBe(1) // e.g. a proxied 1.x
+    expect(await opencodeApi(base(), html as any)).toBe(1)
+  } finally {
+    delete process.env.OPENCODE_SERVER_PASSWORD
+  }
+  expect(seen.every((h) => !h?.authorization)).toBe(true)
+})
+
+test('children never inherit either opencode password name', async () => {
+  const { envWithoutServerPassword } = await import('../src/registry.ts')
+  expect(envWithoutServerPassword({ OPENCODE_SERVER_PASSWORD: 'a', OPENCODE_PASSWORD: 'b', PATH: '/bin' })).toEqual({ PATH: '/bin' })
 })
