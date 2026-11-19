@@ -144,8 +144,18 @@ export class OpencodeV2Client {
   }
 
   async listProjects(): Promise<Project[]> {
-    // 2.x names the repository root `canonical`; 1.x called it `worktree`.
-    return records(unwrap(await this.req('GET', '/api/project'))).map((p) => ({ ...p, worktree: String(p.canonical ?? p.directory ?? '') }))
+    // 2.x names the repository root `canonical`; 1.x called it `worktree`. 1.x also listed a
+    // project's worktrees in `sandboxes`, which is how the roster finds worktree sessions after a
+    // restart; 2.3.2 leaves it empty (verified live), so it is filled from the worktree list.
+    const projects = records(unwrap(await this.req('GET', '/api/project')))
+    return Promise.all(
+      projects.map(async (p) => {
+        const worktree = String(p.canonical ?? p.directory ?? '')
+        const listed = await this.#worktreesOf(String(p.id)).catch(() => [])
+        const sandboxes = [...new Set([...(Array.isArray(p.sandboxes) ? p.sandboxes.map(String) : []), ...listed.map((w) => w.directory)])].filter((d) => d !== worktree)
+        return { ...p, worktree, sandboxes }
+      }),
+    )
   }
 
   // 2.x pages its listing (50 newest per page); 1.x returned every session. Follow the cursor.
@@ -244,8 +254,12 @@ export class OpencodeV2Client {
   }
 
   async listWorktrees(directory?: string): Promise<Worktree[]> {
-    const projectID = await this.#projectID(directory)
-    const rows = records(unwrap(await this.req('GET', `/api/worktree?projectID=${encodeURIComponent(projectID)}`, undefined, directory)))
+    return this.#worktreesOf(await this.#projectID(directory))
+  }
+
+  // Includes the main checkout itself (verified live against 2.3.2).
+  async #worktreesOf(projectID: string): Promise<Worktree[]> {
+    const rows = records(unwrap(await this.req('GET', `/api/worktree?projectID=${encodeURIComponent(projectID)}`)))
     return rows.map((w) => ({ name: basename(String(w.directory)), directory: String(w.directory) }))
   }
 

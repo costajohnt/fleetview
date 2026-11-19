@@ -53,9 +53,12 @@ test('an untitled 2.x session lists with an empty title, not undefined', async (
   expect((await c.listSessions('/repo'))[0].title).toBe('')
 })
 
-test('projects map canonical to worktree', async () => {
-  const { c } = client({ 'GET /api/project': [{ id: 'p1', canonical: '/repo', sandboxes: ['/repo-wt'] }] })
-  expect(await c.listProjects()).toEqual([expect.objectContaining({ worktree: '/repo', sandboxes: ['/repo-wt'] })])
+test('projects map canonical to worktree, with worktrees filled into sandboxes (2.3.2 leaves it empty)', async () => {
+  const { c } = client({
+    'GET /api/project': [{ id: 'p1', canonical: '/repo', sandboxes: [] }],
+    'GET /api/worktree': [{ directory: '/repo' }, { directory: '/wt/feature' }],
+  })
+  expect(await c.listProjects()).toEqual([expect.objectContaining({ worktree: '/repo', sandboxes: ['/wt/feature'] })])
 })
 
 test('session status keeps only this directory\'s running sessions, as busy', async () => {
