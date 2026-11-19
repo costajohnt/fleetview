@@ -130,7 +130,7 @@ test('backoff sleep removes its abort listener when the timer elapses', async ()
   vi.useFakeTimers()
   const fetchImpl = vi.fn(() => Promise.reject(new Error('down')))
   const conn = connectEvents({ host: 'h', port: 1, directory: '/repos/r' }, { fetchImpl, onEvent: vi.fn(), onOffline: vi.fn(), onOnline: vi.fn(), reconnect: true })
-  await Promise.resolve() // let first failure start before spies install
+  await vi.advanceTimersByTimeAsync(0) // let the first failure reach its backoff before spies install
   const addSpy = vi.spyOn(AbortSignal.prototype, 'addEventListener')
   const removeSpy = vi.spyOn(AbortSignal.prototype, 'removeEventListener')
   await vi.advanceTimersByTimeAsync(1000) // cycle 1 backoff elapses

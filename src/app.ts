@@ -7,7 +7,7 @@ import { EMPTY, atEnd, type TextCursor } from './text-cursor.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND, NO_AGENT_CLI, resolveBackend } from './backends/index.ts'
-import { OPENCODE_MISSING, OPENCODE_UNSUPPORTED } from './backends/opencode/server-manager.ts'
+import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { withMember, withoutMember, type Roster as RosterType } from './roster-store.ts'
 import { Roster, flattenGroups, navigableRows } from './ui/roster.ts'
 import { DispatchInput, inputRows, INPUT_BOX_ROWS } from './ui/dispatch-input.ts'
@@ -937,12 +937,11 @@ export function App({
   if (!serverReady) {
     // A missing opencode CLI is not something a restart fixes, so it is the headline on its own.
     // cli.ts only gets here with OPENCODE_MISSING when claude and copilot are missing too (M7).
-    // An unsupported opencode (#165) isn't fixed by a restart either: its reason is the headline.
-    if (serverFailReason === OPENCODE_MISSING || serverFailReason === OPENCODE_UNSUPPORTED) {
+    if (serverFailReason === OPENCODE_MISSING) {
       return React.createElement(
         Box,
         { flexDirection: 'column' },
-        React.createElement(Text, null, serverFailReason === OPENCODE_MISSING ? NO_AGENT_CLI : OPENCODE_UNSUPPORTED),
+        React.createElement(Text, null, NO_AGENT_CLI),
         React.createElement(Text, { dimColor: true }, '(esc to quit)'),
       )
     }

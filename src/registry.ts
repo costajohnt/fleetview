@@ -19,7 +19,8 @@ export const defaultServerFile = () => join(configDir(), 'server.json')
 // Lives here rather than in an opencode module so the process-backed backends and the notify hook
 // can reach it without importing across backend families.
 export const envWithoutServerPassword = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
-  const { OPENCODE_SERVER_PASSWORD, ...rest } = env
+  // opencode 2.x reads OPENCODE_PASSWORD first and treats both names as secret; so does this.
+  const { OPENCODE_SERVER_PASSWORD, OPENCODE_PASSWORD, ...rest } = env
   return rest
 }
 

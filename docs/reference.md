@@ -149,8 +149,8 @@ else. (A postinstall step restores `spawn-helper`'s executable bit, which the np
 without it attaching fails with `posix_spawnp failed`.)
 
 The wire shapes are verified against opencode 1.18.4, so a much newer server may drift. opencode
-2.x replaced the server API outright and is not supported yet: fleetview checks `opencode --version`
-before starting a server, says so, and shows claude and copilot sessions only. The
+2.x replaced the server API outright; fleetview detects a 2.x server (`GET /api/info`) and translates
+its routes and events to the 1.x shapes above. That layer is built from opencode 2.3.2's source. The
 pre-rename `ROOST_*` variables and `roost` directories are still read for now; they will be removed
 in a future release.
 
