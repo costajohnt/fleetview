@@ -7,7 +7,7 @@ import { join, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
 import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
-import { OPENCODE_MISSING } from '../src/backends/opencode/server-manager.ts'
+import { OPENCODE_MISSING, OPENCODE_UNSUPPORTED, opencodeMajor } from '../src/backends/opencode/server-manager.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -471,6 +471,29 @@ test('ENOENT (opencode not installed) fails before any spawn or poll, with its o
   expect(spawnCalls).toBe(0)
   expect(healthChecks).toBe(1) // the initial probe of the configured port only, no poll window
   expect(deps.spawnSyncImpl).toHaveBeenCalledWith('opencode', ['--version'])
+})
+
+// #165: a 2.x opencode serves its web app where fleetview probes, so every spawned server stayed
+// "unhealthy" and each launch leaked another one. The version is asked before any spawn now.
+test('opencode 2.x fails before any spawn, with its own reason', async () => {
+  let spawnCalls = 0
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    spawnServer: () => { spawnCalls += 1; return 777 },
+    saveServer: () => { throw new Error('should not save a record for a server fleetview will not start') },
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: vi.fn(() => ({ status: 0, stdout: Buffer.from('2.3.2\n') })),
+  }
+  expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: false, server, reason: OPENCODE_UNSUPPORTED })
+  expect(spawnCalls).toBe(0)
+})
+
+test('opencodeMajor reads the major version and shrugs at anything else', () => {
+  expect(opencodeMajor('2.3.2\n')).toBe(2)
+  expect(opencodeMajor('v1.19.6')).toBe(1)
+  expect(opencodeMajor('')).toBeNull()
+  expect(opencodeMajor('opencode: command not found')).toBeNull()
 })
 
 // --- `server stop`: the pid in server.json is a claim, not a fact ---
@@ -941,10 +964,30 @@ test('server status exits 1 when the server is not answering, and says so about 
 })
 
 test('server stop on a server that is not running says so and leaves the exit code alone', async () => {
-  const h = serverHarness({ healthy: false })
+  const h = serverHarness({ healthy: false, identity: { ok: false, reason: 'no such process' } })
   await runServer({ command: 'server', serverAction: 'stop' }, h.deps)
   expect(h.out).toEqual(['server is not running — nothing to stop'])
   expect(h.codes).toEqual([])
+  expect(h.killed).toEqual([])
+})
+
+// #165: opencode 2.x serves its web app where fleetview probes, so fleetview's own server never reads
+// as healthy. It is still running at the recorded pid, and `server stop` used to report "nothing to
+// stop" and leave it for the user to find and kill by hand.
+test('server stop kills a non-answering server whose recorded pid is still opencode serve, and waits on the pid', async () => {
+  let alive = true
+  const h = serverHarness({ healthy: false, kill: () => { alive = false } })
+  h.deps.identifyServer.mockImplementation(() => (alive ? { ok: true, command: 'opencode serve' } : { ok: false, reason: 'no such process' }) as any)
+  await runServer({ command: 'server', serverAction: 'stop' }, h.deps)
+  expect(h.killed).toEqual([[4242, 'SIGTERM']])
+  expect(h.out).toEqual(['stopped opencode server on :4900'])
+  expect(h.codes).toEqual([0])
+})
+
+test('server stop does nothing for a non-answering server with no recorded pid', async () => {
+  const h = serverHarness({ healthy: false, pid: null })
+  await runServer({ command: 'server', serverAction: 'stop' }, h.deps)
+  expect(h.out).toEqual(['server is not running — nothing to stop'])
   expect(h.killed).toEqual([])
 })
 
