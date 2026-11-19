@@ -620,7 +620,7 @@ test('a mid-arm reorder cannot make the second ^x delete a different session tha
     ]),
   )
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await waitFor(() => lastFrame().includes('second')) // #168: wait for the row, not a fixed tick
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0) // #168: the seed has landed (its rows are browse-only, not in the main view)
   stdin.write('\x02')
   await waitFor(() => lastFrame().includes('❯'))
   stdin.write('\x18') // arms the delete on s1 (top row)
@@ -892,7 +892,7 @@ test('space in browse adds a non-member session to the roster and marks it; spac
   const deps = makeDeps()
   deps.roster = { groupBy: 'state', sessions: [] }
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0) // #168: the seed has landed (its rows are browse-only, not in the main view)
   stdin.write('\x02')
   await waitFor(() => lastFrame().includes('fix tests')) // browse is showing the row
   expect(lastFrame()).not.toContain('[roster]')
@@ -2259,7 +2259,7 @@ test('text with more than two lines collapses too, and the same paste keeps its 
   await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('a\nb\nc\nd')
   await waitFor(() => lastFrame().includes('[Pasted text #1]'))
-  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
+  await tick()
   stdin.write('a\nb\nc\nd') // the same attachment, not a second one
   await waitFor(() => lastFrame().includes('[Pasted text #1][Pasted text #1]'))
   expect(lastFrame()).not.toContain('#2')
@@ -2919,7 +2919,7 @@ test('gh being unavailable leaves the roster exactly as it was', async () => {
     }),
   )
   await waitFor(() => lastFrame().includes('fix tests'))
-  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
+  await tick()
   const frame = lastFrame()
   expect(frame).not.toContain('#77')
   expect(frame).not.toContain('gh is not installed') // no startup nag; peek carries the reason
@@ -2938,7 +2938,7 @@ test('an open pull request adds no group and no count — the row sits with its 
     }),
   )
   await waitFor(() => lastFrame().includes('fix tests'))
-  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
+  await tick()
   expect(lastFrame()).not.toContain('ready for review')
 })
 
@@ -3640,7 +3640,7 @@ test('^x^x keeps a local worktree another session still runs in', async () => {
   await waitFor(() => claude.abort.mock.calls.length > 0)
   stdin.write('\x18')
   await waitFor(() => lastFrame().includes('sibling work') && !lastFrame().includes('claude work'))
-  await waitFor(() => lastFrame().includes('sibling work')) // #168: wait for the row, not a fixed tick
+  await tick()
   expect(existsSync(wt)).toBe(true)
 })
 
@@ -3991,7 +3991,7 @@ test('#60: → and ^X in one stdin read attach the row without aborting it', asy
   // One write, two keys. Retried because Node can drop a stdin chunk wholesale (see pressUntil) —
   // a dropped chunk delivers neither key, so the retry cannot mask the bug.
   await pressUntil(stdin, '\x1B[C\x18', () => onAction.mock.calls.some((c: any) => c[0].type === 'enter'))
-  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
+  await tick()
   expect(deps.client.abortSession).not.toHaveBeenCalled()
   expect(onAction.mock.calls.filter((c: any) => c[0].type === 'enter')).toHaveLength(1)
 })
