@@ -284,7 +284,13 @@ export function createClaudeBackend({
     // has to be the session's directory or --resume won't find the session at all. The id is
     // re-asserted here because it becomes argv: discovery already refuses malformed ids, but this is
     // the last line before a spawn and a thrown name beats a spawned flag (session-id.ts).
-    attach: ({ id }: SessionRef) => ['claude', '--resume', assertSessionId(id)],
+    // Refused while the recorded run is alive, for the same reason prompt() is (M15): an interactive
+    // --resume beside the headless run is a second writer on one transcript.
+    attach: ({ id }: SessionRef) => {
+      assertSessionId(id)
+      if (isLiveRun(readMeta(id)?.pid, id, psImpl)) throw new Error(STILL_WORKING)
+      return ['claude', '--resume', id]
+    },
 
     // Negative signal, so the whole process group goes: `detached: true` made the child a group
     // leader, and killing the pid alone would leave its tool subprocesses (a running test suite, a

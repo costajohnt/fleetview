@@ -50,6 +50,12 @@ test('hints offer roster membership only in browse', () => {
   expect(hints({ empty: true, view: 'main' } as any)).toContain('^b browse')
 })
 
+// Audit 2026-11-07 H1: ⇧⏎ only attaches on opencode, so it is not offered for a process backend.
+test('the footer drops ⇧⏎ +attach when the dispatch would go to a process backend', () => {
+  expect(hints({ empty: false, view: 'main' })).toContain('⇧⏎ +attach')
+  expect(hints({ empty: false, view: 'main', attachable: false })).not.toContain('⇧⏎')
+})
+
 // App reserves exactly one row for this line. At 109 graphemes it wrapped to two, so the frame
 // came out a row taller than the terminal and scrolled the roster's top away.
 test('the footer fits on one row of a standard terminal in every state', () => {

@@ -131,7 +131,8 @@ without skip-permissions, so it denies by default.
 ## Keys
 
 ↑↓ move (rows and group headers) · ⏎ attach, dispatch if there's text, or collapse a group
-header · ⇧⏎ (or ⌥⏎) dispatch and attach · space peek · → attach (with text typed, ← → move the
+header · ⇧⏎ (or ⌥⏎) dispatch and attach (opencode; a claude or copilot
+dispatch selects the new row instead, attach once it finishes) · space peek · → attach (with text typed, ← → move the
 caret and ⌥← ⌥→ move it a word) · ^z detach and come back ·
 ^s state/project grouping · ^t pin · ⇧↑ ⇧↓ reorder within a group · ^r rename · ^x stop,
 again within 2s to delete (on a group header: the whole group) · ^j newline · ^g edit the

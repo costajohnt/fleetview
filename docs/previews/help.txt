@@ -1,7 +1,7 @@
 [1mShortcuts[22m
 [36m↑ / ↓    [39m [2mmove between rows[22m
 [36m⏎        [39m [2mattach to the selected session, or dispatch if there is text in the input[22m
-[36m⇧⏎ / ⌥⏎  [39m [2mdispatch and attach immediately[22m
+[36m⇧⏎ / ⌥⏎  [39m [2mdispatch and attach (opencode; claude/copilot: attach when done)[22m
 [36mspace    [39m [2mpeek at the selected session (types a space when the input has text)[22m
 [36m1..9     [39m [2min peek, answer the pending question with that choice[22m
 [36my / a / d[39m [2min peek, allow once / always allow / deny a permission[22m

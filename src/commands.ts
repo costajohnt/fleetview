@@ -916,7 +916,16 @@ export async function runAttach(args: ParsedArgs, deps: SessionCommandDeps) {
   const d = withDefaults(deps)
   const found = await findSession(args.id, { ...d, cwd: args.cwd })
   if (!found) return
-  const [command, ...argv] = adapterFor(found, d.backends).attach({ id: found.id, directory: found.worktree })
+  let spelled: string[]
+  try {
+    spelled = adapterFor(found, d.backends).attach({ id: found.id, directory: found.worktree })
+  } catch (e) {
+    // STILL_WORKING: the headless run is alive, and a second --resume would be a second writer.
+    d.error(`couldn't attach ${found.id}: ${e instanceof Error ? e.message : String(e)}`)
+    d.setExitCode(1)
+    return
+  }
+  const [command, ...argv] = spelled
   // cwd is the session's worktree: a process-backed resume (`claude --resume <id>`) is cwd-scoped
   // and fails "No conversation found" from fleetview's own directory. Harmless for opencode, which
   // carries the directory in its argv. The env follows attachLoop's rule: only opencode's attach

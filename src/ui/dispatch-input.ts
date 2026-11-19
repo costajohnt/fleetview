@@ -16,9 +16,11 @@ import type { SuggestionList } from './view-types.ts'
 // that App had not reserved, so the frame was a row taller than the terminal and scrolled the top
 // of the roster out of the repaint region. The full list lives behind `?`, which is where agent
 // view puts it too.
-export function hints({ empty, view, kind }: { empty: boolean; view: string; kind?: string }) {
+// `attachable` false: the dispatch goes to a process backend, whose headless run can't be attached
+// to until it finishes, so ⇧⏎ is not offered.
+export function hints({ empty, view, kind, attachable = true }: { empty: boolean; view: string; kind?: string; attachable?: boolean }) {
   if (kind === 'filter') return 'filtering · esc clears'
-  const verb = kind === 'shell' ? '⏎ run shell job' : '⏎ dispatch · ⇧⏎ +attach'
+  const verb = kind === 'shell' ? '⏎ run shell job' : attachable ? '⏎ dispatch · ⇧⏎ +attach' : '⏎ dispatch'
   const primary = empty ? '⏎ attach · space peek' : verb
   const fleetviewOnly = view === 'browse' ? '^a add/remove · ^b back' : '^b browse'
   return `${primary} · ↑↓ move · ${fleetviewOnly} · ^x stop · ? help`
@@ -45,6 +47,8 @@ export type DispatchInputProps = {
   // What parseInput made of the text — 'dispatch' | 'shell' | 'filter' | 'empty'. Optional because
   // the hints have a default reading ("⏎ dispatch") for an unclassified input.
   kind?: string
+  // Whether ⇧⏎ can attach to what this text would dispatch (see hints). Defaults to true.
+  attachable?: boolean
   suggestions?: SuggestionList | null
   columns?: number
   focused?: boolean
@@ -53,7 +57,7 @@ export type DispatchInputProps = {
   cursor?: number
 }
 
-export function DispatchInput({ value, view, notice, kind, suggestions, columns = 80, focused = true, cursor }: DispatchInputProps) {
+export function DispatchInput({ value, view, notice, kind, attachable, suggestions, columns = 80, focused = true, cursor }: DispatchInputProps) {
   const empty = value.length === 0
   // A solid block caret, no blink (John's polish pass — the animation earned nothing).
   const caret = focused ? CARET : ''
@@ -122,7 +126,7 @@ export function DispatchInput({ value, view, notice, kind, suggestions, columns 
             ),
           ),
     ),
-    React.createElement(Text, { dimColor: true }, fit(hints({ empty, view, kind }))),
+    React.createElement(Text, { dimColor: true }, fit(hints({ empty, view, kind, attachable }))),
   )
 }
 
