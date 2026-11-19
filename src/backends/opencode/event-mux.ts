@@ -55,7 +55,7 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
         const auth = authHeader()
         // 2.x has one server-wide stream in its own vocabulary; it is cut to this directory and
         // translated to 1.x's events here, so the store downstream never knows which it got.
-        const v2 = (await opencodeApi(base, fetchImpl)) === 2 ? await v2Filter(base, directory, fetchImpl) : null
+        const v2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 ? await v2Filter(base, directory, fetchImpl) : null // unanswered: the stream attempt below fails the same way and backs off
         const url = v2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
         const res = await fetchImpl(url, { signal: ac.signal, headers: auth ? { authorization: auth } : undefined })
         if (stopped) return
