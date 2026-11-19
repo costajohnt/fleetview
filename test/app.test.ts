@@ -184,8 +184,8 @@ test('lists sessions on start; Enter emits enter action with worktree', async ()
 
 test('typing a prompt and pressing Enter dispatches createSession + promptAsync with directory', async () => {
   const deps = makeDeps()
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('do a thing')
   await tick()
   stdin.write('\r') // input holds text → dispatch, not attach
@@ -198,10 +198,10 @@ test('typing a prompt and pressing Enter dispatches createSession + promptAsync 
 test('launch --model / --agent seed the dispatch model and default agent (#87)', async () => {
   const deps = makeDeps()
   const model = { providerID: 'anthropic', id: 'claude-opus-5' }
-  const { stdin } = render(
+  const { stdin, lastFrame } = render(
     React.createElement(App, { ...deps, onAction: vi.fn(), initialModel: model, initialAgent: 'reviewer' }),
   )
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
@@ -244,8 +244,8 @@ test('dispatch auto-adds the new session to the roster and persists before promp
     order.push('promptAsync')
     return Promise.resolve({})
   })
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
@@ -306,8 +306,8 @@ test('an arrow-key move while the dispatch is in flight wins over the auto-selec
 test('dispatch membership survives a promptAsync failure', async () => {
   const deps = makeDeps()
   deps.client.promptAsync = vi.fn(() => Promise.reject(new Error('down')))
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
@@ -321,8 +321,8 @@ test('dispatch membership survives a promptAsync failure', async () => {
 
 test('browse: ^x twice deletes selected session (stop, then delete)', async () => {
   const deps = makeDeps()
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x02')
   await tick()
   stdin.write('\x18')
@@ -334,8 +334,8 @@ test('browse: ^x twice deletes selected session (stop, then delete)', async () =
 
 test('browse: ^x twice also prunes the ghost roster membership + persists (F1)', async () => {
   const deps = makeDeps() // s1 starts as a roster member (default fixture)
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x02')
   await tick()
   stdin.write('\x18')
@@ -361,8 +361,8 @@ test('main: ^a removes from roster only — session NOT deleted or stopped', asy
 
 test('main: ^x twice removes from roster AND deletes the session', async () => {
   const deps = makeDeps()
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x18')
   await tick()
   stdin.write('\x18')
@@ -418,7 +418,7 @@ test('dispatch failure flags project offline instead of crashing', async () => {
   const deps = makeDeps()
   deps.client.createSession = vi.fn(() => Promise.reject(new Error('server down')))
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
@@ -430,8 +430,8 @@ test('dispatch failure flags project offline instead of crashing', async () => {
 
 test('r renames selected session', async () => {
   const deps = makeDeps()
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x12')
   await tick()
   stdin.write(' v2')
@@ -445,8 +445,8 @@ test('r renames selected session', async () => {
 // the dispatch input, so they don't land verbatim in the title sent to the server.
 test('#112.3: rename input strips control bytes and escape residue from a paste', async () => {
   const deps = makeDeps()
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x12')
   await tick()
   stdin.write(' v2\x00\x07\x1f') // NUL, BEL, and a C0 unit-separator byte from a paste
@@ -460,8 +460,8 @@ test('#112.3: rename input strips control bytes and escape residue from a paste'
 // slice(0, -1) after a surrogate-pair emoji leaves a lone (unpaired) surrogate behind.
 test('M3: backspace in the rename input after an emoji removes the whole emoji, not half of it', async () => {
   const deps = makeDeps()
-  const { stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x12')
   await tick()
   stdin.write('🔥')
@@ -478,7 +478,7 @@ test('rename failure flags project offline instead of crashing', async () => {
   const deps = makeDeps()
   deps.client.renameSession = vi.fn(() => Promise.reject(new Error('down')))
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x12')
   await tick()
   stdin.write(' v2')
@@ -494,7 +494,7 @@ test('browse: kill failure flags project offline instead of crashing', async () 
   const deps = makeDeps()
   deps.client.deleteSession = vi.fn(() => Promise.reject(new Error('down')))
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x02')
   await tick()
   stdin.write('\x18')
@@ -508,7 +508,7 @@ test('a succeeding CRUD call clears a sticky offline flag from an earlier failur
   const deps = makeDeps()
   deps.client.deleteSession = vi.fn(() => Promise.reject(new Error('down')))
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x02')
   await tick()
   stdin.write('\x18')
@@ -567,8 +567,8 @@ test('killing the selected last row clamps selection; Enter targets the remainin
     ]),
   )
   const onAction = vi.fn()
-  const { stdin } = render(React.createElement(App, { ...deps, onAction }))
-  await tick()
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
+  await waitFor(() => lastFrame().includes('second')) // #168: wait for the row, not a fixed tick
   stdin.write('\x1B[B') // down arrow → select s2 (last row)
   await tick()
   stdin.write('\x01') // main: remove s2 from roster (not a hard delete)
@@ -620,7 +620,7 @@ test('a mid-arm reorder cannot make the second ^x delete a different session tha
     ]),
   )
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('second')) // #168: wait for the row, not a fixed tick
   stdin.write('\x02')
   await waitFor(() => lastFrame().includes('❯'))
   stdin.write('\x18') // arms the delete on s1 (top row)
@@ -761,7 +761,7 @@ test('repoll recovery via ensureServerImpl on a DIFFERENT port dispatches reconn
     React.createElement(App, { ...deps, onAction, projectPollMs: 10 }),
   )
   try {
-    await tick()
+    await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
     listProjectsFailing = true
     await waitFor(() => onAction.mock.calls.some((c: any) => c[0].type === 'reconnect'))
   } finally {
@@ -892,7 +892,7 @@ test('space in browse adds a non-member session to the roster and marks it; spac
   const deps = makeDeps()
   deps.roster = { groupBy: 'state', sessions: [] }
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x02')
   await waitFor(() => lastFrame().includes('fix tests')) // browse is showing the row
   expect(lastFrame()).not.toContain('[roster]')
@@ -911,7 +911,7 @@ test('space in browse adds a non-member session to the roster and marks it; spac
 test('s toggles main groupBy between state and project, persists, and switches rendering', async () => {
   const deps = makeDeps()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   expect(lastFrame().split('\n').some((l) => l.trim().replace(/^\u276f /, '').startsWith('alpha'))).toBe(false) // state mode: no project header
   stdin.write('\x13')
   await waitFor(() => deps.persistRoster.mock.calls.some((c: any) => c[0].groupBy === 'project') && lastFrame().split('\n').some((l) => l.trim().replace(/^\u276f /, '').startsWith('alpha')))
@@ -1006,7 +1006,7 @@ test('main footer lists the chords that fit; the rest live behind ?', async () =
 test('browse footer shows ^a add/remove and back hint', async () => {
   const deps = makeDeps()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x02')
   await waitFor(() => lastFrame().includes('^a add/remove'))
   expect(lastFrame()).toContain('^b back')
@@ -1015,7 +1015,7 @@ test('browse footer shows ^a add/remove and back hint', async () => {
 test('esc in browse returns to main', async () => {
   const deps = makeDeps()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('\x02')
   await waitFor(() => lastFrame().includes('^a add/remove'))
   stdin.write('\x1B')
@@ -1075,7 +1075,7 @@ test('esc closes peek and restores the list', async () => {
   const deps = makeDeps()
   deps.client.listMessages = vi.fn(() => Promise.resolve([]))
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('no messages yet'))
   stdin.write('\x1B') // esc
@@ -1104,7 +1104,7 @@ test('up arrow while peeking re-peeks the neighbor session', async () => {
     ]),
   )
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('second')) // #168: wait for the row, not a fixed tick
   stdin.write('\x1B[B') // down arrow → select s2
   await tick()
   stdin.write(' ') // open peek on s2
@@ -1144,7 +1144,7 @@ test('peek down arrow steps relative to the peeked row, not row 0', async () => 
     ]),
   )
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('third')) // #168: wait for the row, not a fixed tick
   stdin.write('\x1B[B') // down → s2
   await tick()
   stdin.write('\x1B[B') // down → s3
@@ -1178,7 +1178,7 @@ test('stale peek response is discarded once a second session is selected (latest
   const gate2 = deferred()
   deps.client.listMessages = vi.fn((id) => (id === 's1' ? gate1.promise : gate2.promise))
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('second')) // #168: wait for the row, not a fixed tick
   stdin.write(' ') // peek s1 — fetch in flight
   await waitFor(() => lastFrame().includes('loading…'))
   stdin.write('\x1B[B') // move to s2 before s1's fetch resolves — supersedes it
@@ -1198,7 +1198,7 @@ test('peek fetch failure shows a peek-local error line and the app stays respons
   deps.client.listMessages = vi.fn(() => Promise.reject(new Error('down')))
   const onAction = vi.fn()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write(' ')
   await waitFor(() => lastFrame().includes("couldn't load messages"))
   expect(lastFrame()).not.toContain('offline') // peek errors are peek-local, not project-offline
@@ -1216,7 +1216,7 @@ test('enter while peeking attaches the peeked session', async () => {
   )
   const onAction = vi.fn()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('opencode:'))
   stdin.write('\r')
@@ -1271,7 +1271,7 @@ test('session with zero messages shows "no messages yet"', async () => {
   const deps = makeDeps()
   deps.client.listMessages = vi.fn(() => Promise.resolve([]))
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('no messages yet'))
 })
@@ -1346,7 +1346,9 @@ test('I2: a permission applied live while the mount seed is still in flight surv
 test('onOnline reconnect resync also reseeds session status + permissions', async () => {
   const deps = makeDeps()
   render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  // #168: the initial seed must have run before the counts are cleared, or its own late calls
+  // would satisfy the assertions below without the resync ever happening.
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0 && deps.client.listPermissions.mock.calls.length > 0)
   deps.client.sessionStatus.mockClear()
   deps.client.listPermissions.mockClear()
   const onOnline = deps.connectEventsImpl.mock.calls[0][1].onOnline
@@ -1590,7 +1592,7 @@ test('M6: respondPermission failure for s1 lands after navigating to s2 — s2 s
 test('peek: y/a/d are inert when there is no pending permission', async () => {
   const deps = makeDeps()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('opencode:') || lastFrame().includes('no messages yet') || lastFrame().includes('loading'))
   stdin.write('y')
@@ -2257,7 +2259,7 @@ test('text with more than two lines collapses too, and the same paste keeps its 
   await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('a\nb\nc\nd')
   await waitFor(() => lastFrame().includes('[Pasted text #1]'))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('a\nb\nc\nd') // the same attachment, not a second one
   await waitFor(() => lastFrame().includes('[Pasted text #1][Pasted text #1]'))
   expect(lastFrame()).not.toContain('#2')
@@ -2917,7 +2919,7 @@ test('gh being unavailable leaves the roster exactly as it was', async () => {
     }),
   )
   await waitFor(() => lastFrame().includes('fix tests'))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   const frame = lastFrame()
   expect(frame).not.toContain('#77')
   expect(frame).not.toContain('gh is not installed') // no startup nag; peek carries the reason
@@ -2936,7 +2938,7 @@ test('an open pull request adds no group and no count — the row sits with its 
     }),
   )
   await waitFor(() => lastFrame().includes('fix tests'))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   expect(lastFrame()).not.toContain('ready for review')
 })
 
@@ -3194,10 +3196,10 @@ const claudeRow = (id = 'c1', title = 'claude work') => ({ id, title, directory:
 test('@backend routes the dispatch to that backend, never to the opencode client', async () => {
   const deps = makeDeps()
   const claude = fakeBackend('claude')
-  const { stdin } = render(
+  const { stdin, lastFrame } = render(
     React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }),
   )
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('@claude fix the tests')
   await tick()
   stdin.write('\r')
@@ -3231,10 +3233,10 @@ test('alt+enter on a claude dispatch selects the new row instead of attaching', 
 test('an unprefixed dispatch still goes to opencode when a second backend is merely available', async () => {
   const deps = makeDeps()
   const claude = fakeBackend('claude')
-  const { stdin } = render(
+  const { stdin, lastFrame } = render(
     React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }),
   )
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
@@ -3245,7 +3247,7 @@ test('an unprefixed dispatch still goes to opencode when a second backend is mer
 test('--backend claude makes an unprefixed dispatch land on claude', async () => {
   const deps = makeDeps()
   const claude = fakeBackend('claude')
-  const { stdin } = render(
+  const { stdin, lastFrame } = render(
     React.createElement(App, {
       ...deps,
       onAction: vi.fn(),
@@ -3253,7 +3255,7 @@ test('--backend claude makes an unprefixed dispatch land on claude', async () =>
       initialBackend: 'claude',
     }),
   )
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('do a thing')
   await tick()
   stdin.write('\r')
@@ -3272,7 +3274,7 @@ test('a `!` shell job is refused on a backend with no shell surface', async () =
       initialBackend: 'claude',
     }),
   )
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   stdin.write('!npm test')
   await tick()
   stdin.write('\r')
@@ -3638,7 +3640,7 @@ test('^x^x keeps a local worktree another session still runs in', async () => {
   await waitFor(() => claude.abort.mock.calls.length > 0)
   stdin.write('\x18')
   await waitFor(() => lastFrame().includes('sibling work') && !lastFrame().includes('claude work'))
-  await tick()
+  await waitFor(() => lastFrame().includes('sibling work')) // #168: wait for the row, not a fixed tick
   expect(existsSync(wt)).toBe(true)
 })
 
@@ -3989,7 +3991,7 @@ test('#60: → and ^X in one stdin read attach the row without aborting it', asy
   // One write, two keys. Retried because Node can drop a stdin chunk wholesale (see pressUntil) —
   // a dropped chunk delivers neither key, so the retry cannot mask the bug.
   await pressUntil(stdin, '\x1B[C\x18', () => onAction.mock.calls.some((c: any) => c[0].type === 'enter'))
-  await tick()
+  await waitFor(() => lastFrame().includes('fix tests')) // #168: wait for the row, not a fixed tick
   expect(deps.client.abortSession).not.toHaveBeenCalled()
   expect(onAction.mock.calls.filter((c: any) => c[0].type === 'enter')).toHaveLength(1)
 })
