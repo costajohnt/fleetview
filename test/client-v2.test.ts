@@ -228,7 +228,7 @@ test('boolean and number fields are answered with their own types', () => {
 
 test('agents are named by id, and hidden ones are left out', async () => {
   const { c } = client({ 'GET /api/agent': { data: [{ id: 'build', name: 'Build', hidden: false }, { id: 'compaction', name: 'Compaction', hidden: true }] } })
-  expect((await c.listAgents()).map((a) => a.name)).toEqual(['build'])
+  expect((await c.listAgents())?.map((a) => a.name)).toEqual(['build'])
 })
 
 test('the API probe carries no credential, and only 2.x bodies read as 2.x', async () => {
@@ -245,6 +245,10 @@ test('the API probe carries no credential, and only 2.x bodies read as 2.x', asy
     expect(await opencodeApi(base(), answer({ version: '2.3.2', pid: 1 }, 500) as any)).toBe(2) // boot failed is still 2.x
     expect(await opencodeApi(base(), answer({ error: 'not found' }, 404) as any)).toBe(1) // e.g. a proxied 1.x
     expect(await opencodeApi(base(), html as any)).toBe(1)
+    // no answer is not an answer: it rejects, and the next ask goes to the network again
+    const down = base()
+    await expect(opencodeApi(down, (() => Promise.reject(new Error('ECONNREFUSED'))) as any)).rejects.toThrow('ECONNREFUSED')
+    expect(await opencodeApi(down, answer({ _tag: 'UnauthorizedError' }, 401) as any)).toBe(2)
   } finally {
     delete process.env.OPENCODE_SERVER_PASSWORD
   }

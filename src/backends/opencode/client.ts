@@ -49,13 +49,15 @@ const apiByUrl = new Map<string, Promise<1 | 2>>()
 export function opencodeApi(baseUrl: string, fetchImpl: typeof fetch = globalThis.fetch): Promise<1 | 2> {
   const known = apiByUrl.get(baseUrl)
   if (known) return known
-  const asked = fetchImpl(`${baseUrl}/api/info`, { signal: AbortSignal.timeout(10_000) })
-    .then((res) => (typeof res.json === 'function' ? res.json() : null))
-    .then(
-      (body): 1 | 2 =>
-        isRecord(body) && (body._tag === 'UnauthorizedError' || (typeof body.version === 'string' && typeof body.pid === 'number')) ? 2 : 1,
-      () => 1, // a body that isn't JSON: not 2.x
-    )
+  const asked = fetchImpl(`${baseUrl}/api/info`, { signal: AbortSignal.timeout(10_000) }).then(async (res): Promise<1 | 2> => {
+    let body: unknown
+    try {
+      body = typeof res.json === 'function' ? await res.json() : null
+    } catch {
+      return 1 // answered, but not with JSON: not 2.x. (No answer at all rejects, and is not cached.)
+    }
+    return isRecord(body) && (body._tag === 'UnauthorizedError' || (typeof body.version === 'string' && typeof body.pid === 'number')) ? 2 : 1
+  })
   apiByUrl.set(baseUrl, asked)
   asked.then((api) => settledApi.set(baseUrl, api), () => apiByUrl.delete(baseUrl)) // unreachable is not an answer; ask again next time
   return asked
