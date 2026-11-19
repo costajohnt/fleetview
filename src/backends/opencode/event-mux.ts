@@ -1,5 +1,7 @@
-import { authHeader } from './client.ts'
+import { authHeader, opencodeApi } from './client.ts'
+import { OpencodeV2Client, v1Error, v1Permission, v1Question } from './client-v2.ts'
 import type { OpencodeEvent } from '../../types.ts'
+import { asString, isRecord } from '../../types.ts'
 
 export function parseSseChunk(buffer: string): { events: unknown[]; rest: string } {
   const events: unknown[] = []
@@ -42,7 +44,7 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
   let stopped = false
   let delay = 1000
   const ac = new AbortController()
-  const url = `http://${host}:${port}/event?directory=${encodeURIComponent(directory)}`
+  const base = `http://${host}:${port}`
 
   const done = (async () => {
     while (!stopped) {
@@ -51,6 +53,10 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
         // The event stream needs the same credential as every other request, or enabling auth
         // would leave fleetview rendering a permanently offline roster.
         const auth = authHeader()
+        // 2.x has one server-wide stream in its own vocabulary; it is cut to this directory and
+        // translated to 1.x's events here, so the store downstream never knows which it got.
+        const v2 = (await opencodeApi(base, fetchImpl)) === 2 ? await v2Filter(base, directory, fetchImpl) : null
+        const url = v2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
         const res = await fetchImpl(url, { signal: ac.signal, headers: auth ? { authorization: auth } : undefined })
         if (stopped) return
         if (!res.ok || !res.body) throw new Error(`event stream ${res.status}`)
@@ -76,7 +82,7 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
             buf += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
             const { events, rest } = parseSseChunk(buf)
             buf = rest
-            for (const e of events) onEvent(directory, e as OpencodeEvent)
+            for (const e of events) for (const out of v2 ? v2(e) : [e as OpencodeEvent]) onEvent(directory, out)
           }
         } finally {
           // The deadline walks away from a still-pending next(); returning the iterator cancels the
@@ -106,4 +112,78 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
   })()
 
   return { done, stop: () => { stopped = true; ac.abort() } }
+}
+
+// One directory's slice of 2.x's server-wide stream, already translated. Events carry the
+// session's `location` (opencode v2.3.2 publishes session.created with it); one that doesn't is
+// kept when its session is one this directory is known to hold, seeded from the listing at every
+// (re)connect and grown by session.created.
+async function v2Filter(base: string, directory: string, fetchImpl: typeof fetch) {
+  const mine = new Set((await new OpencodeV2Client(base, fetchImpl, () => authHeader()).listSessions(directory)).map((s) => s.id))
+  const translate = createV2Translator()
+  return (frame: unknown): OpencodeEvent[] => {
+    if (!isRecord(frame) || !isRecord(frame.data)) return []
+    const where = isRecord(frame.location) ? asString(frame.location.directory) : undefined
+    const sessionID = asString(frame.data.sessionID) ?? (isRecord(frame.data.form) ? asString(frame.data.form.sessionID) : undefined)
+    if (frame.type === 'session.created' && where === directory && sessionID) mine.add(sessionID)
+    if (where !== undefined ? where !== directory : !sessionID || !mine.has(sessionID)) return []
+    return translate(frame)
+  }
+}
+
+// 2.x frames ({type, created, data}) to the 1.x events session-store handles ({type, properties}).
+// Stateful only for streamed text: 2.x sends deltas, 1.x sent the part's whole text each time.
+export function createV2Translator() {
+  const texts = new Map<string, string>()
+  return (frame: unknown): OpencodeEvent[] => {
+    if (!isRecord(frame) || !isRecord(frame.data)) return []
+    const d = frame.data
+    const sessionID = asString(d.sessionID) ?? ''
+    // No 2.x event carries the session's time.updated; the server sets it to the event's own
+    // `created` on the events below, so that is what the store is told.
+    const touched = (): OpencodeEvent[] =>
+      typeof frame.created === 'number' ? [{ type: 'session.updated', properties: { info: { id: sessionID, time: { updated: frame.created } } } }] : []
+    const messageID = asString(d.assistantMessageID)
+    switch (frame.type) {
+      case 'session.status':
+        return [{ type: 'session.status', properties: { sessionID, status: isRecord(d.status) ? (d.status as { type: string }) : undefined } }]
+      case 'session.renamed':
+        return [{ type: 'session.updated', properties: { info: { id: sessionID, title: asString(d.title), ...(typeof frame.created === 'number' ? { time: { updated: frame.created } } : {}) } } }]
+      case 'session.deleted':
+        return [{ type: 'session.deleted', properties: { info: { id: sessionID } } }]
+      case 'session.inbox.enqueued':
+        return [{ type: 'message.updated', properties: { sessionID, info: { role: 'user' } } }, ...touched()]
+      case 'session.step.started':
+        return [{ type: 'message.updated', properties: { sessionID, info: { id: messageID, role: 'assistant' } } }, ...touched()]
+      case 'session.step.ended':
+      case 'session.step.failed':
+        return touched()
+      case 'session.text.delta':
+      case 'session.text.ended': {
+        const key = `${messageID}:${String(d.ordinal)}`
+        const text = frame.type === 'session.text.ended' ? (asString(d.text) ?? '') : (texts.get(key) ?? '') + (asString(d.delta) ?? '')
+        if (frame.type === 'session.text.ended') texts.delete(key)
+        else texts.set(key, text)
+        return [{ type: 'message.part.updated', properties: { sessionID, part: { type: 'text', text, messageID } } }]
+      }
+      case 'session.execution.failed':
+        return [{ type: 'session.error', properties: { sessionID, error: v1Error(d.error) } }]
+      // 1.x reported a stop as an error named MessageAbortedError, which the store records as
+      // stopped rather than failed.
+      case 'session.execution.interrupted':
+        return [{ type: 'session.error', properties: { sessionID, error: { name: 'MessageAbortedError', data: { message: asString(d.reason) ?? '' } } } }]
+      case 'permission.asked':
+        return [{ type: 'permission.asked', properties: v1Permission(d) }]
+      case 'permission.replied':
+        return [{ type: 'permission.replied', properties: { sessionID, requestID: asString(d.requestID) ?? '', reply: d.reply as 'once' | 'always' | 'reject' } }]
+      case 'form.created':
+        return isRecord(d.form) ? [{ type: 'question.asked', properties: v1Question(d.form) }] : []
+      case 'form.replied':
+        return [{ type: 'question.replied', properties: { sessionID, requestID: asString(d.id) ?? '' } }]
+      case 'form.cancelled':
+        return [{ type: 'question.rejected', properties: { sessionID, requestID: asString(d.id) ?? '' } }]
+      default:
+        return []
+    }
+  }
 }

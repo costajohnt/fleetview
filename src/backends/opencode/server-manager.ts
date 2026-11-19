@@ -10,21 +10,6 @@ import { authHeader } from './client.ts'
 // case (install something, then run again) from a server that merely failed to come up.
 export const OPENCODE_MISSING = 'fleetview needs the opencode CLI. Install it from https://opencode.ai and run fleetview again.'
 
-// #165: opencode 2.x replaced the server API fleetview speaks (`opencode serve` answers /project and
-// friends with its web app), so a 2.x server never reads as healthy. Without this, every launch
-// spawned another server, polled it for the whole window, and reported "did not become healthy".
-// Treated like OPENCODE_MISSING: the roster carries on with claude/copilot.
-export const OPENCODE_UNSUPPORTED =
-  'fleetview does not support opencode 2.x yet: its server API changed. Install opencode 1.x (npm install -g opencode-ai@1) to use opencode sessions in fleetview.'
-
-// Major version from `opencode --version` output ("1.18.5"; 2.x's exact format is unverified, so
-// "opencode v2.3.2" reads too). null when there is no version in it, which is not evidence of
-// anything, so callers carry on as before.
-export function opencodeMajor(output: string): number | null {
-  const m = /(?:^|[\sv])(\d+)\.\d+\.\d+/.exec(output.trim())
-  return m ? Number(m[1]) : null
-}
-
 const logDir = () => (process.env.FLEETVIEW_LOG_DIR ?? process.env.ROOST_LOG_DIR) ?? join(homedir(), '.local', 'state', 'fleetview', 'logs')
 
 export function spawnServer(
@@ -75,7 +60,14 @@ export async function isServerHealthy(server: ServerRef, fetchImpl = globalThis.
 // "nothing there" even though both read as unhealthy — spawning onto it can never bind, and the
 // occupant may be fleetview's own server under a password only server.json remembers.
 export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetch): Promise<'healthy' | 'unauthorized' | 'unreachable'> {
-  const url = `http://${server.host}:${server.port}/project`
+  // opencode 1.x answers GET /project with its project list. 2.x serves its web app there (200
+  // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
+  const v1 = await askServer(server, '/project', isProjectList, fetchImpl)
+  return v1 === 'unreachable' ? askServer(server, '/api/info', isV2Info, fetchImpl) : v1
+}
+
+async function askServer(server: ServerRef, path: string, looksRight: (body: unknown) => boolean, fetchImpl: typeof fetch) {
+  const url = `http://${server.host}:${server.port}${path}`
   try {
     // The first request carries NO credential, on purpose. fleetview adopts the password from
     // server.json before it has any evidence about who holds the port, so an authenticated first
@@ -90,6 +82,7 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
       res = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
       if (res.status === 401) return 'unauthorized'
     }
+    // 2.x answers 503 while it boots; like any other non-2xx, that is "not yet", and the poll asks again.
     if (!res.ok) return 'unreachable'
     let body
     try {
@@ -97,10 +90,19 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
     } catch {
       return 'unreachable'
     }
-    return isProjectList(body) ? 'healthy' : 'unreachable'
+    return looksRight(body) ? 'healthy' : 'unreachable'
   } catch {
     return 'unreachable'
   }
+}
+
+// opencode 2.x's GET /api/info: {version, pid, urls, paths, ...} (opencode v2.3.2
+// packages/server/src/handlers/server.ts). Same bar-raising idea as isProjectList: the fields a
+// real server always sends, so a bare `{}` from any listener doesn't pass.
+function isV2Info(body: unknown): boolean {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false
+  const info = body as Record<string, unknown>
+  return typeof info.version === 'string' && info.version !== '' && typeof info.pid === 'number'
 }
 
 // "Is this opencode" used to be "did it answer with a JSON array", which `[]` from any listener
@@ -135,10 +137,13 @@ function isProjectList(body: unknown): boolean {
 export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.fetch) {
   if (!authHeader()) return true
   try {
-    const res = await fetchImpl(`http://${server.host}:${server.port}/project`, {
-      signal: AbortSignal.timeout(2000),
-    })
-    return res.status === 401
+    // Either API refusing counts. 2.x serves /project (its web app) to anyone and enforces on /api,
+    // so asking /project alone would call every 2.x server unprotected.
+    for (const path of ['/project', '/api/info']) {
+      const res = await fetchImpl(`http://${server.host}:${server.port}${path}`, { signal: AbortSignal.timeout(2000) })
+      if (res.status === 401) return true
+    }
+    return false
   } catch {
     return true // a transient network failure is not evidence auth is off; don't nag
   }

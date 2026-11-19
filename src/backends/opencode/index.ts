@@ -3,9 +3,10 @@
 // and nothing more. Anything opencode can do that the contract doesn't name is still reached through
 // OpencodeClient directly.
 import type { Backend, OpencodeEvent, ServerRef } from '../../types.ts'
-import type { RosterClient } from './client.ts'
+import { knownOpencodeApi, type RosterClient } from './client.ts'
 import { connectEvents } from './event-mux.ts'
 import { assertSessionId } from '../session-id.ts'
+import { isAbsolute } from 'node:path'
 
 // opencode is the server-backed family, so every flag is true — which is exactly why the flags could
 // not be inferred from it. It is the parity baseline the process-backed backends are measured
@@ -47,7 +48,11 @@ export function createOpencodeBackend({
     prompt: (id, text, directory) => client.promptAsync(id, text, directory),
     events: ({ directory }, handlers) =>
       connectEvents({ host: server.host, port: server.port, directory }, { ...handlers, fetchImpl }),
-    attach: ({ id, directory }) => [
+    // 2.x has no `attach`: its TUI takes the server as a flag and the directory as an argument, and
+    // reads the password from the environment (OPENCODE_PASSWORD, else OPENCODE_SERVER_PASSWORD).
+    attach: ({ id, directory }) => knownOpencodeApi(`http://${server.host}:${server.port}`) === 2
+      ? ['opencode', '--server', `http://${server.host}:${server.port}`, '-s', assertSessionId(id), absoluteDirectory(directory)]
+      : [
       'opencode',
       'attach',
       `http://${server.host}:${server.port}`,
@@ -69,4 +74,11 @@ export function createOpencodeBackend({
     normaliseSessions: (rows) => rows ?? [],
     createNormaliser: () => (event) => [event as OpencodeEvent],
   }
+}
+
+// 2.x takes the directory as a bare argument where 1.x took it as --dir's value, so a
+// server-supplied one starting with `-` would be read as a flag. Real ones are absolute.
+function absoluteDirectory(directory: string) {
+  if (!isAbsolute(directory)) throw new Error(`refusing non-absolute directory: ${JSON.stringify(directory.slice(0, 80))}`)
+  return directory
 }
