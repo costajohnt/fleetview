@@ -17,10 +17,11 @@ export const OPENCODE_MISSING = 'fleetview needs the opencode CLI. Install it fr
 export const OPENCODE_UNSUPPORTED =
   'fleetview does not support opencode 2.x yet: its server API changed. Install opencode 1.x (npm install -g opencode-ai@1) to use opencode sessions in fleetview.'
 
-// Major version from `opencode --version` output ("2.3.2"). null when it doesn't read as a version,
-// which is not evidence of anything, so callers carry on as before.
+// Major version from `opencode --version` output ("1.18.5"; 2.x's exact format is unverified, so
+// "opencode v2.3.2" reads too). null when there is no version in it, which is not evidence of
+// anything, so callers carry on as before.
 export function opencodeMajor(output: string): number | null {
-  const m = /^v?(\d+)\.\d+/.exec(output.trim())
+  const m = /(?:^|[\sv])(\d+)\.\d+\.\d+/.exec(output.trim())
   return m ? Number(m[1]) : null
 }
 

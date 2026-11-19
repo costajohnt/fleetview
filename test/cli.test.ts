@@ -492,6 +492,7 @@ test('opencode 2.x fails before any spawn, with its own reason', async () => {
 test('opencodeMajor reads the major version and shrugs at anything else', () => {
   expect(opencodeMajor('2.3.2\n')).toBe(2)
   expect(opencodeMajor('v1.19.6')).toBe(1)
+  expect(opencodeMajor('opencode v2.3.2')).toBe(2)
   expect(opencodeMajor('')).toBeNull()
   expect(opencodeMajor('opencode: command not found')).toBeNull()
 })

@@ -148,7 +148,9 @@ hands the terminal over wholesale, costing `^z` detach and `alt+1..9` quick-swit
 else. (A postinstall step restores `spawn-helper`'s executable bit, which the npm tarball drops;
 without it attaching fails with `posix_spawnp failed`.)
 
-The wire shapes are verified against opencode 1.18.4, so a much newer server may drift. The
+The wire shapes are verified against opencode 1.18.4, so a much newer server may drift. opencode
+2.x replaced the server API outright and is not supported yet: fleetview checks `opencode --version`
+before starting a server, says so, and shows claude and copilot sessions only. The
 pre-rename `ROOST_*` variables and `roost` directories are still read for now; they will be removed
 in a future release.
 
