@@ -10,6 +10,21 @@ import { authHeader } from './client.ts'
 // case (install something, then run again) from a server that merely failed to come up.
 export const OPENCODE_MISSING = 'fleetview needs the opencode CLI. Install it from https://opencode.ai and run fleetview again.'
 
+// #165: opencode 2.x replaced the server API fleetview speaks (`opencode serve` answers /project and
+// friends with its web app), so a 2.x server never reads as healthy. Without this, every launch
+// spawned another server, polled it for the whole window, and reported "did not become healthy".
+// Treated like OPENCODE_MISSING: the roster carries on with claude/copilot.
+export const OPENCODE_UNSUPPORTED =
+  'fleetview does not support opencode 2.x yet: its server API changed. Install opencode 1.x (npm install -g opencode-ai@1) to use opencode sessions in fleetview.'
+
+// Major version from `opencode --version` output ("1.18.5"; 2.x's exact format is unverified, so
+// "opencode v2.3.2" reads too). null when there is no version in it, which is not evidence of
+// anything, so callers carry on as before.
+export function opencodeMajor(output: string): number | null {
+  const m = /(?:^|[\sv])(\d+)\.\d+\.\d+/.exec(output.trim())
+  return m ? Number(m[1]) : null
+}
+
 const logDir = () => (process.env.FLEETVIEW_LOG_DIR ?? process.env.ROOST_LOG_DIR) ?? join(homedir(), '.local', 'state', 'fleetview', 'logs')
 
 export function spawnServer(

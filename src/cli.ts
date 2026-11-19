@@ -26,7 +26,7 @@ import { App } from './app.ts'
 import { OpencodeClient } from './backends/opencode/client.ts'
 import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, createProcessBackends, defaultBackendName, fallbackBackend, isBackendName, resolveBackend } from './backends/index.ts'
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
-import { spawnServer, isServerHealthy, isAuthEnforced, probeServer, OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
+import { spawnServer, isServerHealthy, isAuthEnforced, probeServer, OPENCODE_MISSING, OPENCODE_UNSUPPORTED, opencodeMajor } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
 import { noteExit } from './paths.ts'
 import { loadRoster, makePersistRoster, defaultRosterFile } from './roster-store.ts'
@@ -269,6 +269,10 @@ export function makeEnsureServer({
     if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
       return { ok: false, server, reason: OPENCODE_MISSING }
     }
+    // #165: same probe, second question. A 2.x opencode will never answer the health check, so
+    // spawning one only leaks a server per attempt; stop here. Already-running servers are
+    // unaffected: a healthy one returned above, before anything asked for a version.
+    if ((opencodeMajor(String(probe.stdout ?? '')) ?? 1) >= 2) return { ok: false, server, reason: OPENCODE_UNSUPPORTED }
     // We're spawning the server ourselves, so we own its environment: an unauthenticated opencode
     // serve exposes POST /session/:id/shell (arbitrary shell) to anything on loopback, and it stays
     // up after fleetview exits. Mint a password when the user hasn't set one — the child inherits it
@@ -392,7 +396,11 @@ export async function runServer(
   // stop: sessions live server-side in opencode — stopping the server stops every stream until
   // something starts one again (fleetview will, on next launch). Refuse only when there is
   // nothing to act on.
-  if (!healthy) return log('server is not running — nothing to stop')
+  // #165: not answering is not the same as not running. A server fleetview spawned but can't speak
+  // to (an opencode whose API it doesn't understand, a wedged boot) is still a live `opencode serve`
+  // at the recorded pid, and this command is the only fleetview way to get rid of it. The identity
+  // check below is what keeps a recycled pid safe, so it gates this path too.
+  if (!healthy && (!server.pid || !identifyServer(server.pid).ok)) return log('server is not running — nothing to stop')
   if (!server.pid) {
     error('server is healthy but its pid is unknown (not spawned by fleetview) — stop it where it was started')
     setExitCode(1)
@@ -414,9 +422,12 @@ export async function runServer(
     setExitCode(1)
     return
   }
-  // Verify it actually died rather than reporting the signal as the deed.
-  for (let i = 0; i < 20 && (await isServerHealthyImpl(server)); i++) await new Promise((r) => setTimeout(r, pollMs))
-  const still = await isServerHealthyImpl(server)
+  // Verify it actually died rather than reporting the signal as the deed. A server that never
+  // answered can't be watched going quiet, so that one is watched by its pid instead.
+  const pid = server.pid
+  const alive = healthy ? () => isServerHealthyImpl(server) : async () => identifyServer(pid).ok
+  for (let i = 0; i < 20 && (await alive()); i++) await new Promise((r) => setTimeout(r, pollMs))
+  const still = await alive()
   log(still ? 'signalled, but the server is still answering — check it manually' : `stopped opencode server on :${server.port}`)
   setExitCode(still ? 1 : 0)
 }
@@ -513,6 +524,8 @@ async function runRoster(args: ParsedArgs, serverFile: string, launch: Launch = 
   // status line only appears when the connect is slow enough to notice.
   const slow = process.stdout.isTTY ? setTimeout(() => process.stderr.write('fleetview: starting the opencode server…\n'), 300) : undefined
   const first = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER).finally(() => clearTimeout(slow))
+  // Unlike a missing opencode, an unsupported one is a surprise: say why its sessions are absent.
+  if (first.reason === OPENCODE_UNSUPPORTED) console.error(`fleetview: ${OPENCODE_UNSUPPORTED}`)
 
   // The roster owns the whole screen (alternate buffer), like every full-screen TUI: no shell
   // scrollback bleeding above the header, and quitting restores the terminal exactly as it was.
@@ -589,7 +602,8 @@ async function rosterLoop(
     // registry is built without opencode (App reads that absence as "run without it"), and a launch
     // backend of opencode falls back to the first installed CLI. null: none of the three is
     // installed, and the roster keeps its missing screen.
-    const local = r.reason === OPENCODE_MISSING ? fallbackBackend(launch.launchBackend ?? DEFAULT_BACKEND) : null
+    // An unsupported opencode (#165) is the same situation as a missing one.
+    const local = r.reason === OPENCODE_MISSING || r.reason === OPENCODE_UNSUPPORTED ? fallbackBackend(launch.launchBackend ?? DEFAULT_BACKEND) : null
     const client = new OpencodeClient(`http://${r.server.host}:${r.server.port}`)
     // Every adapter, not just the one being dispatched onto: the roster can hold rows from more than
     // one backend at once, so attach and the key handlers have to be able to reach any of them.

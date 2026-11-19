@@ -391,7 +391,9 @@ test('main: ^x twice — deleteSession failure re-adds membership so the row rea
 test('main: a single ^x stops without deleting, and says a second press would delete', async () => {
   const deps = makeDeps()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
-  await tick()
+  // Wait for the row, not a fixed tick: under full-suite load the first render can take longer than
+  // 20ms, and a ^x before the row exists selects nothing, so the wait below timed out.
+  await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('\x18')
   await waitFor(() => deps.client.abortSession.mock.calls.length > 0 && lastFrame().includes('^x again to delete'))
   expect(deps.client.abortSession).toHaveBeenCalledWith('s1', '/x/alpha')
