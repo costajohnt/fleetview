@@ -1,6 +1,7 @@
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
-import { tick, waitFor } from './helpers.ts'
+import { tick, waitFor, WAIT_MS } from './helpers.ts'
+import type { RosterClient } from '../src/backends/opencode/client.ts'
 import { render as inkRender } from 'ink-testing-library'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
@@ -70,7 +71,16 @@ function makeDeps(): any {
     listQuestions: vi.fn(() => Promise.resolve([])),
     abortSession: vi.fn(() => Promise.resolve({})),
     respondPermission: vi.fn(() => Promise.resolve({})),
-  }
+    forkSession: vi.fn(() => Promise.resolve({ id: 's10' })),
+    runShell: vi.fn(() => Promise.resolve({})),
+    respondQuestion: vi.fn(() => Promise.resolve({})),
+    // #185: the project is `vcs: 'git'`, so every dispatch tries to isolate. Without these the
+    // missing method threw a TypeError into use-dispatch's isolation catch. A null worktree is now
+    // a deliberate refusal: default-fixture dispatches take the "not isolated (worktree failed)"
+    // path and run in the repository. Tests about isolation itself use isolatingDeps below.
+    listWorktrees: vi.fn(() => Promise.resolve([])),
+    createWorktree: vi.fn(() => Promise.resolve(null)),
+  } satisfies RosterClient
   return {
     server,
     client,
@@ -92,7 +102,7 @@ function makeDeps(): any {
 // click-after-detach test unpinnable) — a retry makes the tests version-proof without hiding a
 // real regression: a broken handler never satisfies the condition no matter how often the key
 // lands, and every use sends a key whose repeat is idempotent for what the test asserts.
-const pressUntil = async (stdin: any, key: string, fn: () => any, timeoutMs = 3000) => {
+const pressUntil = async (stdin: any, key: string, fn: () => any, timeoutMs = WAIT_MS) => {
   const start = Date.now()
   for (;;) {
     stdin.write(key)
@@ -2784,6 +2794,31 @@ test('#192: an isolation failure names its reason in the confirmation and the di
     .trim().split('\n').map((l) => JSON.parse(l)).find((l) => l.event === 'isolation-failed' && l.reason.includes(marker))
   expect(logged).toMatchObject({ target: '/x/alpha' })
   expect(logged.reason).toContain(`not a new]0;evil worktree of /x/alpha: /srv/${marker}/`) // control bytes and newline gone
+})
+
+// #204: alt+enter attached before the warning branch, so a dispatch that fell back to the checkout
+// said nothing at all. The warning now waits for the return to the roster; a flash made while
+// attached would expire behind the session unseen.
+const detached = { detached: true, sessionId: 's9', worktree: '/x/alpha' }
+test.each([
+  ['a refused worktree', {}, detached, 'not isolated (worktree failed: 404)'],
+  ['isolation off', { isolate: false }, detached, 'isolation off, it edits the checkout'],
+  // An attach that fails still leaves the dispatched session running: both lines are said.
+  ['a failed attach', {}, { message: 'attach broke' }, 'attach broke; dispatched into alpha — not isolated'],
+])('#204: dispatch-then-attach with %s shows the warning on return', async (_, props, settled, warning) => {
+  const { deps } = isolatingDeps()
+  deps.client.createWorktree = vi.fn(() => Promise.reject(new Error('404')))
+  let detach: any
+  const onAction = vi.fn((a: any) => (a.type === 'enter' ? new Promise((r) => { detach = r }) : undefined))
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction, ...props }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick() // the input state must flush, or Enter sees an empty input and attaches instead
+  stdin.write('\x1B\r') // alt+enter: dispatch and attach
+  await waitFor(() => lastFrame() === '')
+  detach(settled)
+  await waitFor(() => lastFrame().includes(warning))
+  expect(lastFrame()).toContain('dispatched into alpha')
 })
 
 // "Ctrl+X twice removes the worktree and uncommitted changes."
