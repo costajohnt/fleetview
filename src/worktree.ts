@@ -12,11 +12,11 @@
 // (createLocalWorktree below), laid out the same way.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { statSync, appendFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs'
+import { statSync, readdirSync, existsSync } from 'node:fs'
 import { basename, join, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { GIT_SAFE_ARGS, gitFilterOverrides, gitFilterSafeEnv } from './git-safe.ts'
-import { fleetviewDir } from './paths.ts'
+import { appendPrivate, stateDir } from './paths.ts'
 import type { Project } from './types.ts'
 
 // A project row from GET /project carries `sandboxes`: the worktree directories opencode has made
@@ -146,9 +146,7 @@ export function logNameCollision(entry: { prompt: string; name: string; existing
 // The same file, for any dispatch evidence (#192 logs why isolation fell back here too).
 export function logDispatchDebug(entry: Record<string, unknown>) {
   try {
-    const dir = (process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? fleetviewDir(join(homedir(), '.local', 'state'))
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    appendFileSync(join(dir, 'dispatch-debug.ndjson'), `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 })
+    appendPrivate(join(stateDir(), 'dispatch-debug.ndjson'), `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`)
   } catch {}
 }
 

@@ -270,3 +270,49 @@ test('2.x: stop() while the seed is being listed delivers nothing more', async (
   await conn.done
   expect(onEvent).not.toHaveBeenCalled()
 })
+
+// #186: after an unanswered probe, 1.x's /event on a 2.x server is its web app, answered 200.
+test('a 200 that is not an event stream is not online', async () => {
+  const fetchImpl = vi.fn((url: string) =>
+    new URL(url).pathname === '/api/info'
+      ? Promise.reject(new Error('timeout'))
+      : Promise.resolve({ ok: true, status: 200, headers: { get: () => 'text/html; charset=utf-8' }, body: (async function* () { yield new TextEncoder().encode('<html>') })() }),
+  ) as any
+  const onOnline = vi.fn()
+  const onOffline = vi.fn()
+  await connectEvents({ host: '127.0.0.1', port: 4805, directory: '/fv/repo' }, { fetchImpl, onEvent: vi.fn(), onOnline, onOffline, reconnect: false }).done
+  expect(onOnline).not.toHaveBeenCalled()
+  expect(onOffline).toHaveBeenCalledWith('/fv/repo')
+})
+
+// #186: a stream that reconnects mid-step never sees that step's session.step.started.
+test('2.x translator: text for an assistant message it never saw start announces the message first', () => {
+  const t = createV2Translator()
+  const delta = (d: string) => t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm', ordinal: 0, delta: d } })
+  expect(delta('Hel').map((e) => e.type)).toEqual(['message.updated', 'message.part.updated'])
+  expect(delta('lo').map((e) => e.type)).toEqual(['message.part.updated'])
+  expect(t({ type: 'session.step.started', created: 1, data: { sessionID: 's', assistantMessageID: 'm2' } }).map((e) => e.type)).toEqual(['message.updated', 'session.updated'])
+  expect(t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm2', ordinal: 0, delta: 'x' } }).map((e) => e.type)).toEqual(['message.part.updated'])
+})
+
+// #206: the recorded `!` shell in /fv/repo (echo hi) sends only session.shell.started and .ended.
+test('2.x: a recorded shell job reads as busy then idle', async () => {
+  const statuses = (await replay('/fv/repo')).filter((e) => e.type === 'session.status').map((e) => [e.properties.sessionID, e.properties.status.type])
+  expect(statuses).toEqual([[MINE, 'busy'], [MINE, 'idle']])
+})
+
+// A shell may overlap a model execution on 2.x; idle (which clears pending permissions) waits for both.
+test('2.x translator: a shell ending mid-execution, or an execution ending mid-shell, is not idle', () => {
+  const t = createV2Translator()
+  const status = (type: string) => t({ type, data: { sessionID: 's' } }).filter((e) => e.type === 'session.status').map((e: any) => e.properties.status.type)
+  expect(status('session.execution.started')).toEqual(['busy'])
+  expect(status('session.shell.started')).toEqual(['busy'])
+  expect(status('session.shell.ended')).toEqual([])
+  expect(status('session.execution.succeeded')).toEqual(['idle'])
+  expect(status('session.shell.started')).toEqual(['busy'])
+  expect(status('session.execution.started')).toEqual(['busy'])
+  expect(status('session.execution.failed')).toEqual([])
+  expect(status('session.shell.ended')).toEqual(['idle'])
+  // an end the translator never saw start (a reconnect) is still idle
+  expect(status('session.execution.succeeded')).toEqual(['idle'])
+})

@@ -83,3 +83,10 @@ test('attach refuses a session id with flag syntax or control bytes', () => {
   expect(() => backend().attach({ id: '--banner', directory: '/x/alpha' })).toThrow(/malformed session id/)
   expect(() => backend().attach({ id: `ok${String.fromCharCode(27)}[2Jbad`, directory: '/x/alpha' })).toThrow(/malformed session id/)
 })
+
+// #182: 1.x's --dir value is server-supplied too, and gets the same absolute-path check as 2.x's
+// bare argument.
+test('1.x attach refuses a directory that is not absolute', () => {
+  expect(() => backend().attach({ id: 's1', directory: '--help' })).toThrow(/non-absolute directory/)
+  expect(() => backend().attach({ id: 's1', directory: 'rel/dir' })).toThrow(/non-absolute directory/)
+})
