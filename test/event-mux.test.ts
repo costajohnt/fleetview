@@ -232,3 +232,41 @@ test('2.x translator: the branches no recording reaches without a model', () => 
   expect(at('session.step.started', { sessionID: 's', assistantMessageID: 'm2' })[0]).toEqual({ type: 'message.updated', properties: { sessionID: 's', info: { id: 'm2', role: 'assistant' } } })
   for (const type of ['session.step.ended', 'session.step.failed']) expect(at(type, { sessionID: 's' })).toEqual([{ type: 'session.updated', properties: { info: { id: 's', time: { updated: 9 } } } }])
 })
+
+test('2.x: a listing that fails after the stream opened releases the body and goes offline', async () => {
+  const release = vi.fn(() => Promise.resolve({ done: true, value: undefined }))
+  let sent = false
+  const body = {
+    [Symbol.asyncIterator]: () => ({
+      next: () => (sent ? new Promise(() => {}) : ((sent = true), Promise.resolve({ done: false, value: new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n') }))),
+      return: release,
+    }),
+  }
+  const fetchImpl = vi.fn((url: string) => {
+    const path = new URL(url).pathname
+    if (path === '/api/info') return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: '2.3.2', pid: 1 }) })
+    if (path === '/api/event') return Promise.resolve({ ok: true, status: 200, body })
+    return Promise.reject(new Error('listing failed'))
+  }) as any
+  const onOffline = vi.fn()
+  await connectEvents({ host: '127.0.0.1', port: 4803, directory: '/fv/repo' }, { fetchImpl, onEvent: vi.fn(), onOffline, reconnect: false }).done
+  expect(release).toHaveBeenCalled()
+  expect(onOffline).toHaveBeenCalledWith('/fv/repo')
+})
+
+test('2.x: stop() while the seed is being listed delivers nothing more', async () => {
+  let listed!: (v: unknown) => void
+  const fetchImpl = vi.fn((url: string) => {
+    const path = new URL(url).pathname
+    if (path === '/api/info') return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: '2.3.2', pid: 1 }) })
+    if (path === '/api/event') return Promise.resolve({ ok: true, status: 200, body: (async function* () { yield new TextEncoder().encode(transcript) })() })
+    return new Promise((r) => { listed = r })
+  }) as any
+  const onEvent = vi.fn()
+  const conn = connectEvents({ host: '127.0.0.1', port: 4804, directory: '/fv/repo' }, { fetchImpl, onEvent, reconnect: false })
+  await vi.waitFor(() => expect(listed).toBeDefined())
+  conn.stop()
+  listed({ ok: true, status: 200, text: () => Promise.resolve('{"data":[]}') })
+  await conn.done
+  expect(onEvent).not.toHaveBeenCalled()
+})

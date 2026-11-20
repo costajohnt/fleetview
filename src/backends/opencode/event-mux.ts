@@ -57,19 +57,11 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
         // 2.x has one server-wide stream in its own vocabulary; it is cut to this directory and
         // translated to 1.x's events here, so the store downstream never knows which it got.
         const isV2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 // unanswered: the stream attempt below fails the same way and backs off
+        let v2: ((frame: unknown) => OpencodeEvent[]) | null = null
         const url = isV2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
         const res = await fetchImpl(url, { signal: ac.signal, headers: auth ? { authorization: auth } : undefined })
         if (stopped) return
         if (!res.ok || !res.body) throw new Error(`event stream ${res.status}`)
-        // Seeded once the stream is open, not before (#184): a session created between the listing
-        // and the subscription announced itself to nobody, and its location-less frames were dropped
-        // until the next reconnect. The body is not read until the seed is in, so nothing is missed.
-        const v2 = isV2
-          ? await v2Filter(base, directory, fetchImpl).catch((e) => {
-              Promise.resolve((res.body as { cancel?: () => Promise<void> }).cancel?.()).catch(() => {})
-              throw e
-            })
-          : null
         onOnline?.(directory)
         delay = 1000
         let buf = ''
@@ -88,6 +80,15 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
             const step = await Promise.race([iterator.next(), idle]).finally(() => clearTimeout(timer))
             if (step.done) break
             if (stopped) return
+            // The 2.x seed is listed once the first bytes are in, not before the stream opens (#184):
+            // 2.3.2 subscribes only when the body starts flowing (handlers/event.ts, announced by
+            // server.connected), so a session created before that was known to nobody and its
+            // location-less frames were dropped until reconnect. Later frames wait unread meanwhile;
+            // a failed listing throws into the reconnect path, and the finally releases the body.
+            if (isV2 && !v2) {
+              v2 = await v2Filter(base, directory, fetchImpl)
+              if (stopped) return
+            }
             const chunk = step.value
             buf += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
             const { events, rest } = parseSseChunk(buf)
