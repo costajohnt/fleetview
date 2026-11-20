@@ -348,6 +348,29 @@ test('a saved password rejected on the M4 retry is burned even when opencode is 
   expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined() // both were shown to the rejecting listener
 })
 
+// probeServer presents the saved password on the retry's 401 and can still come back `unreachable` (the
+// authenticated request then failed some other way). That listener has seen both passwords.
+test('an M4 retry that is not healthy arms the replacement with neither password', async () => {
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const spawned: any[] = []
+  const deps = {
+    isServerHealthy: () => Promise.resolve(spawned.length > 0),
+    probeServer: () => Promise.resolve(env.OPENCODE_SERVER_PASSWORD === 'set-by-user' ? 'unauthorized' : 'unreachable'),
+    spawnServer: (s: any) => (spawned.push(s), 777),
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, password: 'generated-earlier' })
+  expect(result.ok).toBe(true)
+  expect(spawned[0].password).toMatch(/^[0-9a-f-]{36}$/)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe(spawned[0].password)
+})
+
 test('the M4 retry only follows a 401, not a server that is simply not answering', async () => {
   const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
   const probed: any[] = []
