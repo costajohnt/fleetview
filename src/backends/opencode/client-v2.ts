@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, join, resolve } from 'node:path'
-import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, StatusSnapshot, Worktree } from '../../types.ts'
+import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 import { opencodeRequest } from './request.ts'
 import { stateDir } from '../../paths.ts'
@@ -228,7 +228,7 @@ export class OpencodeV2Client {
   // for every worktree at once, and the map is the same for all of them (#186). The map is fetched
   // on the first ask, so a caller that takes a seed watermark first still has it ahead of the GET.
   // `listed` is a listing of the directory the caller already holds, saving one per directory.
-  statusSnapshot(): StatusSnapshot {
+  statusSnapshot() {
     let active: Promise<unknown> | undefined
     return async (directory?: string, listed?: ListedSession[]): Promise<Record<string, OpencodeSessionStatus>> => {
       active ??= this.req('GET', '/api/session/active').then(unwrap)
