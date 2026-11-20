@@ -113,6 +113,25 @@ test('Peek: a turn that said something before failing keeps both the text and th
   expect(frame).toContain('error: APIError: boom')
 })
 
+// #188: the roster calls a user-stopped session `stopped`; peek must not call it an error.
+test('Peek: a turn the user stopped reads stopped, not error, on both opencode generations', () => {
+  for (const error of [
+    { name: 'MessageAbortedError', data: { message: 'Aborted' } }, // 1.x
+    { name: 'aborted', data: { message: 'Step interrupted' } }, // 2.x after v1Error
+  ]) {
+    const frame = render(
+      React.createElement(Peek, {
+        target: { title: 't', projectKey: '/p' },
+        messages: [{ info: { role: 'assistant', error }, parts: [{ type: 'text', text: 'starting' }] }],
+        columns: 200,
+      }),
+    ).lastFrame()!
+    expect(frame).toContain('starting')
+    expect(frame).toContain('stopped')
+    expect(frame).not.toContain('error:')
+  }
+})
+
 test('Peek: a message with no error renders no error line', () => {
   const frame = render(
     React.createElement(Peek, {

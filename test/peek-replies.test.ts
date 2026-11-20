@@ -337,3 +337,43 @@ test('the right arrow with a draft in peek moves the caret rather than attaching
   await waitFor(() => onAction.mock.calls.some(([a]: any) => a?.type === 'enter'))
   expect(onAction.mock.calls.find(([a]: any) => a?.type === 'enter')![0].sessionId).toBe('s1')
 })
+
+// #188: peek fetched the transcript once, on open, so the model's response to an answer given from
+// an open peek only appeared after closing and reopening it.
+test('an open peek refetches the transcript when the session changes state', async () => {
+  const deps = makeDeps()
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
+  stdin.write(SPACE)
+  await waitFor(() => lastFrame().includes('no messages yet'))
+
+  deps.client.listMessages = vi.fn(() =>
+    Promise.resolve([{ info: { id: 'm1', role: 'assistant' }, parts: [{ type: 'text', text: 'merged it' }] }]),
+  ) as any
+  const onEvent = (deps.connectEventsImpl.mock.calls[0] as any)[1].onEvent
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  await waitFor(() => lastFrame().includes('merged it'))
+})
+
+test('a refetch that fails keeps the transcript already on screen', async () => {
+  const deps = makeDeps()
+  deps.client.listMessages = vi.fn(() =>
+    Promise.resolve([{ info: { id: 'm1', role: 'assistant' }, parts: [{ type: 'text', text: 'first answer' }] }]),
+  ) as any
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
+  stdin.write(SPACE)
+  await waitFor(() => lastFrame().includes('first answer'))
+
+  const failing = vi.fn(() => Promise.reject(new Error('gone')))
+  deps.client.listMessages = failing as any
+  const onEvent = (deps.connectEventsImpl.mock.calls[0] as any)[1].onEvent
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  await waitFor(() => failing.mock.calls.length > 0)
+  await tick()
+  expect(lastFrame()).toContain('first answer')
+  expect(lastFrame()).not.toContain("couldn't load messages")
+})

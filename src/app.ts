@@ -686,6 +686,19 @@ export function App({
     attached,
   })
 
+  // #113.4: only for a finished session in its own worktree — a session still working has commits
+  // coming, and an unisolated one has nothing to merge back from. #188: mergeBackCommand now asks
+  // git whether there is anything to merge, so it is memoised on what can change the answer rather
+  // than run on every animation frame.
+  const peekStatus = peekTarget ? store.get(peekTarget.projectKey, peekTarget.id)?.status ?? '' : ''
+  const peekParent = peekTarget && isSandbox(parents, peekTarget.projectKey) ? parents.get(peekTarget.projectKey) : undefined
+  const peekMergeBack = useMemo(
+    () => (peekTarget && peekParent && FINISHED_STATUSES.has(peekStatus)
+      ? mergeBackCommand(peekTarget.projectKey, peekParent, branchOfImpl(peekTarget.projectKey))
+      : null),
+    [peekTarget?.projectKey, peekParent, peekStatus],
+  )
+
   // Discovery, streaming and the project poll live in use-discovery.ts — see the header there.
   // The refs declared above (`reconcileRef`, `streamProjectRef`, `activateBackendRef`) are the
   // seam: the hook publishes its entry points through them, and the dispatch/peek paths call
@@ -1036,12 +1049,7 @@ export function App({
           // Scoped to the peek target's own repository: `reasons` is per-repo, and a session must
           // only ever see why ITS repo has no PR data, never why some other repo failed.
           prReason: pullRequests.reasons.get(repoOf(peekTarget.projectKey)) ?? null,
-          // #113.4: only for a finished session in its own worktree — a session still working has
-          // commits coming, and an unisolated one has nothing to merge back from.
-          mergeBack:
-            isSandbox(parents, peekTarget.projectKey) && FINISHED_STATUSES.has(store.get(peekTarget.projectKey, peekTarget.id)?.status ?? '')
-              ? mergeBackCommand(peekTarget.projectKey, parents.get(peekTarget.projectKey), branchOfImpl(peekTarget.projectKey))
-              : null,
+          mergeBack: peekMergeBack,
           // Drives the answer hints only — the banners still render, because "this session is
           // blocked on a permission" is true whether or not fleetview can answer it from here.
           canAnswer: capabilitiesOf(peekTarget).questions,
