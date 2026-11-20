@@ -2757,6 +2757,28 @@ test('#192: an isolation failure names its reason in the confirmation and the di
   expect(logged.reason).toContain(`not a new]0;evil worktree of /x/alpha: /srv/${marker}/`) // control bytes and newline gone
 })
 
+// #204: alt+enter attached before the warning branch, so a dispatch that fell back to the checkout
+// said nothing at all. The warning now waits for the return to the roster; a flash made while
+// attached would expire behind the session unseen.
+test.each([
+  ['a refused worktree', {}, 'not isolated (worktree failed: 404)'],
+  ['isolation off', { isolate: false }, 'isolation off, it edits the checkout'],
+])('#204: dispatch-then-attach with %s shows the warning after detach', async (_, props, warning) => {
+  const { deps } = isolatingDeps()
+  deps.client.createWorktree = vi.fn(() => Promise.reject(new Error('404')))
+  let detach: any
+  const onAction = vi.fn((a: any) => (a.type === 'enter' ? new Promise((r) => { detach = r }) : undefined))
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction, ...props }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick() // the input state must flush, or Enter sees an empty input and attaches instead
+  stdin.write('\x1B\r') // alt+enter: dispatch and attach
+  await waitFor(() => lastFrame() === '')
+  detach({ detached: true, sessionId: 's9', worktree: '/x/alpha' })
+  await waitFor(() => lastFrame().includes(warning))
+  expect(lastFrame()).toContain('dispatched into alpha')
+})
+
 // "Ctrl+X twice removes the worktree and uncommitted changes."
 test('deleting an isolated session removes its worktree when nothing would be lost', async () => {
   const { deps, wt } = isolatingDeps()

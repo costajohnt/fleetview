@@ -578,7 +578,9 @@ export function App({
   // only has to stop reading the keyboard while somebody else owns the terminal.
   //
   // `siblings` is what Alt+1..9 switches between: the rows as currently ordered on screen.
-  const attach = (row: AttachTarget) => {
+  // `notice` is shown on return (#204): a dispatch-then-attach has its confirmation to give, and a
+  // flash made now would expire unseen behind the attached session.
+  const attach = (row: AttachTarget, notice?: string) => {
     // Read through a ref, not the render closure. `dispatch` captures the `attach` of the render
     // where the keypress happened, and in that render `attached` is still false — so the state
     // value can never see an attachment that began while the dispatch was in flight, which is the
@@ -637,6 +639,7 @@ export function App({
         // launch failure, an instant silent death), so the row was never attached to.
         if (message && !result?.detached) lastAttached.current = previous
         if (message) flash(message, 4000)
+        else if (notice) flash(notice, 5000)
       }
       done.then(back, () => back())
       return
