@@ -12,10 +12,10 @@
 // (createLocalWorktree below), laid out the same way.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { statSync, appendFileSync, mkdirSync, readdirSync } from 'node:fs'
+import { statSync, appendFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs'
 import { basename, join, sep } from 'node:path'
 import { homedir } from 'node:os'
-import { GIT_SAFE_ARGS } from './git-safe.ts'
+import { GIT_SAFE_ARGS, gitFilterOverrides, gitFilterSafeEnv } from './git-safe.ts'
 import { fleetviewDir } from './paths.ts'
 import type { Project } from './types.ts'
 
@@ -155,9 +155,20 @@ export function logDispatchDebug(entry: Record<string, unknown>) {
 // Every caller's `dir` is a project or sandbox path the unauthenticated opencode server named, which
 // makes its repository-local `.git/config` — and its `.git/hooks` — attacker-controlled. `status`
 // runs both a hostile `core.fsmonitor` and a `post-index-change` hook, so the same overrides
-// pull-requests.ts uses belong here too; see git-safe.ts.
-const git = (dir: string, args: string[], run = execFileSync) =>
-  run('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+// pull-requests.ts uses belong here too; see git-safe.ts. So do the filter-driver overrides (#181),
+// read from every directory whose config the command will load: `worktree remove` checks the target
+// with a `status` of its own, which also reads that worktree's own config.worktree.
+const git = (dir: string, args: string[], run = execFileSync, configDirs = [dir]) =>
+  run('git', [...GIT_SAFE_ARGS, ...configDirs.flatMap((d) => gitFilterOverrides(d, run)), '-C', dir, ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: gitFilterSafeEnv(),
+  }).trim()
+
+// A submodule is a repository of its own whose config fleetview never read, so its filters and
+// fsmonitor are not overridden. `status` is told never to enter one, and a worktree holding any is
+// never removed: neither here nor through opencode's DELETE, which forces.
+const hasSubmodules = (dir: string) => existsSync(join(dir, '.gitmodules'))
 
 // Worktrees for the process-backed CLIs, made locally because there is no server to ask. Same shape
 // as opencode's: <data>/fleetview/worktree/<repo>-<hash>/<name> on a branch `fleetview/<name>`, where
@@ -181,7 +192,14 @@ export function createLocalWorktree(repo: string, prompt: string, root = localWo
   const name = worktreeName(prompt, existing)
   if (name !== worktreeName(prompt)) logNameCollision({ prompt, name, existing })
   const dir = join(home, name)
-  git(repo, ['worktree', 'add', '-b', `${LOCAL_BRANCH_PREFIX}${name}`, dir, 'HEAD'], run)
+  // Checked out in a second step, from inside the new worktree: config gated by
+  // `includeIf "onbranch:fleetview/**"` or `"gitdir:**/worktrees/**"` applies only there, so a filter
+  // list read from `repo` would miss a driver the checkout then runs. `--no-recurse-submodules`
+  // because a hostile `submodule.recurse` would otherwise take reset into repositories never read.
+  // ponytail: a failed reset leaves the half-made worktree behind; the caller falls back, and the
+  // next dispatch steers around the taken name.
+  git(repo, ['worktree', 'add', '--no-checkout', '-b', `${LOCAL_BRANCH_PREFIX}${name}`, dir, 'HEAD'], run)
+  git(dir, ['reset', '--hard', '-q', '--no-recurse-submodules'], run, [repo, dir])
   return dir
 }
 
@@ -191,8 +209,9 @@ export function createLocalWorktree(repo: string, prompt: string, root = localWo
 // session checked out by name is never touched. A branch -d refusal is not an error: the worktree
 // is gone and the branch, which createLocalWorktree steers around, still holds the commits.
 export function removeLocalWorktree(dir: string, repo: string, run = execFileSync) {
+  if (hasSubmodules(dir)) throw new Error(`${dir} contains submodules; fleetview leaves it for you to remove`)
   const branch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'], run)
-  git(repo, ['worktree', 'remove', dir], run)
+  git(repo, ['worktree', 'remove', dir], run, [repo, dir])
   if (!branch.startsWith(LOCAL_BRANCH_PREFIX)) return
   try {
     git(repo, ['branch', '-d', branch], run)
@@ -211,8 +230,9 @@ export function removeLocalWorktree(dir: string, repo: string, run = execFileSyn
 // repository — measuring against the parent instead asks the question that actually matters, which
 // is whether deleting this branch would lose work that exists nowhere else.
 export function worktreeSafety(dir: string, parentDir: string | null | undefined, run = execFileSync) {
+  if (hasSubmodules(dir)) return { removable: false, dirty: false, unpushed: true, reason: 'contains submodules' }
   try {
-    const dirty = git(dir, ['status', '--porcelain'], run).length > 0
+    const dirty = git(dir, ['status', '--porcelain', '--ignore-submodules=all'], run).length > 0
     let base
     try {
       base = git(dir, ['rev-parse', '--abbrev-ref', '@{upstream}'], run)
