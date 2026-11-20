@@ -397,7 +397,7 @@ test('the M4 retry only follows a 401, not a server that is simply not answering
   const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
   const probed: any[] = []
   const deps = {
-    isServerHealthy: () => Promise.resolve(false),
+    isServerHealthy: () => (probed.push(env.OPENCODE_SERVER_PASSWORD), Promise.resolve(false)), // the old retry went through here
     probeServer: () => (probed.push(env.OPENCODE_SERVER_PASSWORD), Promise.resolve('unreachable')),
     spawnServer: () => { throw new Error('should not spawn') },
     saveServer: () => {},
