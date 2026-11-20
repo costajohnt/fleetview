@@ -101,8 +101,7 @@ export function usePeek({
     const refetch = fetchedFor.current === peekTarget
     if (!refetch) setPeekMessages(null)
     fetchedFor.current = peekTarget
-    // No listMessages (claude, copilot): the transcript is a file in the CLI's own state dir, so
-    // say so rather than render a fetch failure for a healthy session.
+    // No listMessages (copilot): say so rather than render a fetch failure for a healthy session.
     const backend = backendFor(peekTarget)
     if (!backend.listMessages) {
       setPeekMessages('unsupported')

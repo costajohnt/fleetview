@@ -11,6 +11,8 @@ import { createLocalWorktree, gitKindOf, localWorktreeRoot } from '../src/worktr
 import { App } from '../src/app.ts'
 import { makePersistRoster } from '../src/roster-store.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
+import { createClaudeBackend } from '../src/backends/claude/index.ts'
+import { encodeProjectDir } from '../src/backends/claude/projects.ts'
 import { OPENCODE_MISSING } from '../src/backends/opencode/server-manager.ts'
 import { claudeNormaliser, copilotNormaliser, normaliseClaudeSessions, normaliseCopilotSessions } from '../src/backend-normalise.ts'
 import { headerRows } from '../src/ui/header.ts'
@@ -3647,6 +3649,37 @@ test("/fork and peek on a non-opencode row that can fork and read messages use t
   expect(deps.client.promptAsync).not.toHaveBeenCalled()
   stdin.write(' ') // peek the selected claude row
   await waitFor(() => lastFrame().includes('from the claude adapter'))
+  expect(deps.client.listMessages).not.toHaveBeenCalled()
+})
+
+// #233: the real claude adapter over a fake ~/.claude: peek on a claude row shows its transcript,
+// labelled as claude's, without asking the opencode server about a claude id.
+test("peek on a claude row shows the session's transcript", async () => {
+  const deps = makeDeps()
+  const home = mkdtempSync(join(tmpdir(), 'fleetview-peek-claude-'))
+  const id = 'c1a0de00-0000-4000-8000-000000000233'
+  const dir = join(home, '.claude', 'projects', encodeProjectDir('/x/alpha'))
+  mkdirSync(dir, { recursive: true })
+  const records = [
+    { type: 'user', cwd: '/x/alpha', timestamp: '2026-10-01T00:00:00Z', message: { role: 'user', content: 'tidy the parser' } },
+    { type: 'assistant', cwd: '/x/alpha', message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'parser tidied' }] } },
+  ]
+  writeFileSync(join(dir, `${id}.jsonl`), records.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  const claude = createClaudeBackend({ home, runDir: mkdtempSync(join(tmpdir(), 'fleetview-peek-runs-')) })
+  const { stdin, lastFrame } = render(
+    React.createElement(App, {
+      ...deps,
+      onAction: vi.fn(),
+      backends: { opencode: opencodeStub(deps), claude },
+      initialBackend: 'claude',
+      roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id, addedAt: 1, backend: 'claude' }] },
+    }),
+  )
+  await waitFor(() => lastFrame().includes('tidy the parser'))
+  stdin.write(' ') // open peek on the claude row
+  await waitFor(() => lastFrame().includes('parser tidied'))
+  expect(lastFrame()).toContain('claude:')
+  expect(lastFrame()).not.toContain('no transcript over the wire')
   expect(deps.client.listMessages).not.toHaveBeenCalled()
 })
 

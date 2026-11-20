@@ -159,7 +159,9 @@ export function Peek({
       // `aborted` via v1Error) that the roster already reads as `stopped`; peek says the same.
       const stopped = isAbortError(m?.info?.error)
       const err = stopped ? null : errorLabel(m?.info?.error)
-      const rows: PeekRow[] = [{ text: role ? ROLE_LABEL[role] ?? `${role}:` : 'message:', dim: true }]
+      // The assistant speaks as the row's backend (#233: claude rows read their transcript too).
+      const label = role === 'assistant' && backend ? `${backend}:` : role ? ROLE_LABEL[role] ?? `${role}:` : 'message:'
+      const rows: PeekRow[] = [{ text: label, dim: true }]
       if (body || !(err || stopped)) rows.push({ text: body })
       if (stopped) rows.push({ text: 'stopped', dim: true })
       if (err) rows.push({ text: `error: ${err}`, color: theme.danger })

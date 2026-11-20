@@ -31,9 +31,9 @@ installed or its server can't be reached, these commands print one line saying s
 carry on with claude and copilot. `add`, `answer`, `watch` and `bg` act on opencode sessions only.
 
 Two verbs can't do everything for claude and copilot sessions. `rm` refuses, because neither CLI
-can delete a stored session (`stop` ends a running one). `logs` refuses, because their transcripts
-are not readable over a wire, and points at `attach` instead. `stop` on one with nothing running
-says so rather than claiming it stopped something.
+can delete a stored session (`stop` ends a running one). `logs` on a claude session reads its
+transcript file in `~/.claude/projects`; on a copilot session it refuses and points at `attach`
+instead. `stop` on one with nothing running says so rather than claiming it stopped something.
 
 Session ids can be abbreviated to any unique prefix, across all backends. A prefix that matches
 more than one session lists every candidate, with its backend when it isn't opencode, and acts on

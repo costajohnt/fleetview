@@ -1007,9 +1007,10 @@ export async function runLogs(args: ParsedArgs, deps: SessionCommandDeps) {
   const d = withDefaults(deps)
   const found = await findSession(args.id, { ...d, cwd: args.cwd })
   if (!found) return
-  if (!found.opencode) {
-    // Neither process backend has listMessages: the transcript is a file in the
-    // CLI's own state directory, not something fleetview can fetch, which is also why peek says
+  // The row's own adapter (#233): opencode's client, or the claude transcript reader.
+  const adapter = adapterFor(found, d.backends)
+  if (!adapter?.listMessages) {
+    // copilot: its transcript is not something fleetview reads, which is also why peek says
     // "attach to read it" for these rows.
     d.error(`${found.backend} sessions have no transcript fleetview can read; fleetview attach ${found.id} to read it`)
     d.setExitCode(1)
@@ -1017,7 +1018,7 @@ export async function runLogs(args: ParsedArgs, deps: SessionCommandDeps) {
   }
   let messages
   try {
-    messages = await found.opencode.client.listMessages(found.id, found.worktree)
+    messages = await adapter.listMessages(found.id, found.worktree)
   } catch (e) {
     // #179: an unreadable transcript is not an empty one.
     d.error(`couldn't read messages for ${found.id}: ${stripControl(e instanceof Error ? e.message : String(e))}`)
@@ -1035,7 +1036,7 @@ export async function runLogs(args: ParsedArgs, deps: SessionCommandDeps) {
     // text goes straight to stdout with no Ink backstop, so an escape in a reply (OSC 52 clipboard
     // write, OSC 0/2 title spoof) would drive the terminal.
     const text = messageBody(m, '')
-    if (text.trim()) d.log(`${role === 'user' ? 'you' : 'opencode'}: ${text}`)
+    if (text.trim()) d.log(`${role === 'user' ? 'you' : found.backend}: ${text}`)
     // #24: a failed turn's only content is `info.error` — without this, `logs` on a session that
     // failed every dispatch printed the user's own prompt and nothing else. errorLabel strips it
     // for the same reason the body above is stripped.

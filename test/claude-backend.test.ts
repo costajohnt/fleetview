@@ -49,7 +49,7 @@ test('claude declares what it cannot do rather than inheriting opencode’s answ
   // fork() to reach it, so the absence describes fleetview, not the CLI.
   const { b } = backend()
   expect(b.capabilities).toEqual({ rename: false, delete: false, questions: false })
-  expect([b.fork, b.listMessages, b.shell]).toEqual([undefined, undefined, undefined])
+  expect([b.fork, b.shell]).toEqual([undefined, undefined])
   expect(b.name).toBe('claude')
 })
 

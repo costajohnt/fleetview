@@ -11,17 +11,16 @@ import { join } from 'node:path'
 import type { ProcessBackend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
 import { claudeNormaliser, normaliseClaudeSessions } from '../../backend-normalise.ts'
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
-import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
+import { encodeProjectDir, listTranscripts, projectsDir, readTranscriptMessages } from './projects.ts'
 import { parseStreamChunk } from './stream.ts'
 import { isLiveRun, psInfo, sameRun, STILL_WORKING, type PidInfo } from '../ps.ts'
 import { reapRunLogs } from '../run-logs.ts'
 import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
 import { assertSessionId } from '../session-id.ts'
 
-// Every flag is a "fleetview can't", stated rather than inherited. No fork(), listMessages() or
-// shell() either: `claude --resume --fork-session` exists but nothing here drives it yet, the
-// transcript is a file in ~/.claude/projects rather than a wire API peek can fetch, and there is no
-// shell surface.
+// Every flag is a "fleetview can't", stated rather than inherited. No fork() or shell() either:
+// `claude --resume --fork-session` exists but nothing here drives it yet, and there is no shell
+// surface.
 const CAPABILITIES = {
   rename: false, // no CLI surface for renaming a stored session (-n only names one at start)
   delete: false, // would mean unlinking a transcript out of ~/.claude/projects, which is Claude Code state
@@ -154,6 +153,9 @@ export function createClaudeBackend({
     // Claude Code's own transcripts, not fleetview's run dir: a session fleetview dispatched writes
     // one too, so reading both would mean deduplicating two views of the same session for no gain.
     listSessions: async (directory) => listTranscripts(directory, { home }),
+
+    // #233: peek and `fleetview logs` read the same transcript, mapped to opencode's message shape.
+    listMessages: (id, directory) => readTranscriptMessages(id, directory, { home }),
 
     async dispatch({ prompt, directory, agent, model }) {
       // fleetview mints the id instead of parsing it out of the init event. The alternative is
