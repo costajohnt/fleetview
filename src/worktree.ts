@@ -139,13 +139,14 @@ export function worktreeName(prompt: string, existing: string[] = []) {
 // (prompt, chosen name, taken slots) to a local NDJSON file so the next occurrence self-documents.
 // Best-effort by design: a debug log must never cost anyone their dispatch.
 export function logNameCollision(entry: { prompt: string; name: string; existing: string[] }) {
+  // The prompt is capped: this is a lookup key for the bug, not an archive of pasted walls.
+  logDispatchDebug({ ...entry, prompt: entry.prompt.slice(0, 200) })
+}
+
+// The same file, for any dispatch evidence (#192 logs why isolation fell back here too).
+export function logDispatchDebug(entry: Record<string, unknown>) {
   try {
-    const dir = stateDir()
-    appendPrivate(
-      join(dir, 'dispatch-debug.ndjson'),
-      // The prompt is capped: this is a lookup key for the bug, not an archive of pasted walls.
-      `${JSON.stringify({ ts: new Date().toISOString(), ...entry, prompt: entry.prompt.slice(0, 200) })}\n`,
-    )
+    appendPrivate(join(stateDir(), 'dispatch-debug.ndjson'), `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`)
   } catch {}
 }
 
@@ -155,12 +156,22 @@ export function logNameCollision(entry: { prompt: string; name: string; existing
 // pull-requests.ts uses belong here too; see git-safe.ts. So do the filter-driver overrides (#181),
 // read from every directory whose config the command will load: `worktree remove` checks the target
 // with a `status` of its own, which also reads that worktree's own config.worktree.
-const git = (dir: string, args: string[], run = execFileSync, configDirs = [dir]) =>
-  run('git', [...GIT_SAFE_ARGS, ...configDirs.flatMap((d) => gitFilterOverrides(d, run)), '-C', dir, ...args], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-    env: gitFilterSafeEnv(),
-  }).trim()
+// stderr is captured (never shown) so a failure says why (#192): execFileSync's own message is only
+// "Command failed: git -c ... worktree add ...", the same for an existing branch, an unborn HEAD or
+// a dubious-ownership refusal. git's last stderr line leads the message; status and the rest stay.
+const git = (dir: string, args: string[], run = execFileSync, configDirs = [dir]) => {
+  try {
+    return run('git', [...GIT_SAFE_ARGS, ...configDirs.flatMap((d) => gitFilterOverrides(d, run)), '-C', dir, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: gitFilterSafeEnv(),
+    }).trim()
+  } catch (e) {
+    const said = String((e as { stderr?: unknown })?.stderr ?? '').trim().split('\n').pop()
+    if (said && e instanceof Error) e.message = `git ${args[0]}: ${said}`
+    throw e
+  }
+}
 
 // A submodule is a repository of its own whose config fleetview never read, so its filters and
 // fsmonitor are not overridden. `status` is told never to enter one, and a worktree holding any is
@@ -261,10 +272,28 @@ export function worktreeSafety(dir: string, parentDir: string | null | undefined
 // in full instead of leaving the user to reconstruct it.
 //
 // Shown, never run: a merge can conflict, the parent checkout may have work in it, and neither is
-// something a keystroke in a roster should decide. Pure so the wording is testable without a
-// repository; the caller supplies the branch lookup.
-export function mergeBackCommand(worktree: string, repo: string | null | undefined, branch: string | null | undefined) {
+// something a keystroke in a roster should decide. The caller supplies the branch lookup.
+//
+// #188: only offered when `git merge` would bring something: commits on the branch that the parent
+// checkout's HEAD lacks. opencode never commits, so a finished session usually has only
+// uncommitted edits (or nothing), and a merge of that branch is a no-op. Uncommitted edits are said
+// as such; no changes at all says nothing. A count git can't produce keeps the command, which is
+// what this showed before the check existed.
+export function mergeBackCommand(worktree: string, repo: string | null | undefined, branch: string | null | undefined, run = execFileSync) {
   if (!repo || !branch || repo === worktree) return null
+  let ahead = NaN
+  try {
+    // Counted in the parent: HEAD there is what `git merge` merges into. --end-of-options keeps a
+    // branch the session named from ever reading as a flag.
+    ahead = Number(git(repo, ['rev-list', '--count', '--end-of-options', `HEAD..${branch}`], run))
+  } catch {} // count unknown: fall through to the command, as before #188
+  if (ahead === 0) {
+    try {
+      return git(worktree, ['status', '--porcelain', '--ignore-submodules=all'], run) ? 'nothing committed yet, only uncommitted changes' : null
+    } catch {
+      return null // nothing to merge is known; an unreadable worktree is no reason to offer a no-op merge
+    }
+  }
   // Both halves are quoted: paths carry spaces, and branch names may legally carry `$`, backticks,
   // `;`, `&`, `|` and quotes (check-ref-format bans only space, ~^:?*[\ and control characters) —
   // and the branch is whatever the session checked out, so this copy-paste line must not trust it.

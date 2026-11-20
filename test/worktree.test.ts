@@ -447,6 +447,29 @@ test('mergeBackCommand yields nothing when there is nothing to merge back', () =
   expect(mergeBackCommand('/x/repo', '/x/repo', 'main')).toBe(null)
 })
 
+// #188: opencode never commits, so `git merge <branch>` after a typical session brings nothing.
+test('mergeBackCommand offers the merge only when the branch has commits the parent lacks', () => {
+  const repo = makeRepo()
+  const wt = createLocalWorktree(repo.dir, 'merge back', dataRoot())
+  const branch = gitOut(wt, 'rev-parse', '--abbrev-ref', 'HEAD')
+  expect(mergeBackCommand(wt, repo.dir, branch)).toBe(null) // no changes at all
+  writeFileSync(join(wt, 'a.txt'), 'edited\n')
+  expect(mergeBackCommand(wt, repo.dir, branch)).toBe('nothing committed yet, only uncommitted changes')
+  execFileSync('git', ['-C', wt, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'work'])
+  expect(mergeBackCommand(wt, repo.dir, branch)).toBe(`git -C '${repo.dir}' merge '${branch}'`)
+})
+
+test('mergeBackCommand never offers a known no-op merge, and keeps the command when it cannot count', () => {
+  const zeroThenFail = ((_cmd: string, args: string[]) => {
+    if (args.includes('config')) return '' // #181's filter-driver lookup: no drivers
+    if (args.includes('rev-list')) return '0\n'
+    throw new Error('worktree gone')
+  }) as any
+  expect(mergeBackCommand('/wt/one', '/x/repo', 'b', zeroThenFail)).toBe(null)
+  const fail = (() => { throw new Error('no git') }) as any
+  expect(mergeBackCommand('/wt/one', '/x/repo', 'b', fail)).toBe("git -C '/x/repo' merge 'b'")
+})
+
 // --- M9: worktrees fleetview makes itself, for claude and copilot ---
 
 const dataRoot = () => {
@@ -478,6 +501,15 @@ test('createLocalWorktree steers around taken directories and leftover branches'
   // A branch kept after its worktree went (branch -d refused) still claims its name.
   repo.g('branch', 'fleetview/lint')
   expect(basename(createLocalWorktree(repo.dir, 'lint', root))).toBe('lint-2')
+})
+
+// #192: the dispatch line shows this message, and execFileSync's own is only the argv, the same for
+// every cause. git's stderr has to lead it: an unborn HEAD must read as git's complaint.
+test('createLocalWorktree failures carry git\'s own reason, not just the command line', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleetview-unborn-'))
+  repos.push(dir)
+  execFileSync('git', ['-C', dir, 'init', '-q', '-b', 'main'], { stdio: 'ignore' })
+  expect(() => createLocalWorktree(dir, 'x', dataRoot())).toThrow(/^git worktree: fatal: /)
 })
 
 test('createLocalWorktree throws outside a repository, so dispatch can fall back', () => {

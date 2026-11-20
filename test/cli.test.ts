@@ -44,7 +44,7 @@ test('adopting a healthy server that does not enforce a set password warns once'
     spawnServer: () => { throw new Error('should not spawn') },
     saveServer: () => {},
     serverFile: '/tmp/s.json',
-    env: {},
+    env: { OPENCODE_SERVER_PASSWORD: 'set-by-user' } as NodeJS.ProcessEnv,
     warn,
   }
   expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: true, server })
@@ -164,6 +164,7 @@ test('a spawn onto a server that does not enforce the minted password is persist
   const result = await makeEnsureServer(deps as any)(server)
   expect(result).toEqual({ ok: true, server: { ...server, pid: 777 } })
   expect(saved.at(-1)).toEqual({ ...server, pid: 777 }) // no password field for a server enforcing none
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined() // and nothing here sends it one
   expect(warn.mock.calls[0][0]).toMatch(/does not require OPENCODE_SERVER_PASSWORD/)
 })
 
@@ -175,6 +176,7 @@ test('a user-set password over a still-running fleetview server re-probes with t
   const warn = vi.fn()
   const deps = {
     isServerHealthy: () => Promise.resolve(env.OPENCODE_SERVER_PASSWORD === 'generated-earlier'),
+    probeServer: () => Promise.resolve(env.OPENCODE_SERVER_PASSWORD === 'generated-earlier' ? 'healthy' : 'unauthorized'),
     spawnServer: () => { throw new Error('should not spawn') },
     saveServer: () => { throw new Error('should not save') },
     serverFile: '/tmp/s.json',
@@ -204,7 +206,7 @@ test('a genuinely dead server with a stale saved password still respawns, under 
   const result = await makeEnsureServer(deps as any)({ ...server, password: 'generated-earlier' })
   expect(result).toEqual({ ok: true, server: { ...server, pid: 777 } })
   expect(saved.at(-1).password).toBeUndefined()
-  expect(env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user') // restored after the re-probe failed
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user') // nothing answered, so nothing saw it
 })
 
 // A 401 is an answer: something holds that port and enforces a password fleetview doesn't have, so
@@ -224,7 +226,7 @@ test('a port answering 401 is left alone rather than spawned onto', async () => 
     env: { OPENCODE_SERVER_PASSWORD: 'set-by-user' } as NodeJS.ProcessEnv,
   }
   const result = await makeEnsureServer(deps as any)(server)
-  expect(result).toEqual({ ok: true, server: { ...server, port: 4901, pid: 777 } })
+  expect(result).toEqual({ ok: true, server: { ...server, port: 4901, pid: 777, password: deps.env.OPENCODE_SERVER_PASSWORD } })
   expect(spawned.map((s) => s.port)).toEqual([4901]) // never spawned onto the occupied port
   expect(warn.mock.calls[0][0]).toMatch(/rejecting fleetview's password/)
 })
@@ -256,15 +258,42 @@ test('a saved password rejected by whatever holds the port is not reused for the
   expect(saved.at(-1).password).toBe(env.OPENCODE_SERVER_PASSWORD)
 })
 
-// The counterpart: a password the USER set is theirs, not something fleetview adopted from disk, so a
-// 401 under it is not evidence it was leaked — the existing M4 handling still applies.
-test('a user-set password is not burned by a 401 on the configured port', async () => {
+// #180 (2): probeServer presents a set password on a 401, so the squatter on the configured port has
+// now seen the user's one too. Arming the fallback-port server with it would hand that squatter the
+// replacement's shell route.
+test('a user-set password rejected on the configured port is not reused for the fallback server', async () => {
   const spawned: any[] = []
+  const saved: any[] = []
   const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
   const deps = {
     isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawned.length > 0),
     probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
     spawnServer: (s: any) => (spawned.push(s), 777),
+    saveServer: (_file: any, s: any) => saved.push(s),
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)(server)
+  expect(result.ok).toBe(true)
+  expect(spawned.map((s) => s.port)).toEqual([4901])
+  expect(env.OPENCODE_SERVER_PASSWORD).toMatch(/^[0-9a-f-]{36}$/)
+  expect(spawned[0].password).toBe(env.OPENCODE_SERVER_PASSWORD)
+  expect(saved.every((s) => s.password !== 'set-by-user')).toBe(true)
+})
+
+// opencode 2.x reads OPENCODE_PASSWORD first, so a rejected password left under that name would
+// still arm the replacement server even though fleetview presents the freshly minted one.
+test('a rejected OPENCODE_PASSWORD is dropped under both names before the replacement spawns', async () => {
+  const spawnedEnv: any[] = []
+  const env: NodeJS.ProcessEnv = { OPENCODE_PASSWORD: 'set-by-user', OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const deps = {
+    isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawnedEnv.length > 0),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
+    spawnServer: () => (spawnedEnv.push({ ...env }), 777),
     saveServer: () => {},
     serverFile: '/tmp/s.json',
     pollMs: 1,
@@ -274,6 +303,111 @@ test('a user-set password is not burned by a 401 on the configured port', async 
     env,
   }
   await makeEnsureServer(deps as any)(server)
+  expect(spawnedEnv[0].OPENCODE_PASSWORD).toBeUndefined()
+  expect(spawnedEnv[0].OPENCODE_SERVER_PASSWORD).toMatch(/^[0-9a-f-]{36}$/)
+})
+
+// #180 (1): a healthy listener that answers without a password is not fleetview's server. Every
+// client request and event stream sends authHeader(), so the password has to leave env before any
+// of them run, and a saved one is burned so a later respawn mints a fresh one.
+test('adopting a healthy server that does not enforce auth drops the saved password and burns it from server.json', async () => {
+  const env: NodeJS.ProcessEnv = {}
+  const saved: any[] = []
+  const deps = {
+    isServerHealthy: () => Promise.resolve(true),
+    isAuthEnforced: () => Promise.resolve(false),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: (file: any, s: any) => saved.push([file, s]),
+    serverFile: '/tmp/s.json',
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, password: 'from-server-json' })
+  expect(result).toEqual({ ok: true, server })
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+  expect(saved).toEqual([['/tmp/s.json', server]])
+  expect(deps.warn.mock.calls[0][0]).toMatch(/will not send the password/)
+})
+
+test('adopting a healthy server that does not enforce auth stops presenting a user-set password', async () => {
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const deps = {
+    isServerHealthy: () => Promise.resolve(true),
+    isAuthEnforced: () => Promise.resolve(false),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: () => { throw new Error('nothing saved, nothing to burn') },
+    serverFile: '/tmp/s.json',
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: true, server })
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+})
+
+// #180 (3): ensureServer used to retry the saved password on ANY non-healthy state and never burn it
+// when that retry was rejected, leaning on a server.json overwrite the OPENCODE_MISSING return skips.
+test('a saved password rejected on the M4 retry is burned even when opencode is missing', async () => {
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const saved: any[] = []
+  const probed: any[] = []
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: () => (probed.push(env.OPENCODE_SERVER_PASSWORD), Promise.resolve('unauthorized')),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: (file: any, s: any) => saved.push([file, s]),
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({ error: { code: 'ENOENT' } }),
+    warn: vi.fn(),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, password: 'generated-earlier' })
+  expect(result).toEqual({ ok: false, server, reason: OPENCODE_MISSING })
+  expect(probed).toEqual(['set-by-user', 'generated-earlier'])
+  expect(saved).toEqual([['/tmp/s.json', server]])
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined() // both were shown to the rejecting listener
+})
+
+// probeServer presents the saved password on the retry's 401 and can still come back `unreachable` (the
+// authenticated request then failed some other way). That listener has seen both passwords.
+test('an M4 retry that is not healthy arms the replacement with neither password', async () => {
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const spawned: any[] = []
+  const deps = {
+    isServerHealthy: () => Promise.resolve(spawned.length > 0),
+    probeServer: () => Promise.resolve(env.OPENCODE_SERVER_PASSWORD === 'set-by-user' ? 'unauthorized' : 'unreachable'),
+    spawnServer: (s: any) => (spawned.push(s), 777),
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, password: 'generated-earlier' })
+  expect(result.ok).toBe(true)
+  expect(spawned[0].password).toMatch(/^[0-9a-f-]{36}$/)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe(spawned[0].password)
+})
+
+test('the M4 retry only follows a 401, not a server that is simply not answering', async () => {
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const probed: any[] = []
+  const deps = {
+    isServerHealthy: () => (probed.push(env.OPENCODE_SERVER_PASSWORD), Promise.resolve(false)), // the old retry went through here
+    probeServer: () => (probed.push(env.OPENCODE_SERVER_PASSWORD), Promise.resolve('unreachable')),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({ error: { code: 'ENOENT' } }),
+    env,
+  }
+  await makeEnsureServer(deps as any)({ ...server, password: 'generated-earlier' })
+  expect(probed).toEqual(['set-by-user'])
   expect(env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user')
 })
 
@@ -910,10 +1044,10 @@ test('server status burns a saved password the port occupant rejected', async ()
   expect(codes).toEqual([1])
 })
 
-// The counterpart: a password the user set in the environment is theirs, not an adopted one — a 401
-// under it is not fleetview's to burn. The saved one is another matter: the M4 retry presented it to
-// the same listener, which rejected it too, so that one is burned (and only that one).
-test('server status does not burn a user-set password on a 401', async () => {
+// #180: the same rule as ensureServer. Both passwords were presented to a listener that rejected
+// them: the saved one is burned from server.json, and neither stays in this process's env. The
+// user's own shell keeps theirs; fleetview just stops presenting it.
+test('server status burns a saved password and drops a user-set one after a 401', async () => {
   const saved: any[] = []
   const env: any = { OPENCODE_SERVER_PASSWORD: 'users-own' }
   await runServer(
@@ -929,7 +1063,7 @@ test('server status does not burn a user-set password on a 401', async () => {
       env,
     },
   )
-  expect(env.OPENCODE_SERVER_PASSWORD).toBe('users-own')
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
   expect(saved).toEqual([{ host: '127.0.0.1', port: 4900, pid: 4242 }])
 })
 
@@ -1081,14 +1215,14 @@ test('server status reads fleetview\'s own server as healthy under a different u
 })
 
 // The saved password did not open this listener either, so the user's own value goes back.
-test('a retry under the saved password that fails restores the user\'s password', async () => {
+test('a retry under the saved password that fails burns it and presents neither password again', async () => {
   const h = passwordedHarness({ OPENCODE_SERVER_PASSWORD: 'set-by-user' })
   h.deps.probeServerImpl = () => Promise.resolve('unauthorized' as const)
   const saved: any[] = []
   ;(h.deps as any).saveServerImpl = (file: any, s: any) => saved.push([file, s])
   await runServer({ command: 'server', serverAction: 'status' }, h.deps)
   expect(h.out).toContain('healthy  no')
-  expect(h.env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user')
+  expect(h.env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
   // That listener has now seen the saved password and rejected it, so it is burned exactly as the
   // adopted path burns it; otherwise every later `server` run would present it again.
   expect(saved).toEqual([['/tmp/s.json', { host: '127.0.0.1', port: 4900, pid: 4242 }]])
@@ -1685,7 +1819,7 @@ test('anything else is sent as a follow-up prompt', async () => {
 test('a refused respond exits 1 rather than reporting an answer that never landed', async () => {
   const h = answerHarness({ permissions: [pendingPermission], respondPermission: vi.fn(() => Promise.reject(new Error('nope'))) })
   await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'y' }, h.deps)
-  expect(h.errs).toEqual(["couldn't answer permission on ses_abc123"])
+  expect(h.errs).toEqual(["couldn't answer permission on ses_abc123: nope"]) // #179: with the reason
   expect(h.codes).toEqual([1])
   expect(h.out).toEqual([])
 })
@@ -1781,6 +1915,72 @@ test('watch reports a failed turn and ends when the stream itself ends', async (
   h.endStream()
   await done
   expect(h.errs[0]).toContain('overloaded')
+  expect(h.codes).toEqual([1])
+})
+
+// #179: exit status is the contract a script waiting on `watch` reads.
+test('watch exits 0 when the turn ends idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit(part('done'))
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.codes).toEqual([])
+  expect(h.errs).toEqual([])
+})
+
+test('watch exits 1 when the stream ends (or never connects) before the session goes idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.endStream()
+  await done
+  expect(h.errs).toEqual(['lost the event stream before ses_abc123 went idle'])
+  expect(h.codes).toEqual([1])
+})
+
+test('watch exits 1 for a failed turn even though it then goes idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.error', properties: { sessionID: 'ses_abc123', error: { name: 'APIError', data: { message: 'overloaded' } } } })
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.codes).toEqual([1])
+})
+
+test('watch exits 0 when the turn was stopped on purpose (#21)', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.error', properties: { sessionID: 'ses_abc123', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } } })
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.codes).toEqual([])
+})
+
+test('watch exits 1 when the session is deleted before it goes idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.deleted', properties: { info: { id: 'ses_abc123' } } })
+  await done
+  expect(h.errs).toEqual(['ses_abc123 was deleted before it went idle'])
+  expect(h.codes).toEqual([1])
+})
+
+// #179: opencode 1.x streams the user's prompt as a text part of a user message.
+test('watch does not echo the user prompt back as output', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'message.updated', properties: { sessionID: 'ses_abc123', info: { id: 'msg_u', role: 'user' } } })
+  h.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_abc123', part: { type: 'text', id: 'prt_u', messageID: 'msg_u', text: 'count to 3' } } })
+  h.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_abc123', part: { type: 'text', id: 'prt_a', messageID: 'msg_a', text: '1 2 3' } } })
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.out).toEqual(['1 2 3'])
 })
 
 // --- `fleetview status`: the header counts line for a prompt or tmux (#113.3) ---

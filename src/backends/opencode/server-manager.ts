@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { ServerRef } from '../../types.ts'
 import { openPrivateAppend } from '../../registry.ts'
 import { authHeader } from './client.ts'
+import { serverHome } from './client-v2.ts'
 
 // ensureServer's failure reason when `opencode` is not on PATH. Exported so the roster can tell this
 // case (install something, then run again) from a server that merely failed to come up.
@@ -26,7 +27,8 @@ export function spawnServer(
     ownFd = true
   }
   const child = spawnImpl('opencode', ['serve', '--port', String(server.port), '--hostname', server.host], {
-    cwd: homedir(),
+    // Not ~: 2.x makes its cwd a project, and ~ as a project floods the roster (#172).
+    cwd: serverHome(),
     detached: true,
     stdio: ['ignore', logFd, logFd],
   })
