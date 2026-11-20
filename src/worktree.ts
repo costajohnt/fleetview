@@ -158,12 +158,22 @@ export function logDispatchDebug(entry: Record<string, unknown>) {
 // pull-requests.ts uses belong here too; see git-safe.ts. So do the filter-driver overrides (#181),
 // read from every directory whose config the command will load: `worktree remove` checks the target
 // with a `status` of its own, which also reads that worktree's own config.worktree.
-const git = (dir: string, args: string[], run = execFileSync, configDirs = [dir]) =>
-  run('git', [...GIT_SAFE_ARGS, ...configDirs.flatMap((d) => gitFilterOverrides(d, run)), '-C', dir, ...args], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-    env: gitFilterSafeEnv(),
-  }).trim()
+// stderr is captured (never shown) so a failure says why (#192): execFileSync's own message is only
+// "Command failed: git -c ... worktree add ...", the same for an existing branch, an unborn HEAD or
+// a dubious-ownership refusal. git's last stderr line leads the message; status and the rest stay.
+const git = (dir: string, args: string[], run = execFileSync, configDirs = [dir]) => {
+  try {
+    return run('git', [...GIT_SAFE_ARGS, ...configDirs.flatMap((d) => gitFilterOverrides(d, run)), '-C', dir, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: gitFilterSafeEnv(),
+    }).trim()
+  } catch (e) {
+    const said = String((e as { stderr?: unknown })?.stderr ?? '').trim().split('\n').pop()
+    if (said && e instanceof Error) e.message = `git ${args[0]}: ${said}`
+    throw e
+  }
+}
 
 // A submodule is a repository of its own whose config fleetview never read, so its filters and
 // fsmonitor are not overridden. `status` is told never to enter one, and a worktree holding any is

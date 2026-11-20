@@ -2742,19 +2742,19 @@ test('#192: an isolation failure names its reason in the confirmation and the di
   const { deps } = isolatingDeps()
   const marker = `m${Date.now()}`
   deps.client.createWorktree = vi.fn(() =>
-    Promise.reject(new Error(`refusing worktree /srv/\x1b]0;evil\x07${marker}:\nnot a new worktree of /x/alpha ${'z'.repeat(200)}`)),
+    Promise.reject(new Error(`refusing worktree, not a new\x1b]0;evil\x07 worktree of /x/alpha:\n/srv/${marker}/${'z'.repeat(200)}`)),
   )
   const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
   await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('fix the thing')
   await tick() // the input state must flush, or Enter sees an empty input and attaches instead
   stdin.write('\r')
-  await waitFor(() => lastFrame().includes('not isolated (worktree failed: refusing worktree'))
+  await waitFor(() => lastFrame().includes('not isolated (worktree failed: refusing worktree, not a new'))
   expect(lastFrame()).not.toContain('z'.repeat(80)) // shortened, the full text is in the log
   const logged = readFileSync(join(process.env.FLEETVIEW_STATE_DIR!, 'dispatch-debug.ndjson'), 'utf8')
     .trim().split('\n').map((l) => JSON.parse(l)).find((l) => l.event === 'isolation-failed' && l.reason.includes(marker))
   expect(logged).toMatchObject({ target: '/x/alpha' })
-  expect(logged.reason).toContain(`/srv/]0;evil${marker}: not a new worktree of /x/alpha`) // control bytes and newline gone
+  expect(logged.reason).toContain(`not a new]0;evil worktree of /x/alpha: /srv/${marker}/`) // control bytes and newline gone
 })
 
 // "Ctrl+X twice removes the worktree and uncommitted changes."
