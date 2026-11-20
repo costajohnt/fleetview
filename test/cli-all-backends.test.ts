@@ -78,6 +78,17 @@ test('--json lists every backend, each row naming its backend', async () => {
   expect(h.errs).toEqual([])
 })
 
+// #186: on 2.x one active-map answer serves every project, cut with the listing ls just made.
+test('ls asks a server-wide status snapshot once instead of each project\'s status', async () => {
+  const h = setup()
+  const statusOf = vi.fn(() => Promise.resolve({ ses_open1: { type: 'busy' } } as any))
+  ;(h.client as any).statusSnapshot = vi.fn(() => Promise.resolve(statusOf))
+  await listSessions({ command: 'ls', json: true, all: true }, h.ensureServer, '/tmp/s.json', h.lsDeps)
+  expect(h.client.sessionStatus).not.toHaveBeenCalled()
+  expect(statusOf).toHaveBeenCalledWith('/x/alpha', expect.arrayContaining([expect.objectContaining({ id: 'ses_open1' })]))
+  expect(JSON.parse(h.out.join('\n'))[0]).toMatchObject({ id: 'ses_open1', state: 'working' })
+})
+
 test('without opencode, --json still lists claude sessions and says why on stderr only', async () => {
   const h = setup({ opencodeUp: false })
   await listSessions({ command: 'ls', json: true, all: true }, h.ensureServer, '/tmp/s.json', h.lsDeps)

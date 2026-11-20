@@ -1,7 +1,9 @@
 import { beforeEach, test, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { connectEvents, createV2Translator, parseSseChunk } from '../src/backends/opencode/event-mux.ts'
+import { connectEvents } from '../src/backends/opencode/event-mux.ts'
+import { createV2Translator } from '../src/backends/opencode/event-v2.ts'
+import { parseSseChunk } from '../src/backends/opencode/sse.ts'
 import { resetOpencodeApiMemo } from '../src/backends/opencode/client.ts'
 
 // Tests here reuse base URLs, and the API-version answer is memoised per URL module-wide.
@@ -315,4 +317,50 @@ test('2.x translator: a shell ending mid-execution, or an execution ending mid-s
   expect(status('session.shell.ended')).toEqual(['idle'])
   // an end the translator never saw start (a reconnect) is still idle
   expect(status('session.execution.succeeded')).toEqual(['idle'])
+})
+
+// #186: 2.x's stream is server-wide, so every directory on a server shares one connection, each
+// still getting only its own slice.
+test('2.x: two directories on one server share one /api/event connection', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((r) => (release = r))
+  const order: string[] = []
+  const json = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
+  const fetchImpl = vi.fn((url: string) => {
+    const { pathname, searchParams } = new URL(url)
+    order.push(pathname)
+    if (pathname === '/api/info') return json({ version: '2.3.2', pid: 1 })
+    if (pathname === '/api/session') return json({ data: [] })
+    if (pathname === '/api/event') {
+      // Held until both directories have joined, then the whole recording.
+      const body = (async function* () {
+        await gate
+        yield new TextEncoder().encode(transcript)
+      })()
+      return Promise.resolve({ ok: true, status: 200, body })
+    }
+    return Promise.reject(new Error(`unexpected ${pathname} ${searchParams}`))
+  }) as any
+  const got = new Map<string, any[]>([['/fv/repo', []], ['/fv', []]])
+  const online: string[] = []
+  const conns = [...got.keys()].map((directory) =>
+    connectEvents({ host: '127.0.0.1', port: 4806, directory }, { fetchImpl, onEvent: (d, e) => got.get(d)!.push(e), onOnline: (d) => online.push(d), reconnect: false }),
+  )
+  await vi.waitFor(() => expect(online.sort()).toEqual(['/fv', '/fv/repo']))
+  release()
+  await Promise.all(conns.map((c) => c.done))
+  expect(order.filter((p) => p === '/api/event')).toHaveLength(1)
+  expect(sessionsIn(got.get('/fv/repo')!)).toEqual([MINE])
+  expect(sessionsIn(got.get('/fv')!)).toEqual([FOREIGN])
+})
+
+test('2.x: one directory stopping leaves the shared connection to the others', async () => {
+  const conns: any[] = []
+  const got: any[] = []
+  const server = v2Server()
+  conns.push(connectEvents({ host: '127.0.0.1', port: 4807, directory: '/fv' }, { fetchImpl: server.fetchImpl, onEvent: vi.fn(), reconnect: false }))
+  conns[0].stop()
+  conns.push(connectEvents({ host: '127.0.0.1', port: 4807, directory: '/fv/repo' }, { fetchImpl: server.fetchImpl, onEvent: (_d, e) => got.push(e), reconnect: false }))
+  await Promise.all(conns.map((c) => c.done))
+  expect(sessionsIn(got)).toEqual([MINE])
 })

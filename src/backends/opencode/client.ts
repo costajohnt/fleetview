@@ -106,6 +106,9 @@ export type RosterClient = {
   listProjects(): Promise<Project[]>
   listSessions(directory?: string): Promise<ListedSession[]>
   sessionStatus(directory?: string): Promise<Record<string, OpencodeSessionStatus> | null>
+  // Several directories' statuses off one server-wide answer, where the server has one (2.x); null
+  // where it doesn't, and each directory is asked with sessionStatus as before.
+  statusSnapshot?(): Promise<StatusSnapshot | null>
   listPermissions(directory?: string): Promise<PermissionAsked[]>
   listQuestions(directory?: string): Promise<QuestionAsked[]>
   listMessages(id: string, directory?: string): Promise<OpencodeMessage[]>
@@ -228,6 +231,8 @@ export class OpencodeV1Client {
 
 // The client fleetview holds per server: asks once which API the server speaks (opencodeApi), then
 // hands every call to that version's client. The choice lives here and nowhere else.
+export type StatusSnapshot = (directory: string, listed?: ListedSession[]) => Promise<Record<string, OpencodeSessionStatus> | null>
+
 export class OpencodeClient {
   baseUrl: string
   fetch: typeof fetch
@@ -298,6 +303,10 @@ export class OpencodeClient {
   }
   async sessionStatus(directory?: string) {
     return (await this.#wire()).sessionStatus(directory)
+  }
+  async statusSnapshot(): Promise<StatusSnapshot | null> {
+    const wire = await this.#wire()
+    return wire instanceof OpencodeV2Client ? wire.statusSnapshot() : null
   }
   async listAgents() {
     return (await this.#wire()).listAgents()

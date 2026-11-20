@@ -4,7 +4,7 @@ import { DEFAULT_BACKEND } from './backends/index.ts'
 import { sandboxParents, allProjectDirectories } from './worktree.ts'
 import { byBranch } from './pull-requests.ts'
 import { asNumber, asString, isRecord } from './types.ts'
-import type { AppAction, Backend, EventSubscription, OpencodeEvent, Project, PullRequest, SeedChain, SeedOptions, SeedOutcome, ServerRef, StreamProject } from './types.ts'
+import type { AppAction, Backend, EventSubscription, ListedSession, OpencodeEvent, Project, PullRequest, SeedChain, SeedOptions, SeedOutcome, ServerRef, StreamProject } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
@@ -135,7 +135,7 @@ export function useDiscovery({
     // questions had no equivalent. The additive mode only ADDS what the store is missing and never
     // deletes, so the timer can run it without the omission risk, and the authoritative replace
     // stays exactly where it was: mount, reconnect, and the peek reconcile paths.
-    const seedLiveState = async (worktree: string, { pending = true, additive = false, closeRuns = false, relist = false }: SeedOptions = {}): Promise<SeedOutcome> => {
+    const seedLiveState = async (worktree: string, { pending = true, additive = false, closeRuns = false, relist = false, shared }: SeedOptions = {}): Promise<SeedOutcome> => {
       // Before anything else, because `setSessions` is the only thing that learns which sessions are
       // subagents, and every seed below can otherwise mint a row for one. A subagent spawned since
       // the last listing is unknown, so its first `session.status` creates a record; this is what
@@ -144,9 +144,11 @@ export function useDiscovery({
       // opencode's own TUI, or by a `session.deleted` the stream was down for — with one exception
       // fleetview cannot close: a record it has never listed, which is indistinguishable from a
       // session created since the last listing (the row a dispatch has this instant created).
+      let listed: ListedSession[] | undefined
       if (relist) {
         try {
           const list = await client.listSessions(worktree)
+          listed = list
           if (cancelled) return { permissions: false, questions: false }
           seededProjectKeys.current.add(worktree)
           // The one caller that retires vanished sessions, because it is the one chainSeed
@@ -158,10 +160,10 @@ export function useDiscovery({
           // authority on that, and the next tick tries again.
         }
       }
-      const mark = store.seedMark()
+      // A shared status answer was fetched after its own watermark, which is the one that holds it.
+      const mark = shared?.mark ?? store.seedMark()
       const outcome = { permissions: true, questions: true }
-      await client
-        .sessionStatus(worktree)
+      await (shared ? shared.statusOf(worktree, listed) : client.sessionStatus(worktree))
         .then((s) => store.seedStatuses(worktree, s, mark, { closeRuns }))
         .catch(() => {})
       if (!pending) return outcome
@@ -447,6 +449,12 @@ export function useDiscovery({
         // `session.status` frame on a healthy connection left a row animating "working" forever,
         // with no way back short of restarting fleetview. The seed is chained and watermarked, so a
         // periodic pass is safe; it just makes the state self-healing on the poll interval.
+        // One status answer for the whole tick where the server has one (2.x's active map is
+        // server-wide), rather than the same map fetched once per worktree (#186). Its watermark is
+        // taken here, before the map is fetched, and every worktree's seed on it uses that one.
+        const statusOf = await client.statusSnapshot?.().catch(() => null)
+        if (cancelled) return
+        const shared = statusOf ? { mark: store.seedMark(), statusOf } : undefined
         for (const p of fresh) {
           if (!newOnes.includes(p) && seededProjectKeys.current.has(p.worktree)) {
             // A healthy poll: a session that has gone absent finished within the last interval, so
@@ -456,7 +464,7 @@ export function useDiscovery({
             // the server reports and the store lacks — a permission.asked/question.asked frame the
             // stream dropped — and never by deleting. See seedLiveState for why the authoritative
             // form must not run on a timer.
-            chainSeed(p.worktree, { additive: true, closeRuns: true, relist: true })
+            chainSeed(p.worktree, { additive: true, closeRuns: true, relist: true, shared })
           }
         }
       } catch {

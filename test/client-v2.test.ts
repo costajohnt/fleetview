@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OpencodeClient } from '../src/backends/opencode/client.ts'
 import { serverHome, v1Messages, v1Question, v2Answer } from '../src/backends/opencode/client-v2.ts'
-import { createV2Translator } from '../src/backends/opencode/event-mux.ts'
+import { createV2Translator } from '../src/backends/opencode/event-v2.ts'
 import { probeServer } from '../src/backends/opencode/server-manager.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
 
@@ -129,6 +129,20 @@ test('session status keeps only this directory\'s running sessions, as busy', as
     'GET /api/session': { data: [{ id: 'ses_1', location: { directory: '/repo' }, time: {} }] },
   })
   expect(await c.sessionStatus('/repo')).toEqual({ ses_1: { type: 'busy' } })
+})
+
+// #186: the roster's poll asks for every worktree's statuses at once; the active map is fetched once.
+test('a status snapshot fetches the active map once for every directory, and reuses a listing it is given', async () => {
+  const { c, calls } = client({
+    'GET /api/session/active': { data: { ses_1: { type: 'running' }, ses_2: { type: 'running' } } },
+    'GET /api/session': { data: [{ id: 'ses_2', location: { directory: '/other' }, time: {} }] },
+  })
+  const statusOf = (await c.statusSnapshot())!
+  expect(await statusOf('/repo', [{ id: 'ses_1' }])).toEqual({ ses_1: { type: 'busy' } })
+  expect(await statusOf('/other')).toEqual({ ses_2: { type: 'busy' } })
+  const paths = calls.map((call) => new URL(call.url).pathname)
+  expect(paths.filter((p) => p === '/api/session/active')).toHaveLength(1)
+  expect(paths.filter((p) => p === '/api/session')).toHaveLength(1) // only for the directory with no listing
 })
 
 test('dispatch creates in the directory with an object model, then prompts with flat text', async () => {

@@ -220,13 +220,25 @@ export class OpencodeV2Client {
 
   // 2.x's active map is server-wide and says only "running"; the status seed upserts every id it
   // is given, so it is cut down to this directory's sessions. Absent means idle, as in 1.x.
-  async sessionStatus(directory?: string): Promise<Record<string, OpencodeSessionStatus>> {
-    const active = unwrap(await this.req('GET', '/api/session/active'))
-    if (!isRecord(active)) return {}
-    const mine = directory ? new Set((await this.listSessions(directory)).map((s) => s.id)) : null
-    const out: Record<string, OpencodeSessionStatus> = {}
-    for (const id of Object.keys(active)) if (!mine || mine.has(id)) out[id] = { type: 'busy' }
-    return out
+  sessionStatus(directory?: string): Promise<Record<string, OpencodeSessionStatus>> {
+    return this.statusSnapshot()(directory)
+  }
+
+  // Statuses for any number of directories off one fetch of the active map: the roster's poll asks
+  // for every worktree at once, and the map is the same for all of them (#186). The map is fetched
+  // on the first ask, so a caller that takes a seed watermark first still has it ahead of the GET.
+  // `listed` is a listing of the directory the caller already holds, saving one per directory.
+  statusSnapshot() {
+    let active: Promise<unknown> | undefined
+    return async (directory?: string, listed?: ListedSession[]): Promise<Record<string, OpencodeSessionStatus>> => {
+      active ??= this.req('GET', '/api/session/active').then(unwrap)
+      const map = await active
+      if (!isRecord(map)) return {}
+      const mine = directory ? new Set((listed ?? (await this.listSessions(directory))).map((s) => s.id)) : null
+      const out: Record<string, OpencodeSessionStatus> = {}
+      for (const id of Object.keys(map)) if (!mine || mine.has(id)) out[id] = { type: 'busy' }
+      return out
+    }
   }
 
   async listPermissions(directory?: string) {
