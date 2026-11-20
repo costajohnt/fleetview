@@ -392,10 +392,10 @@ test('2.x: a directory whose listing fails goes offline alone and retries on the
     { fetchImpl, onEvent: (_d, e) => events.push(e), onOnline: () => seen.push('online'), onOffline: () => seen.push('offline'), reconnect: true },
   )
   await vi.waitFor(() => expect(seen).toEqual(['online']))
-  push({ type: 'server.connected', data: {} }) // first bytes: the seed is listed, and fails
+  await vi.waitFor(() => push({ type: 'server.connected', data: {} })) // first bytes: the seed is listed, and fails (waits for the body to be read)
   await vi.waitFor(() => expect(seen).toEqual(['online', 'offline', 'online']), { timeout: 5000 })
   await vi.waitFor(() => expect(calls).toBe(2))
-  push({ type: 'session.renamed', created: 1, location: { directory: '/fv/repo' }, data: { sessionID: 'ses_x', title: 'after' } })
+  await vi.waitFor(() => push({ type: 'session.renamed', created: 1, location: { directory: '/fv/repo' }, data: { sessionID: 'ses_x', title: 'after' } }))
   await vi.waitFor(() => expect(events).toEqual([{ type: 'session.updated', properties: { info: { id: 'ses_x', title: 'after', time: { updated: 1 } } } }]))
   expect(fetchImpl.mock.calls.filter(([u]: [string]) => u.includes('/api/event'))).toHaveLength(1) // the stream itself never dropped
   conn.stop()
