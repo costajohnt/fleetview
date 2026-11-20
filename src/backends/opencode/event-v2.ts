@@ -67,13 +67,15 @@ function serverStream(base: string, fetchImpl: typeof fetch, idleMs: number, for
   let running = false
   let waiting = false // in the backoff between connections
 
+  // The last one out is finished only once the connection has wound down and released its body,
+  // as its own connection's `done` would have been.
+  const winding: (() => void)[] = []
   const leave = (sub: Subscriber) => {
     if (!subs.delete(sub)) return
-    sub.finish()
-    if (subs.size === 0) {
-      forget()
-      ac.abort()
-    }
+    if (subs.size > 0 || !running) return sub.finish()
+    winding.push(sub.finish)
+    forget()
+    ac.abort()
   }
   const deliver = (sub: Subscriber, frames: unknown[]) => {
     for (const frame of frames) {
@@ -156,6 +158,7 @@ function serverStream(base: string, fetchImpl: typeof fetch, idleMs: number, for
       }
     }
     running = false
+    for (const finish of winding.splice(0)) finish()
   }
 
   return {
