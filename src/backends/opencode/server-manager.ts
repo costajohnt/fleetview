@@ -262,7 +262,7 @@ type SpawnServer = typeof spawnServer
 // status`/`stop` — the two entry points that adopt the saved credential before probing a port they
 // have no other evidence about.
 // Both names: opencode 2.x (the server fleetview spawns, and `opencode attach`) reads
-// OPENCODE_PASSWORD before OPENCODE_SERVER_PASSWORD, and main() only copies the former into the
+// OPENCODE_PASSWORD before OPENCODE_SERVER_PASSWORD, and cli.ts main() only copies the former into the
 // latter. Dropping one would leave the other arming the next child with the password just dropped.
 function dropPassword(env: NodeJS.ProcessEnv) {
   delete env.OPENCODE_SERVER_PASSWORD
@@ -368,7 +368,7 @@ export async function adoptServerCredential(
 export function makeEnsureServer({
   isServerHealthy,
   isAuthEnforced = async () => true,
-  // Tri-state form of the same probe (server-manager.probeServer). Defaulted off isServerHealthy so
+  // Tri-state form of the same probe (the module-level probeServer). Defaulted off isServerHealthy so
   // every existing caller and test keeps working; only the "is that port occupied by a server whose
   // password we don't hold" question needs the difference between 401 and nothing listening.
   probeServer = async (server: ServerRef) => ((await isServerHealthy(server)) ? 'healthy' : 'unreachable'),

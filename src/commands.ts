@@ -1,5 +1,5 @@
 // The shell subcommands (`ls`/`--json`, `attach`, `logs`, `stop`, `rm`, `add`, `answer`, `watch`,
-// `status`, `bg`), lifted out of cli.ts so that file keeps only the server lifecycle, the roster
+// `status`, `bg`), lifted out of cli.ts so that file keeps argument handling, the roster
 // loop and the attach loop. Every command takes its collaborators as an options object with real
 // defaults: main() passes what it holds, tests pass fakes.
 import { spawnSync } from 'node:child_process'
