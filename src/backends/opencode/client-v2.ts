@@ -6,7 +6,8 @@
 // Shapes are from opencode v2.3.2's source (packages/schema, packages/protocol); see #166. Only
 // what fleetview reads is mapped, and reads stay defensive, as in types.ts.
 import { execFileSync } from 'node:child_process'
-import { basename } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { basename, isAbsolute } from 'node:path'
 import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 import { stripControl } from '../../text-utils.ts'
@@ -273,19 +274,31 @@ export class OpencodeV2Client {
   // 2.x leaves the new worktree on a detached HEAD, and its `branch` field only checks out a ref that
   // already exists (verified against 2.3.2), so the `opencode/<name>` branch 1.x made is made here:
   // merge-back and PR badges key off it. A branch of that name left by an earlier worktree is stepped
-  // around, never reset. If branching fails the worktree goes and the error propagates, so the
-  // dispatch reports it is not isolated instead of running in a tree nothing can follow.
+  // around, never reset. The branch is made with plumbing that touches neither the working tree nor
+  // the index, so no repository-controlled filter or submodule recursion runs. Errors propagate, so
+  // the dispatch reports it is not isolated instead of running in a tree nothing can follow.
   async createWorktree(name: string, directory?: string) {
     const projectID = await this.#projectID(directory)
     const created = unwrap(await this.req('POST', '/api/worktree', { projectID, name }, directory))
     const dir = isRecord(created) ? asString(created.directory) : undefined
     if (!dir) return null
+    // The server named `dir`, so it is checked before anything writes to it: a linked worktree root
+    // of the repository fleetview asked about, not that repository's own checkout. A refusal leaves
+    // the server's worktree alone, because removing a path that failed this check is the same risk.
+    if (!isAbsolute(dir) || !directory) throw new Error(`refusing worktree ${dir}: no repository to check it against`)
+    const top = (d: string) => realpathSync(git(d, ['rev-parse', '--show-toplevel']))
+    const common = (d: string) => realpathSync(git(d, ['rev-parse', '--path-format=absolute', '--git-common-dir']))
+    if (top(dir) !== realpathSync(dir) || top(dir) === top(directory) || common(dir) !== common(directory)) {
+      throw new Error(`refusing worktree ${dir}: not a new worktree of ${directory}`)
+    }
     const base = `opencode/${basename(dir)}`
     try {
       const taken = new Set(git(dir, ['branch', '--list', `${base}*`, '--format=%(refname:short)']).split('\n'))
       let branch = base
       for (let n = 2; taken.has(branch); n++) branch = `${base}-${n}`
-      git(dir, ['switch', '-c', branch])
+      // The empty old value makes update-ref fail rather than move a branch that appeared meanwhile.
+      git(dir, ['update-ref', `refs/heads/${branch}`, 'HEAD', ''])
+      git(dir, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`])
     } catch (e) {
       await this.removeWorktree(dir, directory).catch(() => {})
       throw e
