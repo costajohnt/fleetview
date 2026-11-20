@@ -3,6 +3,7 @@ import { hasSession } from './roster-store.ts'
 import { DEFAULT_BACKEND, isProcessBackend } from './backends/index.ts'
 import { sandboxParents, allProjectDirectories } from './worktree.ts'
 import { byBranch } from './pull-requests.ts'
+import { applyProcessListing, seedPending, streamProcessBackend } from './seeding.ts'
 import { asNumber, asString, isRecord } from './types.ts'
 import type { AppAction, Backend, EventSubscription, ListedSession, OpencodeEvent, Project, PullRequest, SeedChain, SeedOptions, SeedOutcome, ServerRef, StreamProject } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
@@ -162,27 +163,16 @@ export function useDiscovery({
       }
       // A shared status answer was fetched after its own watermark, which is the one that holds it.
       const mark = shared?.mark ?? store.seedMark()
-      const outcome = { permissions: true, questions: true }
       await (shared ? shared.statusOf(worktree, listed) : client.sessionStatus(worktree))
         .then((s) => store.seedStatuses(worktree, s, mark, { closeRuns }))
         .catch(() => {})
-      if (!pending) return outcome
+      if (!pending) return { permissions: true, questions: true }
       // M4: each GET fails independently. If sessionStatus above succeeds but one of these two
       // fails, that half of the reseed silently no-ops — e.g. a session whose status seed just
       // landed idle can still show "waiting" off a pendingPermissions/pendingQuestions entry that
       // never got its authoritative reseed. Stale until the next reconnect's seedLiveState run;
       // self-healing, accepted rather than adding retry/backoff for a best-effort catch-up path.
-      await Promise.all([
-        client
-          .listPermissions(worktree)
-          .then((p) => store.seedPermissions(worktree, p, mark, { additive }))
-          .catch(() => { outcome.permissions = false }),
-        client
-          .listQuestions(worktree)
-          .then((q) => store.seedQuestions(worktree, q, mark, { additive }))
-          .catch(() => { outcome.questions = false }),
-      ])
-      return outcome
+      return seedPending(store, client, worktree, mark, additive)
     }
 
     // M2: per-worktree promise chain — mount/onOnline/repoll/reconcile all route seedLiveState
@@ -295,35 +285,14 @@ export function useDiscovery({
       if (!isProcessBackend(backend)) return
       const key = `${name}:${worktree}`
       if (!backendConns.has(key)) {
-        // One normaliser per subscription, because it folds per-session state across events and two
-        // directories' runs must never share that fold.
-        const normalise = backend.createNormaliser()
-        const conn = backend.events(
-          { directory: worktree },
-          {
-            onEvent: (directory: string, event: unknown) => {
-              for (const store_event of normalise(event)) {
-                // Not every union member carries sessionID (session.updated nests an info object),
-                // and the ones a normaliser emits all do — the loose read says so once.
-                const id = (store_event.properties as { sessionID?: string }).sessionID
-                if (id) store.noteOrigin(directory, id, name)
-                store.apply(directory, store_event)
-              }
-            },
-          },
-        )
+        const conn = streamProcessBackend(store, name, backend, worktree)
         if (cancelled) return conn.stop()
         backendConns.set(key, conn)
       }
       try {
         const list = backend.normaliseSessions(await backend.listSessions(worktree))
         if (cancelled) return
-        for (const s of list) store.noteOrigin(worktree, s.id, name)
-        // Never `retire: true`: that sweep is scoped to a project, not to a backend, so a claude
-        // listing armed with it would delete the opencode rows in the same directory. Leaving these
-        // records unlisted is also what keeps opencode's own retiring listing from deleting them —
-        // it only sweeps records its own listings armed.
-        store.setSessions(worktree, list, seen)
+        applyProcessListing(store, name, worktree, list, seen)
       } catch {
         // A CLI that isn't installed, or a state directory that doesn't exist. Both are "no sessions
         // here", and neither is worth flagging the project offline for.
