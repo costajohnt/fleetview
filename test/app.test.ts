@@ -619,7 +619,7 @@ test('a first ^x on a finished row does not relabel it stopped', async () => {
   const persistSeen = vi.fn()
   const seen = { '/x/alpha:s1': { updated: 0, hasRun: true } }
   const { stdin, lastFrame, unmount } = render(React.createElement(App, { ...deps, onAction: vi.fn(), seen, persistSeen }))
-  await waitFor(() => lastFrame().includes('completed'))
+  await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('\x18')
   await waitFor(() => lastFrame().includes('stopped "fix tests"')) // the abort itself went through
   unmount() // flushes the coalesced seen.json write
