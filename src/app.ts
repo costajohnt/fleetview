@@ -612,10 +612,11 @@ export function App({
         .map((s): AttachSibling => ({ id: s.id, projectKey: s.projectKey, ...(asString(s.backend) ? { backend: asString(s.backend) } : {}) })),
     }
     // #222: the child is started only once `attached` has committed, from the effect below. Ink
-    // drops raw mode when the last input hook goes inactive, in that commit's passive effects; a
-    // child started first had its raw mode undone behind it. From a keypress Ink commits at once,
-    // so the host's next-tick re-assert won the race; from a dispatch that awaited first (alt+enter)
-    // the commit came later, and the attached terminal stayed cooked: ^z echoed instead of detaching.
+    // releases raw mode when the last input hook goes inactive: in that commit's passive effects it
+    // queues setRawMode(false) as a microtask, which the host's next-tick (setImmediate) re-assert
+    // then overrides. A child started before that commit could lose the race. From a keypress Ink
+    // commits at once, so it didn't; from a dispatch that awaited first (alt+enter) the commit came
+    // after the re-assert, and the attached terminal stayed cooked: ^z echoed instead of detaching.
     attachedRef.current = true
     setAttached(true)
     setAttachStart({ start: () => startAttach(row, action) })
@@ -661,10 +662,15 @@ export function App({
       done.then(back, () => back())
       return
     }
-    exit() // no host (tests, or an older caller): fall back to the unmount-and-spawn behaviour
+    // No host (tests, or an older caller): fall back to the unmount-and-spawn behaviour.
+    attachedRef.current = false
+    setAttached(false)
+    exit()
   }
-  // Runs after the commit that set `attached`, so after Ink's input hooks have released stdin.
-  useEffect(() => attachStart?.start(), [attachStart])
+  // Runs after the commit that set `attached`, once Ink has queued its raw-mode release.
+  useEffect(() => {
+    attachStart?.start()
+  }, [attachStart])
 
   // Peek owns its own state, message fetch, reply/answer paths and key handling — see use-peek.ts.
   // Everything it needs from App is handed over explicitly; nothing reaches back the other way.

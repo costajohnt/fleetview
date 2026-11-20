@@ -388,7 +388,8 @@ export function attachPty({
     )
     // Ink releases stdin asynchronously once its input hooks go inactive, and that teardown lands
     // after this setup — so raw mode is asserted again on the next tick, or the first keystrokes
-    // after attaching arrive line-buffered.
+    // after attaching arrive line-buffered. `defer` must run after microtasks (setImmediate, not
+    // nextTick): Ink queues its setRawMode(false) as one, and this has to be the last word (#222).
     const setRaw = (on: boolean) => {
       if (stdin.isTTY && stdin.setRawMode) stdin.setRawMode(on)
     }
