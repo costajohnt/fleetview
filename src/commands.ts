@@ -694,7 +694,7 @@ const rosterWorktrees = (load: () => { sessions: RosterMember[] }) => {
 // only attach once the sessions are in), then pending permissions/questions.
 async function seedOpencode(
   store: SessionStore,
-  client: Pick<RosterClient, 'listSessions' | 'sessionStatus' | 'listPermissions' | 'listQuestions'>,
+  client: Pick<RosterClient, 'listSessions' | 'sessionStatus' | 'statusSnapshot' | 'listPermissions' | 'listQuestions'>,
   projects: Project[],
   seen: SeenMap,
 ) {
@@ -704,7 +704,11 @@ async function seedOpencode(
   lists.forEach((sessions, i) => sessions && store.setSessions(projects[i].worktree, sessions, seen))
   // Statuses come from the same endpoints the UI seeds from, so a listing and the roster agree.
   // Still a second round: seedStatuses only has anything to attach to once the sessions are in.
-  const statuses = await Promise.all(projects.map((p) => client.sessionStatus(p.worktree).catch(() => null)))
+  // On 2.x one server-wide active map answers every project, cut with the listings just made (#186).
+  const statusOf = await client.statusSnapshot?.().catch(() => null)
+  const statuses = await Promise.all(
+    projects.map((p, i) => (statusOf ? statusOf(p.worktree, lists[i] ?? undefined) : client.sessionStatus(p.worktree)).catch(() => null)),
+  )
   statuses.forEach((s, i) => s && store.seedStatuses(projects[i].worktree, s))
   // #54: and a third, for the pending state a status map does not carry. Without it both of
   // derive's `waiting` paths are unreachable here by construction, so `ls`/`--json` reported a

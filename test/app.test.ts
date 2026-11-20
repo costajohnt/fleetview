@@ -2585,6 +2585,23 @@ test('the project poll relists sessions, so a subagent ghost is pruned within on
   expect(deps.client.listSessions.mock.calls.length).toBeGreaterThan(1)
 })
 
+// #186: on 2.x the poll takes one server-wide status answer per tick for every worktree, cut with
+// the listing each worktree's seed just made, instead of asking each worktree's status.
+test('the project poll seeds statuses from one shared snapshot per tick when the client has one', async () => {
+  const deps = makeDeps()
+  const beta = { ...project, id: 'b', worktree: '/x/beta' }
+  deps.client.listProjects = vi.fn(() => Promise.resolve([project, beta]))
+  const statusOf = vi.fn(() => Promise.resolve({}))
+  deps.client.statusSnapshot = vi.fn(() => Promise.resolve(statusOf))
+  render(React.createElement(App, { ...deps, onAction: vi.fn(), projectPollMs: 30 }))
+  await waitFor(() => statusOf.mock.calls.length >= 2)
+  const asked = statusOf.mock.calls.slice(0, 2) as unknown as [string, unknown[]][]
+  expect(asked.map(([dir]) => dir).sort()).toEqual(['/x/alpha', '/x/beta'])
+  for (const [, listed] of asked) expect(listed).toEqual([expect.objectContaining({ id: 's1' })])
+  // One snapshot per tick, however many worktrees it served.
+  expect(deps.client.statusSnapshot.mock.calls.length).toBeLessThanOrEqual(Math.ceil(statusOf.mock.calls.length / 2) + 1)
+})
+
 test('^x on a group header counts and deletes every session, not just the visible subset', async () => {
   // Browse caps each project at VISIBLE_PER_PROJECT (10) on screen. With 12 sessions the group
   // delete must still act on all 12: reading the rendered (capped) group deleted only 10. The count

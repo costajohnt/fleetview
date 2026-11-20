@@ -1,4 +1,4 @@
-import type { Session, ListedSession, OpencodeMessage, Project, PermissionAsked, QuestionAsked, OpencodeSessionStatus, Worktree } from '../../types.ts'
+import type { Session, ListedSession, OpencodeMessage, Project, PermissionAsked, QuestionAsked, OpencodeSessionStatus, StatusSnapshot, Worktree } from '../../types.ts'
 import { opencodeRequest } from './request.ts'
 import { isRecord } from '../../types.ts'
 import { OpencodeV2Client } from './client-v2.ts'
@@ -106,6 +106,9 @@ export type RosterClient = {
   listProjects(): Promise<Project[]>
   listSessions(directory?: string): Promise<ListedSession[]>
   sessionStatus(directory?: string): Promise<Record<string, OpencodeSessionStatus> | null>
+  // Several directories' statuses off one server-wide answer, where the server has one (2.x); null
+  // where it doesn't, and each directory is asked with sessionStatus as before.
+  statusSnapshot?(): Promise<StatusSnapshot | null>
   listPermissions(directory?: string): Promise<PermissionAsked[]>
   listQuestions(directory?: string): Promise<QuestionAsked[]>
   listMessages(id: string, directory?: string): Promise<OpencodeMessage[]>
@@ -298,6 +301,10 @@ export class OpencodeClient {
   }
   async sessionStatus(directory?: string) {
     return (await this.#wire()).sessionStatus(directory)
+  }
+  async statusSnapshot(): Promise<StatusSnapshot | null> {
+    const wire = await this.#wire()
+    return wire instanceof OpencodeV2Client ? wire.statusSnapshot() : null
   }
   async listAgents() {
     return (await this.#wire()).listAgents()
