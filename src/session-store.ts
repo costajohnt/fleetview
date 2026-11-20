@@ -779,15 +779,17 @@ export function createStore() {
       notify()
     },
 
+    // #176: read before an abort, for abortStopped. The server's status, the same test `derive`
+    // shows as running — not the open-run span, which a reconnect seed deliberately leaves open on a
+    // session that finished during the outage.
+    isRunning(projectKey: string, id: string) {
+      const r = sessions.get(key(projectKey, id))
+      return r ? isRunningStatus(r.lastStatus) : false
+    },
+
     // Called after a successful abort. The server reports the result as plain idle, which is
     // indistinguishable from "finished normally", so fleetview has to remember that the user stopped
     // it — otherwise a stopped session renders as completed and reads like a result.
-    // #176: read before an abort, for abortStopped.
-    isRunOpen(projectKey: string, id: string) {
-      const r = sessions.get(key(projectKey, id))
-      return r ? isRunOpen(r) : false
-    },
-
     markStopped(projectKey: string, id: string) {
       const r = sessions.get(key(projectKey, id))
       if (!r) return

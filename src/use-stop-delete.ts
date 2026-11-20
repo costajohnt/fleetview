@@ -216,7 +216,7 @@ export function useStopDelete({
       const left = stopArmMs - (Date.now() - armedAt)
       return left > 0 ? flash(`${message} · ^x again to delete`, left) : flash(message)
     }
-    const wasRunning = store.isRunOpen(row.projectKey, row.id)
+    const wasRunning = store.isRunning(row.projectKey, row.id)
     try {
       const result = await abortRow(row)
       // M14: a process backend answers {aborted:false} when there was nothing of this run left to
