@@ -34,8 +34,9 @@ export function createOpencodeBackend({
   fetchImpl?: typeof fetch
 }): Backend {
   const url = `http://${server.host}:${server.port}`
-  // probeServer recorded the server's API before anything on it could be listed, so there is no
-  // guess to make here: a server nothing has probed is refused rather than handed 1.x argv.
+  // A healthy probe or the client's first request has settled the server's API before anything on
+  // it could be listed, so there is no guess to make here: an unknown one is refused, not handed
+  // 1.x argv.
   const serverApi = () => {
     const api = knownOpencodeApi(url)
     if (!api) throw new Error(`opencode server at ${url} has not been probed yet`)

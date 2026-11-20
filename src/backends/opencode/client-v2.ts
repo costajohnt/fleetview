@@ -162,7 +162,11 @@ export class OpencodeV2Client {
   // Location-scoped routes read the directory from this header (2.x ignores 1.x's ?directory=);
   // session-id routes resolve it from the session, and the header is harmless there.
   req(method: string, path: string, body?: unknown, directory?: string): Promise<unknown> {
-    return opencodeRequest(this.fetch, this.baseUrl, method, path, { body, auth: this.auth(), headers: directory ? { 'x-opencode-directory': encodeURIComponent(directory) } : {} })
+    return opencodeRequest(this.fetch, this.baseUrl, method, path, {
+      body,
+      auth: this.auth(),
+      headers: directory ? { 'x-opencode-directory': encodeURIComponent(directory) } : undefined,
+    })
   }
 
   async listProjects(): Promise<Project[]> {

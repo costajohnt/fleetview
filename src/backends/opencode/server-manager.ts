@@ -66,10 +66,8 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const base = `http://${server.host}:${server.port}`
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl)
-  if (v1 !== 'unreachable') {
-    if (v1 === 'healthy') noteOpencodeApi(base, 1)
-    return v1
-  }
+  if (v1 === 'healthy') noteOpencodeApi(base, 1)
+  if (v1 !== 'unreachable') return v1
   // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
   // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
   // the password (the reason opencodeApi in client.ts asks this route credential-free).
@@ -115,7 +113,7 @@ async function askServer(
   }
 }
 
-// 2.x's own 401 body on /api/info (the same test opencodeApi in client.ts uses).
+// The credential goes only to 2.x's own 401 body on /api/info (isV2Unauthorized).
 async function wantsV2Credential(res: Response): Promise<boolean> {
   try {
     return isV2Unauthorized(await res.json())

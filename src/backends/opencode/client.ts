@@ -46,9 +46,13 @@ export function authHeader(env: NodeJS.ProcessEnv = process.env): string | undef
 // ponytail: memoized per base URL for the process lifetime; an opencode upgraded in place while
 // fleetview runs is picked up when fleetview restarts.
 //
-// One detector: server-manager's probeServer, which every server fleetview uses has passed, records
-// what it found with noteOpencodeApi, so this only goes to the network for a URL nothing probed.
+// One detector: server-manager's probeServer records what a healthy probe found with
+// noteOpencodeApi (its 1.x-first order decides), so this only goes to the network for a URL no
+// healthy probe saw, such as a server that answered the probe 401.
 const apiByUrl = new Map<string, Promise<1 | 2>>()
+// The answer once it is in, for the one synchronous caller (attach argv): from a healthy probe, or
+// from the client's own ask, which settles before anything on the server can be listed.
+const settledApi = new Map<string, 1 | 2>()
 export function opencodeApi(baseUrl: string, fetchImpl: typeof fetch = globalThis.fetch): Promise<1 | 2> {
   const known = apiByUrl.get(baseUrl)
   if (known) return known
@@ -62,16 +66,19 @@ export function opencodeApi(baseUrl: string, fetchImpl: typeof fetch = globalThi
     return isV2Unauthorized(body) || isV2Info(body) ? 2 : 1
   })
   apiByUrl.set(baseUrl, asked)
-  asked.then((api) => settledApi.set(baseUrl, api), () => apiByUrl.delete(baseUrl)) // unreachable is not an answer; ask again next time
+  // Unreachable is not an answer; ask again next time. Guarded so an ask still in flight when a
+  // probe recorded its answer can't overwrite or drop that answer.
+  const current = () => apiByUrl.get(baseUrl) === asked
+  asked.then(
+    (api) => current() && settledApi.set(baseUrl, api),
+    () => current() && apiByUrl.delete(baseUrl),
+  )
   return asked
 }
 export function noteOpencodeApi(baseUrl: string, api: 1 | 2) {
   apiByUrl.set(baseUrl, Promise.resolve(api))
   settledApi.set(baseUrl, api)
 }
-// The answer once it is in, for the one synchronous caller (attach argv). Every server is probed
-// before anything on it can be attached to, so a miss is a server nothing has checked.
-const settledApi = new Map<string, 1 | 2>()
 export const knownOpencodeApi = (baseUrl: string) => settledApi.get(baseUrl)
 // The two 2.x answers on GET /api/info (opencode v2.3.2 packages/server/src/handlers/server.ts):
 // its UnauthorizedError when asked without a credential, else {version, pid, urls, paths, ...}.
@@ -225,7 +232,7 @@ export class OpencodeClient {
   baseUrl: string
   fetch: typeof fetch
 
-  #wire: OpencodeV1Client | OpencodeV2Client | undefined
+  #client: OpencodeV1Client | OpencodeV2Client | undefined
 
   constructor(baseUrl: string, fetchImpl: typeof fetch = globalThis.fetch) {
     this.baseUrl = baseUrl.replace(/\/$/, '')
@@ -233,72 +240,72 @@ export class OpencodeClient {
   }
 
   // Not memoised until the server has answered: an unreachable one is asked again on the next call.
-  async #api() {
-    this.#wire ??= (await opencodeApi(this.baseUrl, this.fetch)) === 2 ? new OpencodeV2Client(this.baseUrl, this.fetch, () => authHeader()) : new OpencodeV1Client(this.baseUrl, this.fetch)
-    return this.#wire
+  async #wire() {
+    this.#client ??= (await opencodeApi(this.baseUrl, this.fetch)) === 2 ? new OpencodeV2Client(this.baseUrl, this.fetch, () => authHeader()) : new OpencodeV1Client(this.baseUrl, this.fetch)
+    return this.#client
   }
 
   async listSessions(directory?: string) {
-    return (await this.#api()).listSessions(directory)
+    return (await this.#wire()).listSessions(directory)
   }
   async createSession(options: { agent?: string; model?: ModelSelection } = {}, directory?: string) {
-    return (await this.#api()).createSession(options, directory)
+    return (await this.#wire()).createSession(options, directory)
   }
   async forkSession(id: string, directory?: string) {
-    return (await this.#api()).forkSession(id, directory)
+    return (await this.#wire()).forkSession(id, directory)
   }
   async promptAsync(id: string, text: string, directory?: string) {
-    return (await this.#api()).promptAsync(id, text, directory)
+    return (await this.#wire()).promptAsync(id, text, directory)
   }
   async renameSession(id: string, title: string, directory?: string) {
-    return (await this.#api()).renameSession(id, title, directory)
+    return (await this.#wire()).renameSession(id, title, directory)
   }
   async deleteSession(id: string, directory?: string) {
-    return (await this.#api()).deleteSession(id, directory)
+    return (await this.#wire()).deleteSession(id, directory)
   }
   async listMessages(id: string, directory?: string) {
-    return (await this.#api()).listMessages(id, directory)
+    return (await this.#wire()).listMessages(id, directory)
   }
   async listProjects() {
-    return (await this.#api()).listProjects()
+    return (await this.#wire()).listProjects()
   }
   async abortSession(id: string, directory?: string) {
-    return (await this.#api()).abortSession(id, directory)
+    return (await this.#wire()).abortSession(id, directory)
   }
   async listPermissions(directory?: string) {
-    return (await this.#api()).listPermissions(directory)
+    return (await this.#wire()).listPermissions(directory)
   }
   async listQuestions(directory?: string) {
-    return (await this.#api()).listQuestions(directory)
+    return (await this.#wire()).listQuestions(directory)
   }
   async respondPermission(requestID: string, reply: unknown, directory?: string) {
-    return (await this.#api()).respondPermission(requestID, reply, directory)
+    return (await this.#wire()).respondPermission(requestID, reply, directory)
   }
   async respondQuestion(requestID: string, answers: unknown, directory?: string) {
-    return (await this.#api()).respondQuestion(requestID, answers, directory)
+    return (await this.#wire()).respondQuestion(requestID, answers, directory)
   }
   async runShell(id: string, command: string, directory?: string, agent?: string) {
-    return (await this.#api()).runShell(id, command, directory, agent)
+    return (await this.#wire()).runShell(id, command, directory, agent)
   }
   async createWorktree(name: string, directory?: string) {
-    return (await this.#api()).createWorktree(name, directory)
+    return (await this.#wire()).createWorktree(name, directory)
   }
   async listWorktrees(directory?: string) {
-    return (await this.#api()).listWorktrees(directory)
+    return (await this.#wire()).listWorktrees(directory)
   }
   async removeWorktree(worktreeDirectory: string, directory?: string) {
-    return (await this.#api()).removeWorktree(worktreeDirectory, directory)
+    return (await this.#wire()).removeWorktree(worktreeDirectory, directory)
   }
   async sessionStatus(directory?: string) {
-    return (await this.#api()).sessionStatus(directory)
+    return (await this.#wire()).sessionStatus(directory)
   }
   async listAgents() {
-    return (await this.#api()).listAgents()
+    return (await this.#wire()).listAgents()
   }
   async listCommands() {
-    return (await this.#api()).listCommands()
+    return (await this.#wire()).listCommands()
   }
   async providers() {
-    return (await this.#api()).providers()
+    return (await this.#wire()).providers()
   }
 }
