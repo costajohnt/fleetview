@@ -125,7 +125,7 @@ const ERROR_ANCHOR_UNKNOWN = -1
 // carrying `{ name: 'MessageAbortedError', data: { message } }` (verified against the 1.18.5
 // binary, which builds that exact name for any aborted/interrupted message). The name is the only
 // thing that distinguishes a stop the user asked for from a failure they didn't.
-const isAbortError = (error: unknown): boolean =>
+export const isAbortError = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'MessageAbortedError'
 
 const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.test(title)

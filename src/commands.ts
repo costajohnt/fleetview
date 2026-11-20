@@ -12,7 +12,7 @@ import { loadServer, childEnv } from './registry.ts'
 import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import { loadSeen, defaultSeenFile } from './seen-store.ts'
 import { loadRoster, saveRoster, withRosterLock, defaultRosterFile } from './roster-store.ts'
-import { createStore, memberTitle, messageBody, errorLabel } from './session-store.ts'
+import { createStore, memberTitle, messageBody, errorLabel, isAbortError } from './session-store.ts'
 import type { SessionStore } from './session-store.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { summarise } from './ui/header.ts'
@@ -536,7 +536,7 @@ export async function runWatch(
   let turnFailed = false
   // Assigned synchronously inside the executor, so it is set by the time anything can resolve.
   let conn: ReturnType<typeof connect> | null = null
-  const outcome = await new Promise<'idle' | 'lost'>((done) => {
+  const outcome = await new Promise<'idle' | 'lost' | 'deleted'>((done) => {
     conn = connect(
       { host: server.host, port: server.port, directory: worktree },
       {
@@ -565,13 +565,14 @@ export async function runWatch(
           }
           if (event.type === 'session.error' && event.properties.sessionID === session.id) {
             const failure = errorLabel(event.properties.error)
-            if (failure) error(`error: ${failure}`)
-            turnFailed = true
+            error(failure ? `error: ${failure}` : `${session.id} reported an error with no detail`)
+            // #21: a stop the user asked for is not a failed turn.
+            if (!isAbortError(event.properties.error)) turnFailed = true
             return
           }
           // Idle is how a turn ends.
           if (event.type === 'session.status' && event.properties.sessionID === session.id && event.properties.status?.type === 'idle') done('idle')
-          if (event.type === 'session.deleted' && event.properties.info?.id === session.id) done('idle')
+          if (event.type === 'session.deleted' && event.properties.info?.id === session.id) done('deleted')
         },
         // M16: a session already idle (or gone idle before the stream connected) never sends an
         // idle frame, so ask once the stream is up: absent from the status map or idle means there
@@ -599,7 +600,8 @@ export async function runWatch(
   // leaving it open keeps the process alive after the command is logically over.
   ;(conn as ReturnType<typeof connect> | null)?.stop()
   if (outcome === 'lost') error(`lost the event stream before ${session.id} went idle`)
-  if (outcome === 'lost' || turnFailed) setExitCode(1)
+  if (outcome === 'deleted') error(`${session.id} was deleted before it went idle`)
+  if (outcome !== 'idle' || turnFailed) setExitCode(1)
 }
 
 // --- Every backend: ls/--json, status, attach, logs, stop, rm ---
@@ -954,8 +956,11 @@ export async function runAttach(args: ParsedArgs, deps: SessionCommandDeps) {
     return
   }
   // #179: the child's failure is the command's failure (opencode attach exits 1 on a bad --dir).
-  // It has already said why on the inherited stderr; a signal-killed child has no status, so 1.
-  if (result.signal) d.setExitCode(1)
+  // It has already said why on the inherited stderr; a signal-killed child has said nothing.
+  if (result.signal) {
+    d.error(`${found.backend} attach was killed by ${result.signal}`)
+    d.setExitCode(1)
+  }
   else if (typeof result.status === 'number' && result.status !== 0) d.setExitCode(result.status)
 }
 

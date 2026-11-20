@@ -1751,6 +1751,26 @@ test('watch exits 1 for a failed turn even though it then goes idle', async () =
   expect(h.codes).toEqual([1])
 })
 
+test('watch exits 0 when the turn was stopped on purpose (#21)', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.error', properties: { sessionID: 'ses_abc123', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } } })
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.codes).toEqual([])
+})
+
+test('watch exits 1 when the session is deleted before it goes idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.deleted', properties: { info: { id: 'ses_abc123' } } })
+  await done
+  expect(h.errs).toEqual(['ses_abc123 was deleted before it went idle'])
+  expect(h.codes).toEqual([1])
+})
+
 // #179: opencode 1.x streams the user's prompt as a text part of a user message.
 test('watch does not echo the user prompt back as output', async () => {
   const h = watchHarness()
