@@ -92,11 +92,16 @@ const memberKey = (m: RosterSession) => `${m.worktree}:${m.id}`
 // as every existing test passes, simply has no external-member sync.
 export type PersistRoster = ((snap: Roster) => void) & {
   // The roster as it is on disk RIGHT NOW, or null when it has not changed since this callback last
-  // read or wrote it (and on any read error — an unreadable roster is not news). Every member it
-  // returns counts as known to this instance from then on, so callers must union them all in. mtime+size rather
+  // read or wrote it (and on any read error — an unreadable roster is not news). mtime+size rather
   // than a parse per call, and stamped after our own saves so a write of ours is never re-read as
   // someone else's change.
   reload: () => Roster | null
+  // #177: tell persist that members the caller just unioned into its state (from reload) are now
+  // this instance's own. Without it a synced member was never in prev, so a later ^x, ghost ^x or
+  // TTL clean of it looked like a foreign addition: the merge kept it and the next sync re-added it.
+  // Explicit rather than folded into reload, because prev must only ever hold what state holds: a
+  // member in prev but missing from a snapshot is deleted from disk.
+  adopt: (members: RosterSession[]) => void
 }
 
 // #106: makePersistRoster's read-merge-write is not atomic — two processes (a TUI and a
@@ -207,23 +212,19 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
     // reload re-reads the file and the caller unions them in.
     if (!keptForeign) lastStamp = stamp()
   })
+  persist.adopt = (members: RosterSession[]) => {
+    const known = new Set(prev.sessions.map(memberKey))
+    prev = { ...prev, sessions: [...prev.sessions, ...members.filter((m) => !known.has(memberKey(m)))] }
+  }
   persist.reload = () => {
     const now = stamp()
     if (now === lastStamp) return null
     lastStamp = now
-    let disk: Roster
     try {
-      disk = loadRoster(file)
+      return loadRoster(file)
     } catch {
       return null // corrupt mid-run: the in-memory roster is the better answer, and persist repairs the file
     }
-    // #177: the caller (syncExternalMembers) unions every disk member into its state, so this
-    // instance now knows them and `prev` must too. Left out, a member adopted here and then removed
-    // by this instance (^x, ghost ^x, shell-job TTL) was never in prev, so the merge kept it as
-    // foreign and the next sync brought it straight back.
-    const known = new Set(prev.sessions.map(memberKey))
-    prev = { ...prev, sessions: [...prev.sessions, ...disk.sessions.filter((m) => !known.has(memberKey(m)))] }
-    return disk
   }
   return persist
 }

@@ -81,7 +81,7 @@ export function useDiscovery({
   backendRegistry: Record<string, Backend>
   fetchPullRequestsImpl: (dir: string) => Promise<{ prs: PullRequest[]; reason: string | null }>
   branchOfImpl: (dir: string) => string | null
-  persistRoster?: ((roster: Roster) => void) & { reload?: () => Roster | null }
+  persistRoster?: ((roster: Roster) => void) & { reload?: () => Roster | null; adopt?: (members: Roster['sessions']) => void }
   rosterRef: { current: Roster }
   setRosterState: (roster: Roster) => void
   seededProjectKeys: { current: Set<string> }
@@ -380,8 +380,8 @@ export function useDiscovery({
     //
     // Nothing already in state is ever rewritten from disk — a pin, rank, prompt or collapse this
     // instance just made stays exactly as it is, and groupBy/collapsed are never read at all. And
-    // nothing is persisted here: these members are on disk already. reload itself records them as
-    // known (#177), so a later ^x of one is a removal here rather than a foreign member to keep.
+    // nothing is persisted here: these members are on disk already. They are adopted instead (#177),
+    // once state holds them, so a later ^x of one is a removal here rather than a foreign member to keep.
     const syncExternalMembers = () => {
       const disk = persistRoster?.reload?.() // null when unchanged, unreadable, or not wired (tests)
       if (!disk) return
@@ -393,6 +393,7 @@ export function useDiscovery({
       // rosterRef.current, and a call site that fires before the state flush must see these members.
       rosterRef.current = next
       setRosterState(next)
+      persistRoster?.adopt?.(added)
     }
 
     const refreshProjects = async () => {
