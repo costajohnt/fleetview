@@ -285,6 +285,28 @@ test('a user-set password rejected on the configured port is not reused for the 
   expect(saved.every((s) => s.password !== 'set-by-user')).toBe(true)
 })
 
+// opencode 2.x reads OPENCODE_PASSWORD first, so a rejected password left under that name would
+// still arm the replacement server even though fleetview presents the freshly minted one.
+test('a rejected OPENCODE_PASSWORD is dropped under both names before the replacement spawns', async () => {
+  const spawnedEnv: any[] = []
+  const env: NodeJS.ProcessEnv = { OPENCODE_PASSWORD: 'set-by-user', OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const deps = {
+    isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawnedEnv.length > 0),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
+    spawnServer: () => (spawnedEnv.push({ ...env }), 777),
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  await makeEnsureServer(deps as any)(server)
+  expect(spawnedEnv[0].OPENCODE_PASSWORD).toBeUndefined()
+  expect(spawnedEnv[0].OPENCODE_SERVER_PASSWORD).toMatch(/^[0-9a-f-]{36}$/)
+})
+
 // #180 (1): a healthy listener that answers without a password is not fleetview's server. Every
 // client request and event stream sends authHeader(), so the password has to leave env before any
 // of them run, and a saved one is burned so a later respawn mints a fresh one.

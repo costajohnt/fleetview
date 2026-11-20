@@ -88,6 +88,14 @@ export { runBg, runAdd, runAnswer, runWatch, runStatus, listSessions, matchSessi
 // otherwise adopt it and show it to the same squatter. Shared by ensureServer and `server
 // status`/`stop` — the two entry points that adopt the saved credential before probing a port they
 // have no other evidence about.
+// Both names: opencode 2.x (the server fleetview spawns, and `opencode attach`) reads
+// OPENCODE_PASSWORD before OPENCODE_SERVER_PASSWORD, and main() only copies the former into the
+// latter. Dropping one would leave the other arming the next child with the password just dropped.
+function dropPassword(env: NodeJS.ProcessEnv) {
+  delete env.OPENCODE_SERVER_PASSWORD
+  delete env.OPENCODE_PASSWORD
+}
+
 export function burnSavedPassword(
   server: ServerRef,
   {
@@ -96,7 +104,7 @@ export function burnSavedPassword(
     env = process.env,
   }: { serverFile: string; saveServerImpl?: typeof saveServer; env?: NodeJS.ProcessEnv },
 ) {
-  delete env.OPENCODE_SERVER_PASSWORD
+  dropPassword(env)
   const { password, ...bare } = server
   saveServerImpl(serverFile, bare)
 }
@@ -133,7 +141,7 @@ export async function adoptServerCredential(
   if (adoptedSaved) env.OPENCODE_SERVER_PASSWORD = saved.password
   const forget = () => {
     if (!saved.password) {
-      delete env.OPENCODE_SERVER_PASSWORD
+      dropPassword(env)
       return saved
     }
     burnSavedPassword(saved, { serverFile, saveServerImpl, env })
@@ -143,6 +151,7 @@ export async function adoptServerCredential(
   let state = await probe(saved)
   if (state === 'unauthorized' && saved.password && env.OPENCODE_SERVER_PASSWORD && env.OPENCODE_SERVER_PASSWORD !== saved.password) {
     env.OPENCODE_SERVER_PASSWORD = saved.password
+    delete env.OPENCODE_PASSWORD // the user's, under its 2.x name; it would shadow the saved one for attach
     state = await probe(saved)
     if (state === 'healthy') return { state, server: saved, credential: 'saved-over-user' }
     // Anything short of healthy is not the server the saved password was made for. A listener that
@@ -250,7 +259,7 @@ export function makeEnsureServer({
       `fleetview: the opencode server now on ${candidate.host}:${candidate.port} does not require OPENCODE_SERVER_PASSWORD — its arbitrary-shell route is reachable without one. Stop it to have fleetview spawn a password-protected server.`,
     )
     // Not enforced, so not ours: nothing in this process may send that listener the password.
-    delete env.OPENCODE_SERVER_PASSWORD
+    dropPassword(env)
     const { password, ...bare } = candidate
     saveServer(serverFile, { ...bare, pid })
     return { ...bare, pid }
