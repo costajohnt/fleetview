@@ -16,6 +16,10 @@ export default function setup() {
     rmSync(runTmp, { recursive: true, force: true })
     // ponytail: a concurrent run of a pre-#230 checkout sharing this temp dir would trip this too.
     const leaked = fleetviewEntries(outer).filter((n) => !before.has(n))
-    if (leaked.length) throw new Error(`test run leaked into ${outer}: ${leaked.join(', ')}`)
+    if (leaked.length) {
+      // A throw here is only logged as "error during close" and vitest still exits 0.
+      console.error(`test run leaked into ${outer}: ${leaked.join(', ')}`)
+      process.exitCode = 1
+    }
   }
 }
