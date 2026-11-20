@@ -216,7 +216,7 @@ test('a port answering 401 is left alone rather than spawned onto', async () => 
   const warn = vi.fn()
   const deps = {
     isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawned.length > 0),
-    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : spawned.length > 0 ? 'healthy' : 'unreachable'),
     spawnServer: (s: any) => (spawned.push(s), 777),
     saveServer: () => {},
     serverFile: '/tmp/s.json',
@@ -240,7 +240,7 @@ test('a saved password rejected by whatever holds the port is not reused for the
   const env: NodeJS.ProcessEnv = {}
   const deps = {
     isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawned.length > 0),
-    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : spawned.length > 0 ? 'healthy' : 'unreachable'),
     spawnServer: (s: any) => (spawned.push(s), 777),
     saveServer: (_file: any, s: any) => saved.push(s),
     serverFile: '/tmp/s.json',
@@ -267,7 +267,7 @@ test('a user-set password rejected on the configured port is not reused for the 
   const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
   const deps = {
     isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawned.length > 0),
-    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : spawned.length > 0 ? 'healthy' : 'unreachable'),
     spawnServer: (s: any) => (spawned.push(s), 777),
     saveServer: (_file: any, s: any) => saved.push(s),
     serverFile: '/tmp/s.json',
@@ -292,7 +292,7 @@ test('a rejected OPENCODE_PASSWORD is dropped under both names before the replac
   const env: NodeJS.ProcessEnv = { OPENCODE_PASSWORD: 'set-by-user', OPENCODE_SERVER_PASSWORD: 'set-by-user' }
   const deps = {
     isServerHealthy: (s: any) => Promise.resolve(s.port !== 4900 && spawnedEnv.length > 0),
-    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : 'unreachable'),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unauthorized' : spawnedEnv.length > 0 ? 'healthy' : 'unreachable'),
     spawnServer: () => (spawnedEnv.push({ ...env }), 777),
     saveServer: () => {},
     serverFile: '/tmp/s.json',
@@ -305,6 +305,73 @@ test('a rejected OPENCODE_PASSWORD is dropped under both names before the replac
   await makeEnsureServer(deps as any)(server)
   expect(spawnedEnv[0].OPENCODE_PASSWORD).toBeUndefined()
   expect(spawnedEnv[0].OPENCODE_SERVER_PASSWORD).toMatch(/^[0-9a-f-]{36}$/)
+})
+
+// #202: the fallback walk used to arm every candidate with the same password, so a listener on one
+// candidate port that 401'd the poll (and so was shown it) held the password of the server that
+// finally came up on the next.
+test('a fallback candidate whose listener saw the password is followed by one armed with a fresh password', async () => {
+  const spawned: any[] = []
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    // 4900 never comes up, 4901 is held by something that 401s every poll, 4902 is ours.
+    probeServer: (s: any) => Promise.resolve(s.port === 4901 ? 'unauthorized' : s.port === 4902 ? 'healthy' : 'unreachable'),
+    spawnServer: (s: any) => (spawned.push(s), 700 + spawned.length),
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    processKill: () => {},
+    spawnSyncImpl: () => ({}),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)(server)
+  expect(spawned.map((s) => s.port)).toEqual([4900, 4901, 4902])
+  expect(spawned[0].password).toBe(spawned[1].password) // nothing on 4900 saw it
+  expect(spawned[2].password).not.toBe(spawned[1].password)
+  expect(spawned[2].password).toMatch(/^[0-9a-f-]{36}$/)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe(spawned[2].password)
+  expect(result.server!.password).toBe(spawned[2].password)
+})
+
+// #202: an enforcement check that failed is no evidence the listener is ours. The password stops
+// going out for this pass but stays on disk, since it was never shown and the next pass asks again.
+test('adopting a healthy server whose enforcement check fails stops presenting the password but keeps it saved', async () => {
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: () => Promise.resolve(true),
+    isAuthEnforced: () => Promise.resolve(null),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: () => { throw new Error('nothing to burn: it was never shown') },
+    serverFile: '/tmp/s.json',
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  const stored = { ...server, password: 'from-server-json' }
+  expect(await makeEnsureServer(deps as any)(stored)).toEqual({ ok: true, server: stored })
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+})
+
+test('a spawned server whose enforcement check fails keeps its record but is not sent the password this pass', async () => {
+  const env: NodeJS.ProcessEnv = {}
+  const saved: any[] = []
+  let probes = 0
+  const deps = {
+    isServerHealthy: () => Promise.resolve(probes++ > 0),
+    isAuthEnforced: () => Promise.resolve(null),
+    spawnServer: () => 777,
+    saveServer: (_file: any, s: any) => saved.push(s),
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn: vi.fn(),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)(server)
+  expect(result.server!.password).toMatch(/^[0-9a-f-]{36}$/)
+  expect(saved.at(-1).password).toBe(result.server!.password)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
 })
 
 // #180 (1): a healthy listener that answers without a password is not fleetview's server. Every
@@ -377,7 +444,7 @@ test('an M4 retry that is not healthy arms the replacement with neither password
   const spawned: any[] = []
   const deps = {
     isServerHealthy: () => Promise.resolve(spawned.length > 0),
-    probeServer: () => Promise.resolve(env.OPENCODE_SERVER_PASSWORD === 'set-by-user' ? 'unauthorized' : 'unreachable'),
+    probeServer: () => Promise.resolve(spawned.length > 0 ? 'healthy' : env.OPENCODE_SERVER_PASSWORD === 'set-by-user' ? 'unauthorized' : 'unreachable'),
     spawnServer: (s: any) => (spawned.push(s), 777),
     saveServer: () => {},
     serverFile: '/tmp/s.json',

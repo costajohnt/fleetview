@@ -70,6 +70,7 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
 
 async function askServer(server: ServerRef, path: string, looksRight: (body: unknown) => boolean, fetchImpl: typeof fetch) {
   const url = `http://${server.host}:${server.port}${path}`
+  let presented = false
   try {
     // The first request carries NO credential, on purpose. fleetview adopts the password from
     // server.json before it has any evidence about who holds the port, so an authenticated first
@@ -77,24 +78,31 @@ async function askServer(server: ServerRef, path: string, looksRight: (body: unk
     // fleetview's server and not opencode at all. Only a 401 is evidence the listener wants a
     // credential, and only then is one presented, on a single retry. Costs one extra round trip on
     // the password path; changes no adoption semantics.
-    let res = await fetchImpl(url, { signal: AbortSignal.timeout(2000) })
-    if (res.status === 401) {
-      const auth = authHeader()
-      if (!auth) return 'unauthorized'
-      res = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
-      if (res.status === 401) return 'unauthorized'
-    }
-    // 2.x answers 503 while it boots; like any other non-2xx, that is "not yet", and the poll asks again.
-    if (!res.ok) return 'unreachable'
-    let body
-    try {
-      body = await res.json()
-    } catch {
-      return 'unreachable'
-    }
-    return looksRight(body) ? 'healthy' : 'unreachable'
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(2000) })
+    if (res.status !== 401) return (await answered(res, looksRight)) ? 'healthy' : 'unreachable'
+    const auth = authHeader()
+    if (!auth) return 'unauthorized'
+    presented = true
+    const authed = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
+    // #202: the credential has now been shown. Anything but a real answer means this listener is not
+    // the server it was meant for, and it reads as `unauthorized` so callers burn what it saw. The
+    // one exception is 2.x's 503 while it boots: fleetview's own server says that too, and burning
+    // its password then would orphan it.
+    if (authed.status === 503) return 'unreachable'
+    return (await answered(authed, looksRight)) ? 'healthy' : 'unauthorized'
   } catch {
-    return 'unreachable'
+    // Same rule for a listener that took the credential and then hung or reset.
+    return presented ? 'unauthorized' : 'unreachable'
+  }
+}
+
+// 2.x answers 503 while it boots; like any other non-2xx, that is "not yet", and the poll asks again.
+async function answered(res: Response, looksRight: (body: unknown) => boolean) {
+  if (!res.ok) return false
+  try {
+    return looksRight(await res.json())
+  } catch {
+    return false
   }
 }
 
@@ -136,7 +144,10 @@ function isProjectList(body: unknown): boolean {
 // set there is nothing to enforce, and that no-password case is exactly where adopting a foreign
 // listener is most likely and least visible. Saying so is the adoption notice's job in
 // makeEnsureServer, which reports the no-password case rather than leaving this `true` silent.
-export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.fetch) {
+//
+// null: the check itself failed, so there is no evidence either way. #202: that used to read as true,
+// and a listener that answered the probe and then hung this one request kept receiving the password.
+export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.fetch): Promise<boolean | null> {
   if (!authHeader()) return true
   try {
     // Either API refusing counts. 2.x serves /project (its web app) to anyone and enforces on /api,
@@ -147,7 +158,7 @@ export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.f
     }
     return false
   } catch {
-    return true // a transient network failure is not evidence auth is off; don't nag
+    return null
   }
 }
 

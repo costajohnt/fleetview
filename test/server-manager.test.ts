@@ -47,10 +47,12 @@ test('isAuthEnforced is false when a password is set but the server answers anyw
   })
 })
 
-test('isAuthEnforced does not nag on a transient network failure', async () => {
+// #202: a failed check is no evidence either way. Reading it as "enforced" let a listener that hung
+// this one request keep receiving the password.
+test('isAuthEnforced reports null, not true, on a network failure', async () => {
   const fetchImpl = vi.fn(() => Promise.reject(new Error('ECONNRESET')))
   await withPassword('hunter2', async () => {
-    expect(await isAuthEnforced({ host: '127.0.0.1', port: 4900 }, fetchImpl)).toBe(true)
+    expect(await isAuthEnforced({ host: '127.0.0.1', port: 4900 }, fetchImpl)).toBeNull()
   })
 })
 
@@ -124,6 +126,36 @@ test('probeServer reports unauthorized without a second request when there is no
     expect(await probeServer(server, fetchImpl as any)).toBe('unauthorized')
   })
   expect(fetchImpl).toHaveBeenCalledTimes(1)
+})
+
+// #202: once the password has gone out on the retry, a listener that then answers anything but a
+// real opencode reply has seen it, and has to read as `unauthorized` so callers burn it.
+test('probeServer reports unauthorized when the presented password draws a non-401 failure', async () => {
+  const server = { host: '127.0.0.1', port: 4900 }
+  for (const second of [
+    () => Promise.resolve({ ok: false, status: 500 }),
+    () => Promise.resolve({ ok: false, status: 404 }),
+    () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) }),
+    () => Promise.reject(new Error('ECONNRESET')),
+  ]) {
+    let call = 0
+    const fetchImpl = vi.fn(() => (call++ === 0 ? Promise.resolve({ ok: false, status: 401 }) : second()))
+    await withPassword('hunter2', async () => {
+      expect(await probeServer(server, fetchImpl as any)).toBe('unauthorized')
+    })
+  }
+})
+
+// ...except 2.x's boot-time 503, which fleetview's own server answers too: burning its password then
+// would orphan it.
+test('probeServer keeps a 503 after the presented password as unreachable (2.x booting)', async () => {
+  const server = { host: '127.0.0.1', port: 4900 }
+  const fetchImpl = vi.fn((url: string, init: any) =>
+    Promise.resolve(init?.headers?.authorization ? { ok: false, status: 503 } : url.endsWith('/project') ? { ok: true, status: 200, json: () => Promise.reject(new Error('html')) } : { ok: false, status: 401 }),
+  )
+  await withPassword('hunter2', async () => {
+    expect(await probeServer(server, fetchImpl as any)).toBe('unreachable')
+  })
 })
 
 test('probeServer reports unauthorized when the retried password is rejected too', async () => {

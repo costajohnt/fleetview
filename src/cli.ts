@@ -120,7 +120,9 @@ export function burnSavedPassword(
 //   and a saved one is burned from server.json too.
 // - A healthy listener that does not enforce auth is not fleetview's server either. Every client
 //   request and event stream would send it Basic auth, so the password is dropped the same way
-//   before anything does (`unenforced`).
+//   before anything does (`unenforced`). #202: when that check itself fails there is no evidence
+//   either way, so the password leaves env for this pass but stays in server.json (`unknown`): it
+//   was never shown, and the next pass adopts it and asks again.
 export async function adoptServerCredential(
   saved: ServerRef,
   {
@@ -131,12 +133,12 @@ export async function adoptServerCredential(
     env = process.env,
   }: {
     probe: (server: ServerRef) => Promise<'healthy' | 'unauthorized' | 'unreachable'>
-    isAuthEnforced?: (server: ServerRef) => Promise<boolean>
+    isAuthEnforced?: (server: ServerRef) => Promise<boolean | null>
     serverFile: string
     saveServerImpl?: typeof saveServer
     env?: NodeJS.ProcessEnv
   },
-): Promise<{ state: 'healthy' | 'unauthorized' | 'unreachable'; server: ServerRef; credential: 'kept' | 'saved-over-user' | 'rejected' | 'unenforced' }> {
+): Promise<{ state: 'healthy' | 'unauthorized' | 'unreachable'; server: ServerRef; credential: 'kept' | 'saved-over-user' | 'rejected' | 'unenforced' | 'unknown' }> {
   const adoptedSaved = Boolean(saved.password) && !env.OPENCODE_SERVER_PASSWORD
   if (adoptedSaved) env.OPENCODE_SERVER_PASSWORD = saved.password
   const forget = () => {
@@ -161,7 +163,12 @@ export async function adoptServerCredential(
   }
   if (!env.OPENCODE_SERVER_PASSWORD) return { state, server: saved, credential: 'kept' }
   if (state === 'unauthorized') return { state, server: forget(), credential: 'rejected' }
-  if (state === 'healthy' && !(await isAuthEnforced(saved))) return { state, server: forget(), credential: 'unenforced' }
+  const enforced = state === 'healthy' ? await isAuthEnforced(saved) : true
+  if (enforced === false) return { state, server: forget(), credential: 'unenforced' }
+  if (enforced === null) {
+    dropPassword(env)
+    return { state, server: saved, credential: 'unknown' }
+  }
   return { state, server: saved, credential: 'kept' }
 }
 
@@ -212,7 +219,7 @@ export function makeEnsureServer({
   env = process.env,
 }: {
   isServerHealthy: (server: ServerRef) => Promise<boolean>
-  isAuthEnforced?: (server: ServerRef) => Promise<boolean>
+  isAuthEnforced?: (server: ServerRef) => Promise<boolean | null>
   probeServer?: (server: ServerRef) => Promise<'healthy' | 'unauthorized' | 'unreachable'>
   spawnServer: SpawnServer
   saveServer: (file: string, server: ServerRef) => unknown
@@ -226,12 +233,16 @@ export function makeEnsureServer({
   env?: NodeJS.ProcessEnv
 }) {
   // opencode cold boot (plugins) can exceed 5s; observed live on 1.18.4
+  // #202: `seen` — some poll got `unauthorized`, so whatever holds that port was shown the password.
   const pollUntilHealthy = async (candidate: ServerRef) => {
+    let seen = false
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, pollMs))
-      if (await isServerHealthy(candidate)) return true
+      const state = await probeServer(candidate)
+      if (state === 'healthy') return { healthy: true, seen }
+      if (state === 'unauthorized') seen = true
     }
-    return false
+    return { healthy: false, seen }
   }
   // a candidate whose poll window expired is a leaked child (spawned, never healthy) — kill it
   // before moving on, or every failed candidate/restart accumulates a zombie opencode process.
@@ -242,19 +253,27 @@ export function makeEnsureServer({
   // The record is written BEFORE the spawn as well as after: a crash in between used to leave a
   // detached server armed with a password that existed only in a dead process's env — unreachable
   // and unstoppable by the next run. Written again with the pid once there is one.
-  const trySpawn = async (candidate: ServerRef) => {
+  const trySpawn = async (candidate: ServerRef): Promise<{ server?: ServerRef; seen?: boolean }> => {
     saveServer(serverFile, { ...candidate, pid: null })
     const pid = spawnServer(candidate, {})
     saveServer(serverFile, { ...candidate, pid })
-    if (!(await pollUntilHealthy(candidate))) {
+    const polled = await pollUntilHealthy(candidate)
+    if (!polled.healthy) {
       reap(pid)
-      return null
+      return { seen: polled.seen }
     }
     // M2: a healthy probe is not evidence the password is enforced — a foreign passwordless opencode
     // that got the port first answers our authenticated probe 200 all the same (it ignores auth it
     // doesn't require). Persisting a password for such a server would make the next run trust a
     // credential protecting nothing, so the record is saved without it.
-    if (await isAuthEnforced(candidate)) return { ...candidate, pid }
+    const enforced = await isAuthEnforced(candidate)
+    if (enforced) return { server: { ...candidate, pid } }
+    if (enforced === null) {
+      // No evidence either way: stop presenting it this pass, keep the record (already saved with
+      // the password) so the next pass adopts it and asks again.
+      dropPassword(env)
+      return { server: { ...candidate, pid } }
+    }
     warn(
       `fleetview: the opencode server now on ${candidate.host}:${candidate.port} does not require OPENCODE_SERVER_PASSWORD — its arbitrary-shell route is reachable without one. Stop it to have fleetview spawn a password-protected server.`,
     )
@@ -262,7 +281,7 @@ export function makeEnsureServer({
     dropPassword(env)
     const { password, ...bare } = candidate
     saveServer(serverFile, { ...bare, pid })
-    return { ...bare, pid }
+    return { server: { ...bare, pid } }
   }
   // ensureServer runs again on every roster-loop iteration, so the adoption notice below is once per
   // process: the fact is worth stating, restating it every few seconds is not.
@@ -323,8 +342,20 @@ export function makeEnsureServer({
     // `unauthorized` means the port is held by a server enforcing a password we don't have, so our
     // own spawn there could never bind — skip straight to the fallback walk rather than spending the
     // poll window on a child that is already doomed.
+    // #202: a candidate whose port showed the password to a rejecting listener burns it, and every
+    // later candidate is armed with a fresh one instead of the password that listener now holds.
+    let armed = target
+    const attempt = async (candidate: ServerRef) => {
+      const result = await trySpawn(candidate)
+      if (result.server) return result.server
+      if (result.seen) {
+        dropPassword(env)
+        armed = { ...armed, password: (env.OPENCODE_SERVER_PASSWORD = randomUUID()) }
+      }
+      return null
+    }
     if (state !== 'unauthorized') {
-      const spawned = await trySpawn(target)
+      const spawned = await attempt(target)
       if (spawned) return { ok: true, server: spawned }
     } else {
       const dropped = adopted.credential === 'rejected' ? ' That listener has now seen the password, so it will not be used again: the replacement gets a freshly generated one.' : ''
@@ -335,7 +366,7 @@ export function makeEnsureServer({
     // so this fallback is only for the case where our own spawn couldn't bind/serve on `port` at all;
     // a foreign opencode already on that port would have passed isServerHealthy above and returned true.
     for (let p = server.port + 1; p <= server.port + 10; p++) {
-      const spawned = await trySpawn({ ...target, port: p })
+      const spawned = await attempt({ ...armed, port: p })
       if (spawned) return { ok: true, server: spawned }
     }
     return { ok: false, server, reason: 'server did not become healthy' }
