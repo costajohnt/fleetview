@@ -1508,6 +1508,37 @@ test('an authoritative seed keeps a still-pending request on a record with a fre
   expect(store.pendingFor('repoA', 's1').map((p: any) => p.id)).toEqual(['p2'])
 })
 
+// The documented cost of the per-record guard: a request the store missed, on a session that had
+// another one answered during the GET flight, is held back one poll, and the next additive pass
+// (a later mark) recovers it.
+test('a missed request refused alongside an answered one is recovered by the next additive seed (#178)', () => {
+  const store: any = createStore()
+  seed(store)
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1', permission: 'bash' } })
+  const mark = store.seedMark()
+  store.apply('repoA', { type: 'permission.replied', properties: { sessionID: 's1', requestID: 'p1', reply: 'once' } })
+  const listed = [{ id: 'p1', sessionID: 's1', permission: 'bash' }, { id: 'p2', sessionID: 's1', permission: 'edit' }]
+  store.seedPermissions('repoA', listed, mark)
+  expect(store.pendingFor('repoA', 's1')).toEqual([])
+  store.seedPermissions('repoA', [listed[1]], store.seedMark(), { additive: true })
+  expect(store.pendingFor('repoA', 's1').map((p: any) => p.id)).toEqual(['p2'])
+})
+
+// An explicit idle in the same seed stamps the record at `mark`; a request asked after it and
+// missed by the stream is refused by that seed, and the next additive pass must get a later mark
+// to recover it even when no live event has moved the counter in between.
+test('a request refused after a same-seed idle clear is recovered by the next additive seed (#178)', () => {
+  const store: any = createStore()
+  seed(store)
+  const mark = store.seedMark()
+  store.seedStatuses('repoA', { s1: { type: 'idle' } }, mark)
+  const p2 = { id: 'p2', sessionID: 's1', permission: 'bash' }
+  store.seedPermissions('repoA', [p2], mark)
+  expect(store.pendingFor('repoA', 's1')).toEqual([])
+  store.seedPermissions('repoA', [p2], store.seedMark(), { additive: true })
+  expect(store.pendingFor('repoA', 's1').map((p: any) => p.id)).toEqual(['p2'])
+})
+
 // The property the mount/reconnect path must keep: there fleetview may have missed the answers as
 // well as the asks, so the fresh list is the whole truth and an absent entry is a dropped one.
 test('the mount/reconnect path still replaces authoritatively — an absent entry is still dropped', () => {
