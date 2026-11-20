@@ -139,15 +139,16 @@ export function worktreeName(prompt: string, existing: string[] = []) {
 // (prompt, chosen name, taken slots) to a local NDJSON file so the next occurrence self-documents.
 // Best-effort by design: a debug log must never cost anyone their dispatch.
 export function logNameCollision(entry: { prompt: string; name: string; existing: string[] }) {
+  // The prompt is capped: this is a lookup key for the bug, not an archive of pasted walls.
+  logDispatchDebug({ ...entry, prompt: entry.prompt.slice(0, 200) })
+}
+
+// The same file, for any dispatch evidence (#192 logs why isolation fell back here too).
+export function logDispatchDebug(entry: Record<string, unknown>) {
   try {
     const dir = (process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? fleetviewDir(join(homedir(), '.local', 'state'))
     mkdirSync(dir, { recursive: true, mode: 0o700 })
-    appendFileSync(
-      join(dir, 'dispatch-debug.ndjson'),
-      // The prompt is capped: this is a lookup key for the bug, not an archive of pasted walls.
-      `${JSON.stringify({ ts: new Date().toISOString(), ...entry, prompt: entry.prompt.slice(0, 200) })}\n`,
-      { mode: 0o600 },
-    )
+    appendFileSync(join(dir, 'dispatch-debug.ndjson'), `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 })
   } catch {}
 }
 
@@ -157,12 +158,22 @@ export function logNameCollision(entry: { prompt: string; name: string; existing
 // pull-requests.ts uses belong here too; see git-safe.ts. So do the filter-driver overrides (#181),
 // read from every directory whose config the command will load: `worktree remove` checks the target
 // with a `status` of its own, which also reads that worktree's own config.worktree.
-const git = (dir: string, args: string[], run = execFileSync, configDirs = [dir]) =>
-  run('git', [...GIT_SAFE_ARGS, ...configDirs.flatMap((d) => gitFilterOverrides(d, run)), '-C', dir, ...args], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-    env: gitFilterSafeEnv(),
-  }).trim()
+// stderr is captured (never shown) so a failure says why (#192): execFileSync's own message is only
+// "Command failed: git -c ... worktree add ...", the same for an existing branch, an unborn HEAD or
+// a dubious-ownership refusal. git's last stderr line leads the message; status and the rest stay.
+const git = (dir: string, args: string[], run = execFileSync, configDirs = [dir]) => {
+  try {
+    return run('git', [...GIT_SAFE_ARGS, ...configDirs.flatMap((d) => gitFilterOverrides(d, run)), '-C', dir, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: gitFilterSafeEnv(),
+    }).trim()
+  } catch (e) {
+    const said = String((e as { stderr?: unknown })?.stderr ?? '').trim().split('\n').pop()
+    if (said && e instanceof Error) e.message = `git ${args[0]}: ${said}`
+    throw e
+  }
+}
 
 // A submodule is a repository of its own whose config fleetview never read, so its filters and
 // fsmonitor are not overridden. `status` is told never to enter one, and a worktree holding any is

@@ -1,7 +1,8 @@
 import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
 import { DEFAULT_BACKEND } from './backends/index.ts'
-import { shouldIsolate, worktreeName, logNameCollision, createLocalWorktree, removeLocalWorktree } from './worktree.ts'
+import { shouldIsolate, worktreeName, logNameCollision, logDispatchDebug, createLocalWorktree, removeLocalWorktree } from './worktree.ts'
+import { stripControl, truncateGraphemes } from './text-utils.ts'
 import type { AttachTarget, Backend, ListedSession, ModelPair, Project, StreamProject, Worktree } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
@@ -17,6 +18,17 @@ import type { RosterClient } from './backends/opencode/client.ts'
 // shell job, an `@backend`, and whether to attach straight after. Both paths take the same bag so a
 // token means the same thing whichever CLI it lands on.
 export type DispatchOptions = { thenAttach?: boolean; agent?: string; repo?: string; shell?: boolean; backend?: string }
+
+// #192: why a wanted worktree fell back to the checkout. Every failure used to read the same, so a
+// server too old for worktrees looked like one refusing a directory it named. Logged (capped at 500
+// chars) to dispatch-debug.ndjson, and returned as one short control-free line for the confirmation.
+const isolationFailure = (e: unknown, target: string) => {
+  const reason = stripControl(e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').trim() || 'unknown error'
+  logDispatchDebug({ event: 'isolation-failed', target, reason: reason.slice(0, 500) })
+  const short = truncateGraphemes(reason, 60)
+  return short === reason ? reason : `${short}…`
+}
+const notIsolated = (refused: string) => `not isolated${refused ? ` (worktree failed: ${refused})` : ''}, it edits the checkout`
 
 export function useDispatch({
   client,
@@ -123,11 +135,14 @@ export function useDispatch({
     const wantIsolation = shouldIsolate(target, projects, parents)
     let directory = target
     let isolated = false
+    let refused = ''
     if (isolate && wantIsolation) {
       try {
         directory = createLocalWorktree(target, text)
         isolated = true
-      } catch {}
+      } catch (e) {
+        refused = isolationFailure(e, target)
+      }
     }
     try {
       // Streaming starts before the dispatch, not after: the run can finish inside the poll interval
@@ -169,7 +184,7 @@ export function useDispatch({
       }
       // Same wording as the opencode path: the repository the user chose, plus a warning only
       // when a worktree was wanted and the row edits the checkout instead.
-      const why = isolated || !wantIsolation ? '' : isolate ? ' — not isolated, it edits the checkout' : ' — isolation off, it edits the checkout'
+      const why = isolated || !wantIsolation ? '' : isolate ? ` — ${notIsolated(refused)}` : ' — isolation off, it edits the checkout'
       const when = thenAttach ? '; attach when it finishes' : ''
       flash(`dispatched into ${basename(target) || target} on ${name}${when}${why}`, why || when ? 5000 : undefined)
     } catch {
@@ -218,6 +233,7 @@ export function useDispatch({
     // session into its own worktree "before editing files", and this is fleetview's version of that.
     let worktree = target
     let isolated = false
+    let refused = ''
     let worktreeRemoved = false
     let created = false
     try {
@@ -238,19 +254,21 @@ export function useDispatch({
           // log what was actually received so the next occurrence carries its own evidence.
           if (name !== worktreeName(text)) logNameCollision({ prompt: text, name, existing })
           const created = await client.createWorktree(name, target)
-          if (created?.directory) {
-            worktree = created.directory
-            isolated = true
-            // Stream it immediately rather than waiting for the poll to notice a new project —
-            // this is the row the user is about to watch start.
-            await streamProjectRef.current?.(worktree)
-          }
-        } catch {
+          if (!created?.directory) throw new Error('server returned no worktree')
+          worktree = created.directory
+          isolated = true
+          // Stream it immediately rather than waiting for the poll to notice a new project —
+          // this is the row the user is about to watch start.
+          await streamProjectRef.current?.(worktree)
+        } catch (e) {
           // Isolation is a safety measure, not a precondition. A server too old for
           // /experimental/worktree, or one that refuses, must not cost the user their dispatch —
           // it runs in the repository itself, exactly as it did before isolation existed. Said in
           // the dispatch confirmation rather than as its own notice, which the confirmation would
           // overwrite a few milliseconds later — a warning nobody can read is not a warning.
+          // #192: with its reason, so an old server reads differently from a refusal worth a look.
+          // A throw after `isolated` (the stream subscription) is not an isolation failure.
+          if (!isolated) refused = isolationFailure(e, target)
         }
       }
       const session = await client.createSession({ agent: effectiveAgent, model: dispatchModel }, worktree).catch(async (e) => {
@@ -300,7 +318,7 @@ export function useDispatch({
       else if (!isolated && shouldIsolate(target, projects, parents)) {
         // A worktree was wanted but the row edits the checkout — either isolation is off
         // (FLEETVIEW_NO_ISOLATE, a deliberate choice) or the server couldn't make one (a warning).
-        const why = isolate ? 'not isolated, it edits the checkout' : 'isolation off, it edits the checkout'
+        const why = isolate ? notIsolated(refused) : 'isolation off, it edits the checkout'
         flash(`dispatched into ${basename(target) || target} — ${why}`, 5000)
       } else flash(`dispatched into ${basename(target) || target}`)
     } catch {

@@ -497,6 +497,15 @@ test('createLocalWorktree steers around taken directories and leftover branches'
   expect(basename(createLocalWorktree(repo.dir, 'lint', root))).toBe('lint-2')
 })
 
+// #192: the dispatch line shows this message, and execFileSync's own is only the argv, the same for
+// every cause. git's stderr has to lead it: an unborn HEAD must read as git's complaint.
+test('createLocalWorktree failures carry git\'s own reason, not just the command line', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleetview-unborn-'))
+  repos.push(dir)
+  execFileSync('git', ['-C', dir, 'init', '-q', '-b', 'main'], { stdio: 'ignore' })
+  expect(() => createLocalWorktree(dir, 'x', dataRoot())).toThrow(/^git worktree: fatal: /)
+})
+
 test('createLocalWorktree throws outside a repository, so dispatch can fall back', () => {
   const dir = mkdtempSync(join(tmpdir(), 'fleetview-norepo-'))
   repos.push(dir)
