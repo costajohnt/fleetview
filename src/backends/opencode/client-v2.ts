@@ -119,10 +119,13 @@ function v2Model(model: ModelSelection | undefined) {
 // directory resolves to the server's cwd. fleetview spawned servers in ~ and asked for agents,
 // commands and models with no directory, so ~ became a project and every Claude Code session ever
 // run from home joined the roster (#172). Those calls, and the server's cwd, are pinned to this
-// empty directory instead; it exists because the server refuses a directory that doesn't.
+// empty directory instead; it is made because the server refuses a directory that doesn't exist.
+// Best effort: an unwritable state dir must not stop the project list, only those three calls.
 export const serverHome = () => {
   const dir = join(stateDir(), 'opencode-home')
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+  } catch {}
   return dir
 }
 
@@ -162,8 +165,9 @@ export class OpencodeV2Client {
     // project's worktrees in `sandboxes`, which is how the roster finds worktree sessions after a
     // restart; 2.3.2 leaves it empty (verified live), so it is filled from the worktree list.
     const projects = records(unwrap(await this.req('GET', '/api/project')))
-    // Drop the pinned directory, and the ~ an earlier fleetview registered (#172): a ~ that is not a
-    // repository and has no opencode sessions of its own was never a project anyone chose.
+    // Drop the pinned directory, and the ~ an earlier fleetview registered (#172): a ~ with no
+    // opencode sessions of its own was never a project anyone chose. Even when it is a repository,
+    // since a dotfiles ~/.git makes 2.x resolve the pinned directory itself up to ~.
     const home = homedir()
     const pinned = serverHome()
     const kept: Record<string, unknown>[] = []
@@ -172,7 +176,7 @@ export class OpencodeV2Client {
       if (dir === pinned) continue
       // A failed look counts as sessions: keeping a stray row beats hiding a real project.
       const empty = () => this.req('GET', `/api/session?directory=${encodeURIComponent(home)}`).then((b) => records(unwrap(b)).length === 0, () => false)
-      if (dir === home && !p.vcs && (await empty())) continue
+      if (dir === home && (await empty())) continue
       kept.push(p)
     }
     return Promise.all(

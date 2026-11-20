@@ -77,15 +77,20 @@ test('the ~ an earlier fleetview registered and the pinned directory are not pro
   expect((await c.listProjects()).map((p) => p.worktree)).toEqual(['/repo'])
 })
 
-test('a ~ with opencode sessions of its own, or that is a repository, stays a project', async () => {
-  const withSessions = client({
+test('a ~ with opencode sessions of its own stays a project, repository or not', async () => {
+  const { c, calls } = client({
     'GET /api/project': [{ id: 'home', canonical: homedir(), sandboxes: [] }],
     'GET /api/worktree': [],
     'GET /api/session': { data: [{ id: 'ses_1', location: { directory: homedir() }, time: {} }] },
   })
-  expect((await withSessions.c.listProjects()).map((p) => p.worktree)).toEqual([homedir()])
-  const repo = client({ 'GET /api/project': [{ id: 'home', canonical: homedir(), vcs: 'git', sandboxes: [] }], 'GET /api/worktree': [] })
-  expect((await repo.c.listProjects()).map((p) => p.worktree)).toEqual([homedir()])
+  expect((await c.listProjects()).map((p) => p.worktree)).toEqual([homedir()])
+  expect(new URL(calls.find((call) => new URL(call.url).pathname === '/api/session')!.url).searchParams.get('directory')).toBe(homedir())
+})
+
+// A dotfiles ~/.git: 2.x resolves the pinned directory up to ~ and registers it as a git project.
+test('a ~ that is a repository with no opencode sessions is still dropped', async () => {
+  const { c } = client({ 'GET /api/project': [{ id: 'home', canonical: homedir(), vcs: 'git', sandboxes: [] }], 'GET /api/worktree': [], 'GET /api/session': { data: [] } })
+  expect(await c.listProjects()).toEqual([])
 })
 
 test('agents, commands and models are asked for in the pinned directory, never the server cwd', async () => {

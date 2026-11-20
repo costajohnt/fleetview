@@ -27,7 +27,7 @@ export function spawnServer(
     ownFd = true
   }
   const child = spawnImpl('opencode', ['serve', '--port', String(server.port), '--hostname', server.host], {
-    // Not ~: 2.x makes its cwd a project, and ~ as a project floods the roster (#172). 1.x ignores it.
+    // Not ~: 2.x makes its cwd a project, and ~ as a project floods the roster (#172).
     cwd: serverHome(),
     detached: true,
     stdio: ['ignore', logFd, logFd],
