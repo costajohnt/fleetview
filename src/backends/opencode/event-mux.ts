@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { authHeader, opencodeApi } from './client.ts'
 import { OpencodeV2Client, isSessionForm, v1Error, v1Permission, v1Question } from './client-v2.ts'
 import type { OpencodeEvent } from '../../types.ts'
@@ -55,11 +56,20 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
         const auth = authHeader()
         // 2.x has one server-wide stream in its own vocabulary; it is cut to this directory and
         // translated to 1.x's events here, so the store downstream never knows which it got.
-        const v2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 ? await v2Filter(base, directory, fetchImpl) : null // unanswered: the stream attempt below fails the same way and backs off
-        const url = v2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
+        const isV2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 // unanswered: the stream attempt below fails the same way and backs off
+        const url = isV2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
         const res = await fetchImpl(url, { signal: ac.signal, headers: auth ? { authorization: auth } : undefined })
         if (stopped) return
         if (!res.ok || !res.body) throw new Error(`event stream ${res.status}`)
+        // Seeded once the stream is open, not before (#184): a session created between the listing
+        // and the subscription announced itself to nobody, and its location-less frames were dropped
+        // until the next reconnect. The body is not read until the seed is in, so nothing is missed.
+        const v2 = isV2
+          ? await v2Filter(base, directory, fetchImpl).catch((e) => {
+              Promise.resolve((res.body as { cancel?: () => Promise<void> }).cancel?.()).catch(() => {})
+              throw e
+            })
+          : null
         onOnline?.(directory)
         delay = 1000
         let buf = ''
@@ -117,16 +127,24 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
 // One directory's slice of 2.x's server-wide stream, already translated. Events carry the
 // session's `location` (opencode v2.3.2 publishes session.created with it); one that doesn't is
 // kept when its session is one this directory is known to hold, seeded from the listing at every
-// (re)connect and grown by session.created.
+// (re)connect and grown by session.created. Session renames and deletes carry no location (verified
+// live against 2.3.2, recorded in test/fixtures/opencode-2.3.2-events.sse), so the seed is what
+// routes them.
+//
+// Paths are compared resolved: 2.x strips a trailing slash from the directory it is given (verified
+// live), so a roster directory spelled with one never matched. Not realpath: 2.x keeps a symlinked
+// spelling as given (also verified), so its sessions are listed under that spelling, not the target.
 async function v2Filter(base: string, directory: string, fetchImpl: typeof fetch) {
   const mine = new Set((await new OpencodeV2Client(base, fetchImpl, () => authHeader()).listSessions(directory)).map((s) => s.id))
+  const here = resolve(directory)
   const translate = createV2Translator()
   return (frame: unknown): OpencodeEvent[] => {
     if (!isRecord(frame) || !isRecord(frame.data)) return []
-    const where = isRecord(frame.location) ? asString(frame.location.directory) : undefined
+    const raw = isRecord(frame.location) ? asString(frame.location.directory) : undefined
+    const where = raw === undefined ? undefined : resolve(raw)
     const sessionID = asString(frame.data.sessionID) ?? (isRecord(frame.data.form) ? asString(frame.data.form.sessionID) : undefined)
-    if (frame.type === 'session.created' && where === directory && sessionID) mine.add(sessionID)
-    if (where !== undefined ? where !== directory : !sessionID || !mine.has(sessionID)) return []
+    if (frame.type === 'session.created' && where === here && sessionID) mine.add(sessionID)
+    if (where !== undefined ? where !== here : !sessionID || !mine.has(sessionID)) return []
     return translate(frame)
   }
 }
