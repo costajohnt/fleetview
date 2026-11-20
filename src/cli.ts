@@ -249,7 +249,7 @@ export function makeEnsureServer({
   // `unconfirmed` is tolerated only while the child fleetview just spawned is still alive (it may be
   // booting), and a window that ends without healthy after one still counts as seen: whatever answered
   // may not have been that child.
-  const pollUntilHealthy = async (candidate: ServerRef, pid: number | null) => {
+  const pollUntilHealthy = async (candidate: ServerRef, pid: ServerRef['pid']) => {
     let presented = false
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, pollMs))
