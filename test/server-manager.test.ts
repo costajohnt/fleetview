@@ -137,6 +137,8 @@ test('probeServer reports unauthorized when the presented password draws a non-4
     () => Promise.resolve({ ok: false, status: 404 }),
     () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) }),
     () => Promise.reject(new Error('ECONNRESET')),
+    () => Promise.resolve({ ok: false, status: 503 }), // a bare 503 is not 2.x booting
+    () => Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({ booting: true }) }),
   ]) {
     let call = 0
     const fetchImpl = vi.fn(() => (call++ === 0 ? Promise.resolve({ ok: false, status: 401 }) : second()))
@@ -146,12 +148,12 @@ test('probeServer reports unauthorized when the presented password draws a non-4
   }
 })
 
-// ...except 2.x's boot-time 503, which fleetview's own server answers too: burning its password then
-// would orphan it.
+// ...except 2.x's boot-time 503, which fleetview's own server answers too, with its /api/info body:
+// burning its password then would orphan it.
 test('probeServer keeps a 503 after the presented password as unreachable (2.x booting)', async () => {
   const server = { host: '127.0.0.1', port: 4900 }
   const fetchImpl = vi.fn((url: string, init: any) =>
-    Promise.resolve(init?.headers?.authorization ? { ok: false, status: 503 } : url.endsWith('/project') ? { ok: true, status: 200, json: () => Promise.reject(new Error('html')) } : { ok: false, status: 401 }),
+    Promise.resolve(init?.headers?.authorization ? { ok: false, status: 503, json: () => Promise.resolve({ version: '2.3.2', pid: 1 }) } : url.endsWith('/project') ? { ok: true, status: 200, json: () => Promise.reject(new Error('html')) } : { ok: false, status: 401 }),
   )
   await withPassword('hunter2', async () => {
     expect(await probeServer(server, fetchImpl as any)).toBe('unreachable')

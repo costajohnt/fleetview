@@ -233,16 +233,17 @@ export function makeEnsureServer({
   env?: NodeJS.ProcessEnv
 }) {
   // opencode cold boot (plugins) can exceed 5s; observed live on 1.18.4
-  // #202: `seen` — some poll got `unauthorized`, so whatever holds that port was shown the password.
+  // #202: `seen` — a poll got `unauthorized`, so whatever holds that port was shown the password and
+  // rejected it. That is final for the candidate: a listener that later answers healthy has still
+  // seen the password, so it is never trusted with it.
   const pollUntilHealthy = async (candidate: ServerRef) => {
-    let seen = false
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, pollMs))
       const state = await probeServer(candidate)
-      if (state === 'healthy') return { healthy: true, seen }
-      if (state === 'unauthorized') seen = true
+      if (state === 'healthy') return { healthy: true, seen: false }
+      if (state === 'unauthorized') return { healthy: false, seen: true }
     }
-    return { healthy: false, seen }
+    return { healthy: false, seen: false }
   }
   // a candidate whose poll window expired is a leaked child (spawned, never healthy) — kill it
   // before moving on, or every failed candidate/restart accumulates a zombie opencode process.
@@ -349,7 +350,9 @@ export function makeEnsureServer({
       const result = await trySpawn(candidate)
       if (result.server) return result.server
       if (result.seen) {
-        dropPassword(env)
+        // Out of server.json as well as env (trySpawn saved the record with it), so a run that ends
+        // here with ok:false leaves nothing on disk for the next run to adopt and present again.
+        burnSavedPassword({ ...candidate, pid: null }, { serverFile, saveServerImpl: saveServer, env })
         armed = { ...armed, password: (env.OPENCODE_SERVER_PASSWORD = randomUUID()) }
       }
       return null

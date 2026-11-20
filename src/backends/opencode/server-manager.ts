@@ -86,9 +86,10 @@ async function askServer(server: ServerRef, path: string, looksRight: (body: unk
     const authed = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
     // #202: the credential has now been shown. Anything but a real answer means this listener is not
     // the server it was meant for, and it reads as `unauthorized` so callers burn what it saw. The
-    // one exception is 2.x's 503 while it boots: fleetview's own server says that too, and burning
-    // its password then would orphan it.
-    if (authed.status === 503) return 'unreachable'
+    // one exception is 2.x booting, which fleetview's own server goes through too (burning its
+    // password then would orphan it): a 503 carrying 2.x's own /api/info body, the same bar a
+    // healthy answer has to clear. A bare 503 is just a way to keep the password from being burned.
+    if (authed.status === 503) return (await bodyLooksRight(authed, looksRight)) ? 'unreachable' : 'unauthorized'
     return (await answered(authed, looksRight)) ? 'healthy' : 'unauthorized'
   } catch {
     // Same rule for a listener that took the credential and then hung or reset.
@@ -98,7 +99,10 @@ async function askServer(server: ServerRef, path: string, looksRight: (body: unk
 
 // 2.x answers 503 while it boots; like any other non-2xx, that is "not yet", and the poll asks again.
 async function answered(res: Response, looksRight: (body: unknown) => boolean) {
-  if (!res.ok) return false
+  return res.ok && bodyLooksRight(res, looksRight)
+}
+
+async function bodyLooksRight(res: Response, looksRight: (body: unknown) => boolean) {
   try {
     return looksRight(await res.json())
   } catch {

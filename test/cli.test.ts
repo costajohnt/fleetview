@@ -334,6 +334,51 @@ test('a fallback candidate whose listener saw the password is followed by one ar
   expect(result.server!.password).toBe(spawned[2].password)
 })
 
+// A 401 during the poll is final for that candidate even if the same port answers healthy a moment
+// later: whatever is there has seen the password.
+test('a fallback candidate that 401s and then answers healthy is not trusted', async () => {
+  const spawned: any[] = []
+  const saved: any[] = []
+  const env: NodeJS.ProcessEnv = {}
+  let polls4901 = 0
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) =>
+      Promise.resolve(s.port === 4901 ? (polls4901++ === 0 ? 'unauthorized' : 'healthy') : s.port === 4902 ? 'healthy' : 'unreachable'),
+    spawnServer: (s: any) => (spawned.push(s), 700 + spawned.length),
+    saveServer: (_file: any, s: any) => saved.push(s),
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    processKill: () => {},
+    spawnSyncImpl: () => ({}),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)(server)
+  expect(result.server!.port).toBe(4902)
+  expect(result.server!.password).not.toBe(spawned[1].password)
+  // the seen password was burned from server.json before the next candidate was tried
+  expect(saved).toContainEqual({ ...server, port: 4901, pid: null })
+})
+
+test('a walk that ends with every candidate rejecting leaves no seen password in server.json', async () => {
+  const saved: any[] = []
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unreachable' : 'unauthorized'),
+    spawnServer: () => 777,
+    saveServer: (_file: any, s: any) => saved.push(s),
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    processKill: () => {},
+    spawnSyncImpl: () => ({}),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)(server)
+  expect(result.ok).toBe(false)
+  expect(saved.at(-1).password).toBeUndefined()
+})
+
 // #202: an enforcement check that failed is no evidence the listener is ours. The password stops
 // going out for this pass but stays on disk, since it was never shown and the next pass asks again.
 test('adopting a healthy server whose enforcement check fails stops presenting the password but keeps it saved', async () => {
