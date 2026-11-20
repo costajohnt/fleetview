@@ -444,14 +444,34 @@ export async function runAnswer(
   // whose pending request is a question should say so rather than silently prompting the model
   // with the letter y. Oldest-first is peek's rule (the store sorts pending by asked-order); these
   // come straight off the endpoints, so ordering is the server's list order.
+  // #175: a failed read is not "nothing pending": y/a/d (permissions) or a number (questions) then
+  // has nothing trustworthy to go on, so it refuses rather than prompting the model with a bare
+  // letter or digit. Per list, so one failing endpoint doesn't block replies that only need the other.
+  // Cast, not an annotation: TS would narrow a plain `= null` and miss the assignments in the catches.
+  let permissionsFailed = null as Error | null
+  let questionsFailed = null as Error | null
   const [permissions, questions] = await Promise.all([
-    client.listPermissions(worktree).catch(() => []),
-    client.listQuestions(worktree).catch(() => []),
+    client.listPermissions(worktree).catch((e: unknown) => {
+      permissionsFailed = e instanceof Error ? e : new Error(String(e))
+      return []
+    }),
+    client.listQuestions(worktree).catch((e: unknown) => {
+      questionsFailed = e instanceof Error ? e : new Error(String(e))
+      return []
+    }),
   ])
   const permission = (permissions ?? []).filter((p) => p?.sessionID === session.id)[0]
   const question = (questions ?? []).filter((q) => q?.sessionID === session.id)[0]
+  const isPermissionReply = reply === 'y' || reply === 'a' || reply === 'd'
+  const isOptionPick = /^\d+$/.test(reply)
+  const failed = isPermissionReply ? permissionsFailed : isOptionPick ? questionsFailed : null
+  if (failed) {
+    error(`couldn't read pending ${isPermissionReply ? 'permissions' : 'questions'} on ${session.id}: ${stripControl(failed.message)}`)
+    setExitCode(1)
+    return
+  }
 
-  if (reply === 'y' || reply === 'a' || reply === 'd') {
+  if (isPermissionReply) {
     if (!permission) {
       error(question ? `${session.id} is waiting on a question, not a permission — answer it with an option number` : `nothing is waiting on ${session.id}`)
       setExitCode(1)
@@ -469,10 +489,14 @@ export async function runAnswer(
     return
   }
 
-  // A bare number is an option pick, but only when a question is actually waiting: "2" typed at a
-  // session with no pending question is far more likely to be a short reply than a mis-aimed pick,
-  // and prompting with it is recoverable where answering the wrong question is not.
-  if (/^\d+$/.test(reply) && question) {
+  // A bare number is always an option pick (#175): with no question waiting it refuses, since the
+  // model receiving "2" as an instruction is never what was meant.
+  if (isOptionPick) {
+    if (!question) {
+      error(permission ? `${session.id} is waiting on a permission, not a question — answer it with y/a/d` : `nothing is waiting on ${session.id}`)
+      setExitCode(1)
+      return
+    }
     const options = question.questions?.[0]?.options ?? []
     const option = options[Number(reply) - 1]
     if (!option) {
