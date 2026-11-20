@@ -424,6 +424,8 @@ test('#235 a title near the end of a large transcript, appended to, matches a co
   const h = home()
   const d = '/repo/alpha'
   const file = transcript(h, d, 'aaaa-1111', [
+    // No cwd until past the first read window, so the forward fold has to run to the real end.
+    { type: 'queue-operation', sessionId: 'aaaa-1111', note: 'q'.repeat(100_000) },
     record(d, 'aaaa-1111', { timestamp: '2026-01-02T03:04:05.000Z' }),
     ...pads(d, 'aaaa-1111', 7),
     { type: 'ai-title', aiTitle: 'Near the end', sessionId: 'aaaa-1111' },
