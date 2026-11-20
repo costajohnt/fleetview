@@ -1,0 +1,30 @@
+data: {"id":"evt_1f66db3cd001460IV7UoJmVztW","type":"server.connected","data":{}}
+
+: heartbeat
+
+data: {"id":"evt_1f66db7d6001CCidIrBbLfEVz6","created":1795135748054,"type":"session.created","location":{"directory":"/fv/repo"},"data":{"sessionID":"ses_e09924833ffeym6fKgnk261ATw","slug":"witty-forest","version":"2.3.2","projectID":"09beab53f3821cdc07e3e33ce21e6c03d20a4a6a","location":{"directory":"/fv/repo"},"subpath":""},"durable":{"aggregateID":"ses_e09924833ffeym6fKgnk261ATw","seq":0,"version":1}}
+
+data: {"id":"evt_1f66db81b001g6XAJ1utDG4fMr","created":1795135748123,"type":"session.created","location":{"directory":"/fv"},"data":{"sessionID":"ses_e099247e8ffeDhdud5GOTg1DX2","slug":"gentle-rocket","version":"2.3.2","projectID":"07441dd52f964f224d09818d54100bfb15b73300","location":{"directory":"/fv"},"subpath":""},"durable":{"aggregateID":"ses_e099247e8ffeDhdud5GOTg1DX2","seq":0,"version":1}}
+
+data: {"id":"evt_1f66db86c001ljRspl52U11NA6","created":1795135748204,"type":"session.created","location":{"directory":"/fv/repo-link"},"data":{"sessionID":"ses_e09924799ffebXftWJYmFb9q5k","slug":"quick-forest","version":"2.3.2","projectID":"09beab53f3821cdc07e3e33ce21e6c03d20a4a6a","location":{"directory":"/fv/repo-link"},"subpath":"../repo-link"},"durable":{"aggregateID":"ses_e09924799ffebXftWJYmFb9q5k","seq":0,"version":1}}
+
+data: {"id":"evt_1f66db8a20011TzVMeFwDKiFOC","created":1795135748258,"type":"session.renamed","data":{"sessionID":"ses_e09924833ffeym6fKgnk261ATw","title":"renamed"},"durable":{"aggregateID":"ses_e09924833ffeym6fKgnk261ATw","seq":1,"version":1}}
+
+data: {"id":"evt_1f66db8d4001gg4NWU8pgoG3Df","created":1795135748308,"type":"shell.created","location":{"directory":"/fv/repo"},"data":{"info":{"id":"sh_1f66db8c3001gJ8h0L7kdZVRD3","status":"running","command":"echo hi","cwd":"/fv/repo","shell":"/bin/zsh","file":"/fv/xdg2/data/opencode/shell/09beab53f3821cdc07e3e33ce21e6c03d20a4a6a/sh_1f66db8c3001gJ8h0L7kdZVRD3.out","metadata":{"sessionID":"ses_e09924833ffeym6fKgnk261ATw","background":true},"time":{"started":1795135748304},"pid":95213}}}
+
+data: {"id":"evt_1f66db8d5001v2OFGBUDmMRygE","created":1795135748309,"type":"session.shell.started","location":{"directory":"/fv/repo"},"data":{"sessionID":"ses_e09924833ffeym6fKgnk261ATw","shell":{"id":"sh_1f66db8c3001gJ8h0L7kdZVRD3","status":"running","command":"echo hi","cwd":"/fv/repo","shell":"/bin/zsh","file":"/fv/xdg2/data/opencode/shell/09beab53f3821cdc07e3e33ce21e6c03d20a4a6a/sh_1f66db8c3001gJ8h0L7kdZVRD3.out","metadata":{"sessionID":"ses_e09924833ffeym6fKgnk261ATw","background":true},"time":{"started":1795135748304},"pid":95213}},"durable":{"aggregateID":"ses_e09924833ffeym6fKgnk261ATw","seq":2,"version":1}}
+
+data: {"id":"evt_1f66db9590010BQt3ThNuMv5cc","created":1795135748441,"type":"shell.exited","location":{"directory":"/fv/repo"},"data":{"id":"sh_1f66db8c3001gJ8h0L7kdZVRD3","exit":0,"status":"exited"}}
+
+data: {"id":"evt_1f66db95b001DgzcQkAEnUrzu3","created":1795135748443,"type":"session.shell.ended","location":{"directory":"/fv/repo"},"data":{"sessionID":"ses_e09924833ffeym6fKgnk261ATw","shell":{"id":"sh_1f66db8c3001gJ8h0L7kdZVRD3","status":"exited","command":"echo hi","cwd":"/fv/repo","shell":"/bin/zsh","file":"/fv/xdg2/data/opencode/shell/09beab53f3821cdc07e3e33ce21e6c03d20a4a6a/sh_1f66db8c3001gJ8h0L7kdZVRD3.out","metadata":{"sessionID":"ses_e09924833ffeym6fKgnk261ATw","background":true},"time":{"started":1795135748304,"completed":1795135748440},"pid":95213,"exit":0},"output":{"output":"hi\n","cursor":3,"size":3,"truncated":false}},"durable":{"aggregateID":"ses_e09924833ffeym6fKgnk261ATw","seq":3,"version":1}}
+
+data: {"id":"evt_1f66db960001Tudi2hcDDzfyVT","created":1795135748448,"type":"session.inbox.enqueued","location":{"directory":"/fv/repo"},"data":{"inboxID":"msg_1f66db95f001Y7wQujitSaise6","sessionID":"ses_e09924833ffeym6fKgnk261ATw","item":{"type":"synthetic","delivery":"steer","payload":{"text":"The following shell command was executed by the user:\n<shell id=\"sh_1f66db8c3001gJ8h0L7kdZVRD3\" state=\"completed\" command=\"echo hi\">\nhi\n\n</shell>","metadata":{"source":"shell","shellID":"sh_1f66db8c3001gJ8h0L7kdZVRD3","state":"completed","truncated":false,"exit":0}}}},"durable":{"aggregateID":"ses_e09924833ffeym6fKgnk261ATw","seq":4,"version":1}}
+
+data: {"id":"evt_1f66dc54b001eqYMsXXjLCDFWZ","created":1795135751499,"type":"session.renamed","data":{"sessionID":"ses_e099247e8ffeDhdud5GOTg1DX2","title":"foreign renamed"},"durable":{"aggregateID":"ses_e099247e8ffeDhdud5GOTg1DX2","seq":1,"version":1}}
+
+data: {"id":"evt_1f66dc560001M1n75xybchCGwu","created":1795135751520,"type":"session.deleted","data":{"sessionID":"ses_e09924833ffeym6fKgnk261ATw"},"durable":{"aggregateID":"ses_e09924833ffeym6fKgnk261ATw","seq":5,"version":2}}
+
+data: {"id":"evt_1f66dc583001qcvj5vdS066jdS","created":1795135751555,"type":"session.deleted","data":{"sessionID":"ses_e099247e8ffeDhdud5GOTg1DX2"},"durable":{"aggregateID":"ses_e099247e8ffeDhdud5GOTg1DX2","seq":2,"version":2}}
+
+data: {"id":"evt_1f66dc599001xMnVOnY68vUY6P","created":1795135751577,"type":"session.deleted","data":{"sessionID":"ses_e09924799ffebXftWJYmFb9q5k"},"durable":{"aggregateID":"ses_e09924799ffebXftWJYmFb9q5k","seq":1,"version":2}}
+
