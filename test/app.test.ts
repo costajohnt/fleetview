@@ -4,7 +4,7 @@ import { tick, waitFor, WAIT_MS } from './helpers.ts'
 import type { RosterClient } from '../src/backends/opencode/client.ts'
 import { render as inkRender } from 'ink-testing-library'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { createLocalWorktree, gitKindOf, localWorktreeRoot } from '../src/worktree.ts'
@@ -3711,6 +3711,137 @@ test('a failed claude dispatch removes the worktree it made and hands the prompt
   expect(existsSync(directory)).toBe(false)
   expect(gitOut(repo, 'branch', '--list', 'fleetview/*')).toBe('')
   expect(lastFrame()).toContain('@claude fix the tests')
+})
+
+// #187 characterization: dispatch behaviours the single-dispatch refactor had to keep, each pinned
+// against the pre-refactor code as well.
+test('a dispatch onto a backend the registry does not hold is refused by name', async () => {
+  const deps = makeDeps()
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps) }, initialBackend: 'claude' }),
+  )
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('do a thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('no claude backend'))
+  expect(deps.client.createSession).not.toHaveBeenCalled()
+})
+
+test('with no project at all, each route says so in its own words', async () => {
+  for (const [initialBackend, said] of [['opencode', 'no opencode projects discovered yet'], ['claude', 'no projects discovered yet']]) {
+    const deps = makeDeps()
+    deps.client.listProjects = vi.fn(() => Promise.resolve([]))
+    deps.roster = { groupBy: 'state', sessions: [] }
+    const claude = fakeBackend('claude')
+    const { stdin, lastFrame, unmount } = render(
+      React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude }, initialBackend }),
+    )
+    await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+    await tick()
+    stdin.write('do a thing')
+    await tick()
+    stdin.write('\r')
+    await waitFor(() => lastFrame().includes(said))
+    expect(lastFrame()).toContain('do a thing') // refused before the input is cleared
+    expect(claude.dispatch).not.toHaveBeenCalled()
+    expect(deps.client.createSession).not.toHaveBeenCalled()
+    unmount()
+  }
+})
+
+test('a relist that fails after an opencode dispatch reports a stale list, not a failed dispatch', async () => {
+  const deps = makeDeps()
+  const list = deps.client.listSessions
+  deps.client.listSessions = vi.fn((dir: string) => (deps.client.promptAsync.mock.calls.length ? Promise.reject(new Error('GET /session → 500')) : list(dir)))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('do a thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('session started, but the project list is stale'))
+  expect(lastFrame()).not.toContain('do a thing█') // the prompt is not handed back for a second dispatch
+})
+
+test('a relist that fails after a claude dispatch reports a stale list and flags nothing offline', async () => {
+  const deps = makeDeps()
+  const claude = fakeBackend('claude')
+  claude.listSessions.mockImplementation(async () => {
+    if (claude.dispatch.mock.calls.length) throw new Error('unreadable state dir')
+    return []
+  })
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude }, initialBackend: 'claude' }),
+  )
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('do a thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('session started, but the project list is stale'))
+  stdin.write('\x02')
+  await waitFor(() => lastFrame().includes('alpha'))
+  expect(lastFrame()).not.toContain('offline')
+})
+
+test('a failed claude dispatch hands the prompt back without flagging the project offline', async () => {
+  const deps = makeDeps()
+  const claude = fakeBackend('claude')
+  claude.dispatch.mockImplementation(async () => {
+    throw new Error('spawn claude ENOENT')
+  })
+  const { stdin, lastFrame } = render(
+    React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude }, initialBackend: 'claude' }),
+  )
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('do a thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('claude dispatch failed'))
+  expect(lastFrame()).toContain('do a thing')
+  stdin.write('\x02')
+  await waitFor(() => lastFrame().includes('alpha'))
+  expect(lastFrame()).not.toContain('offline')
+})
+
+test('a stream failure on a worktree that was made still dispatches into it, with no isolation warning', async () => {
+  const { deps, wt } = isolatingDeps()
+  const list = deps.client.listSessions
+  let failed = false
+  deps.client.listSessions = vi.fn((dir: string) => {
+    // the first listing of the new worktree is the dispatch's own stream seed
+    if (dir === wt && !failed) {
+      failed = true
+      return Promise.reject(new Error('GET /session → 500'))
+    }
+    return list(dir)
+  })
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => deps.client.promptAsync.mock.calls.length > 0)
+  expect(failed).toBe(true)
+  expect(deps.client.createSession).toHaveBeenCalledWith(expect.anything(), wt)
+  await waitFor(() => lastFrame().includes('dispatched into alpha'))
+  expect(lastFrame()).not.toContain('not isolated')
+})
+
+test('a local worktree that cannot be made sends a claude dispatch into the checkout, with the reason', async () => {
+  const { deps, repo, root } = localRepoDeps()
+  // A file where the worktree root should be: `git worktree add` cannot create anything under it.
+  mkdirSync(join(root, '..'), { recursive: true })
+  writeFileSync(root, 'not a directory')
+  const claude = fakeBackend('claude')
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), backends: { opencode: opencodeStub(deps), claude } }))
+  await waitFor(() => deps.client.listProjects.mock.calls.length > 0)
+  await tick()
+  stdin.write('@claude fix the tests')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => claude.dispatch.mock.calls.length > 0)
+  expect((claude.dispatch.mock.calls as any)[0][0].directory).toBe(repo)
+  await waitFor(() => lastFrame().includes(`dispatched into ${basename(repo)} on claude — not isolated (worktree failed:`))
 })
 
 // A member left by an earlier dispatch: the worktree exists, the roster names its repo.

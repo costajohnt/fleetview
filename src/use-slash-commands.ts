@@ -70,7 +70,7 @@ export function useSlashCommands({
         try {
           const forked = await fork(row.id, row.projectKey)
           forkedId = forked.id
-          // The fork belongs to the backend that made it, tagged the way dispatchOnBackend tags a
+          // The fork belongs to the backend that made it, tagged the way a process-backend dispatch tags a
           // dispatch, so its later keys go to that adapter and not to opencode.
           const external = backend.name !== DEFAULT_BACKEND
           if (external) store.noteOrigin(row.projectKey, forked.id, backend.name)

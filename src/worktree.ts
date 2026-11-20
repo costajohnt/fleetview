@@ -186,7 +186,7 @@ export const localWorktreeRoot = () => join(process.env.XDG_DATA_HOME || join(ho
 const LOCAL_BRANCH_PREFIX = 'fleetview/'
 export const isLocalWorktree = (dir: string, root = localWorktreeRoot()) => dir.startsWith(root + sep)
 
-// Throws when git does: the caller falls back to the checkout and says so, as the opencode path does.
+// Throws when git does: the caller falls back to the checkout and says so, as with opencode's worktrees.
 export function createLocalWorktree(repo: string, prompt: string, root = localWorktreeRoot(), run = execFileSync) {
   const home = join(root, `${basename(repo) || 'repo'}-${createHash('sha256').update(repo).digest('hex').slice(0, 8)}`)
   let dirs: string[] = []

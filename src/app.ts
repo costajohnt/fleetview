@@ -749,7 +749,7 @@ export function App({
     text.replace(/\[Pasted text #(\d+)\]/g, (whole: string, n: string) => pastes.current[Number(n) - 1] ?? whole)
 
   // Where a dispatch lands: the repository the user named, else whatever pickTarget decides. Shared
-  // by both dispatch paths so an `@repo` token means the same thing on every backend.
+  // by every dispatch route so an `@repo` token means the same thing on every backend.
   const dispatchTarget = (repo?: string) => {
     const named = repo && repos.find((r) => r.name === repo)?.worktree
     // The repository the user asked for. `pickTarget` sees only repoProjects, so a bare dispatch
