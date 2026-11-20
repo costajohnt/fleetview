@@ -1,5 +1,6 @@
-import { readFileSync, renameSync } from 'node:fs'
-import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type { ServerRef } from './types.ts'
 import { atomicWrite, fleetviewDir } from './paths.ts'
@@ -115,4 +116,65 @@ export function saveServer(file: string, server: ServerRef) {
   // atomicWrite's dir re-tightening matters here (F6): server.json now holds the spawned server's
   // generated password, so this dir being 0700 is load-bearing.
   atomicWrite(file, JSON.stringify({ ...server, pid: server.pid ?? null }, null, 2))
+}
+
+// #213 F4: serialises "find no server, spawn one, record it" across fleetview processes. Whoever
+// creates `${file}.lock` holds it; `waited` tells the caller another process may have recorded a
+// server meanwhile. A spawn window (20 polls per port, up to 11 ports) has no useful fixed bound, so
+// the holder touches the lock while it works and a lock untouched for SERVER_LOCK_STALE_MS is a dead
+// holder's (crash, SIGKILL, reboot) and is broken. A lock that cannot be made at all (no dir, a
+// filesystem error) leaves the caller going ahead unlocked, the pre-#213 behaviour.
+// ponytail: like roster-store's lock, three waiters racing one stale lock can briefly both hold it.
+const SERVER_LOCK_STALE_MS = 15_000
+export async function withServerLock<T>(file: string, fn: (waited: boolean) => Promise<T>, onWait?: () => void): Promise<T> {
+  const lock = `${file}.lock`
+  let fd: number | null = null
+  let waited = false
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    for (;;) {
+      try {
+        fd = openSync(lock, 'wx', 0o600)
+        break
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') break
+      }
+      if (!waited) onWait?.()
+      waited = true
+      if (lockAge(lock) > SERVER_LOCK_STALE_MS) breakStaleLock(lock)
+      else await new Promise((r) => setTimeout(r, 100))
+    }
+  } catch {
+    // no dir to lock in: unlocked, as above
+  }
+  const beat = fd === null ? undefined : setInterval(() => { try { utimesSync(lock, new Date(), new Date()) } catch {} }, SERVER_LOCK_STALE_MS / 3)
+  beat?.unref()
+  try {
+    return await fn(waited)
+  } finally {
+    clearInterval(beat)
+    if (fd !== null) {
+      try { closeSync(fd) } catch {}
+      try { unlinkSync(lock) } catch {}
+    }
+  }
+}
+
+function lockAge(lock: string) {
+  try {
+    return Date.now() - statSync(lock).mtimeMs
+  } catch {
+    return 0 // gone or moved since the open failed: not stale, just retry
+  }
+}
+
+// Renamed aside rather than unlinked: two waiters that both saw it stale could otherwise each
+// unlink, the second deleting the fresh lock the first had just taken (same as roster-store).
+function breakStaleLock(lock: string) {
+  const aside = `${lock}.stale.${randomUUID()}`
+  try {
+    renameSync(lock, aside)
+    if (lockAge(aside) <= SERVER_LOCK_STALE_MS) try { linkSync(aside, lock) } catch {}
+    unlinkSync(aside)
+  } catch {}
 }

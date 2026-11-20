@@ -168,6 +168,59 @@ test('probeServer never reports unreachable once the password has been presented
   }
 })
 
+// #213: with an expected pid, 2.x's /api/info answer must name it (or its child, behind an npm
+// launcher) on every status, or the listener that just saw the password is not the expected server.
+test('probeServer matches the pid /api/info reports against the expected one', async () => {
+  const server = { host: '127.0.0.1', port: 4900, pid: 4242 }
+  const info = (status: number, body?: unknown) => () =>
+    Promise.resolve({ ok: status < 300, status, json: () => (body === undefined ? Promise.reject(new Error('no body')) : Promise.resolve(body)) })
+  const cases: [() => Promise<any>, string, number | null][] = [
+    [info(200, { version: '2.3.2', pid: 4242 }), 'healthy', null],
+    [info(200, { version: '2.3.2', pid: 5000 }), 'healthy', 4242], // the server under its launcher
+    [info(200, { version: '2.3.2', pid: 999 }), 'unauthorized', 1],
+    [info(503, { version: '2.3.2', pid: 4242 }), 'unconfirmed', null], // the expected server booting
+    [info(503, { version: '2.3.2', pid: 999 }), 'unauthorized', 1],
+    [info(500), 'unauthorized', null],
+    [() => Promise.reject(new Error('ECONNRESET')), 'unauthorized', null], // took the password and hung up
+  ]
+  for (const [authed, expected, parent] of cases) {
+    const fetchImpl = vi.fn((url: string, init: any) => {
+      if (url.endsWith('/project')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error('html')) })
+      if (!init.headers) return Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({ _tag: 'UnauthorizedError' }) })
+      return authed()
+    })
+    await withPassword('hunter2', async () => {
+      expect(await probeServer(server, fetchImpl as any, () => parent)).toBe(expected)
+    })
+  }
+})
+
+test('probeServer accepts the expected pid a few launcher levels up, not further', async () => {
+  const parents: Record<number, number> = { 5002: 5001, 5001: 5000, 5000: 4242, 6003: 6002, 6002: 6001, 6001: 6000, 6000: 4242 }
+  for (const [pid, expected] of [[5002, 'healthy'], [6003, 'unauthorized']] as const) {
+    const fetchImpl = vi.fn((url: string, init: any) => {
+      if (url.endsWith('/project')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error('html')) })
+      if (!init.headers) return Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({ _tag: 'UnauthorizedError' }) })
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: '2.3.2', pid }) })
+    })
+    await withPassword('hunter2', async () => {
+      expect(await probeServer({ host: '127.0.0.1', port: 4900, pid: 4242 }, fetchImpl as any, (p) => parents[p] ?? null)).toBe(expected)
+    })
+  }
+})
+
+// #213: a 2.x server never wants a credential on /project, so one known to be 2.x is not offered it
+// there; a listener answering as 1.x would otherwise get the password with no pid to check.
+test('probeServer does not offer a 2.x server\'s password on 1.x\'s route', async () => {
+  const fetchImpl = vi.fn((url: string, init: any) =>
+    Promise.resolve(url.endsWith('/project') ? { ok: false, status: 401, json: () => Promise.resolve({}) } : { ok: false, status: 404, json: () => Promise.resolve({}) }),
+  )
+  await withPassword('hunter2', async () => {
+    expect(await probeServer({ host: '127.0.0.1', port: 4900, pid: 4242, api: 2 }, fetchImpl as any)).toBe('unauthorized')
+  })
+  expect(fetchImpl.mock.calls.every((call: any) => !call[1].headers)).toBe(true)
+})
+
 test('probeServer reports unauthorized when the retried password is rejected too', async () => {
   const server = { host: '127.0.0.1', port: 4900 }
   const fetchImpl = vi.fn(() => Promise.resolve({ ok: false, status: 401 }))
