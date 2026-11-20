@@ -1686,6 +1686,17 @@ test('watch ignores other sessions on the same project stream', async () => {
   expect(h.out).toEqual(['mine'])
 })
 
+test('watch skips reasoning parts and prints only the reply (#174)', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_abc123', part: { type: 'reasoning', id: 'prt_r', text: 'The user wants me to count.' } } })
+  h.emit(part('1 2 3'))
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.out).toEqual(['1 2 3'])
+})
+
 test('a shorter text under the same key is a new part, printed whole', async () => {
   const h = watchHarness()
   const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)

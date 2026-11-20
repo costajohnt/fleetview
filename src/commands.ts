@@ -537,7 +537,8 @@ export async function runWatch(
         onEvent: (_directory, event) => {
           if (event.type === 'message.part.updated' && event.properties.sessionID === session.id) {
             const part = event.properties.part
-            const text = typeof part?.text === 'string' ? stripControl(part.text) : ''
+            // #174: 'reasoning' parts carry `.text` too; only 'text' parts are the reply (as in logs/peek).
+            const text = part?.type === 'text' && typeof part.text === 'string' ? stripControl(part.text) : ''
             if (!text) return
             // messageID rather than the part's own id: parts arrive keyed either way across
             // opencode versions, and a message id is the one field the Part type promises.
