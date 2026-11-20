@@ -189,6 +189,7 @@ test('lists sessions on start; Enter emits enter action with worktree', async ()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
   await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('\r')
+  await waitFor(() => onAction.mock.calls.length > 0) // #222: the attach starts after the commit that hides the roster
   expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'enter', sessionId: 's1', worktree: '/x/alpha' }))
 })
 
@@ -1259,6 +1260,7 @@ test('enter while peeking attaches the peeked session', async () => {
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('opencode:'))
   stdin.write('\r')
+  await waitFor(() => onAction.mock.calls.length > 0) // #222: the attach starts after the commit that hides the roster
   expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'enter', sessionId: 's1', worktree: '/x/alpha' }))
 })
 
@@ -2866,7 +2868,7 @@ test.each([
   stdin.write('fix the thing')
   await tick() // the input state must flush, or Enter sees an empty input and attaches instead
   stdin.write('\x1B\r') // alt+enter: dispatch and attach
-  await waitFor(() => lastFrame() === '')
+  await waitFor(() => lastFrame() === '' && detach)
   detach(settled)
   await waitFor(() => lastFrame().includes(warning))
   expect(lastFrame()).toContain('dispatched into alpha')
