@@ -77,7 +77,7 @@ export function useDispatch({
   input: string
   setInput: (value: string | ((current: string) => string)) => void
   flash: (message: string, ms?: number) => void
-  attach: (row: AttachTarget) => void
+  attach: (row: AttachTarget, notice?: string) => void
   expandPastes: (text: string) => string
   dispatchTarget: (repo?: string) => string | undefined
   addMember: (worktree: string, id: string, extra?: Record<string, unknown>) => void
@@ -310,17 +310,18 @@ export function useDispatch({
         selectedSessionRef.current = { projectKey: worktree, id: session.id }
         setSelectedKey(null)
       }
-      if (thenAttach) attach({ id: session.id, projectKey: worktree })
       // Names the repository: the worktree path is a hashed cache directory that means nothing to
       // the user, and the repository is what they actually chose. When isolation was expected and
       // did not happen, the row is editing the shared checkout — worth knowing before a second
-      // dispatch lands in the same place.
-      else if (!isolated && shouldIsolate(target, projects, parents)) {
-        // A worktree was wanted but the row edits the checkout — either isolation is off
-        // (FLEETVIEW_NO_ISOLATE, a deliberate choice) or the server couldn't make one (a warning).
-        const why = isolate ? notIsolated(refused) : 'isolation off, it edits the checkout'
-        flash(`dispatched into ${basename(target) || target} — ${why}`, 5000)
-      } else flash(`dispatched into ${basename(target) || target}`)
+      // dispatch lands in the same place. A worktree was wanted but the row edits the checkout —
+      // either isolation is off (FLEETVIEW_NO_ISOLATE, a deliberate choice) or the server couldn't
+      // make one (a warning).
+      const why = isolated || !shouldIsolate(target, projects, parents) ? '' : isolate ? notIsolated(refused) : 'isolation off, it edits the checkout'
+      // #204: an attach takes the screen, so the warning waits for the return to the roster rather
+      // than flashing unseen behind it. A plain confirmation isn't worth one there.
+      const said = `dispatched into ${basename(target) || target}${why ? ` — ${why}` : ''}`
+      if (thenAttach) attach({ id: session.id, projectKey: worktree }, why ? said : undefined)
+      else flash(said, why ? 5000 : undefined)
     } catch {
       // A removed worktree is a directory that no longer exists: the offline flag belongs on the
       // repository the user chose, which is the header they can see.
