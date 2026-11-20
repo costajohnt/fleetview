@@ -96,6 +96,12 @@ export type PersistRoster = ((snap: Roster) => void) & {
   // than a parse per call, and stamped after our own saves so a write of ours is never re-read as
   // someone else's change.
   reload: () => Roster | null
+  // #177: tell persist that members the caller just unioned into its state (from reload) are now
+  // this instance's own. Without it a synced member was never in prev, so a later ^x, ghost ^x or
+  // TTL clean of it looked like a foreign addition: the merge kept it and the next sync re-added it.
+  // Explicit rather than folded into reload, because prev must only ever hold what state holds: a
+  // member in prev but missing from a snapshot is deleted from disk.
+  adopt: (members: RosterSession[]) => void
 }
 
 // #106: makePersistRoster's read-merge-write is not atomic — two processes (a TUI and a
@@ -206,6 +212,10 @@ export function makePersistRoster({ roster, file }: { roster: Roster; file: stri
     // reload re-reads the file and the caller unions them in.
     if (!keptForeign) lastStamp = stamp()
   })
+  persist.adopt = (members: RosterSession[]) => {
+    const known = new Set(prev.sessions.map(memberKey))
+    prev = { ...prev, sessions: [...prev.sessions, ...members.filter((m) => !known.has(memberKey(m)))] }
+  }
   persist.reload = () => {
     const now = stamp()
     if (now === lastStamp) return null
