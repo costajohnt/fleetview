@@ -365,32 +365,38 @@ test('2.x: one directory stopping leaves the shared connection to the others', a
   expect(sessionsIn(got)).toEqual([MINE])
 })
 
-// A 2.x stream that sends `frames` once and then stays open until it is stopped.
-const heldOpen = (frames: string, listing: () => Promise<unknown>) =>
-  vi.fn((url: string) => {
+// A 2.x stream that stays open, sending whatever the test pushes.
+const pushedStream = (listing: () => Promise<unknown>) => {
+  let push!: (frame: object) => void
+  const fetchImpl = vi.fn((url: string) => {
     const path = new URL(url).pathname
     const json = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
     if (path === '/api/info') return json({ version: '2.3.2', pid: 1 })
     if (path === '/api/session') return listing()
     const body = (async function* () {
-      yield new TextEncoder().encode(frames)
-      await new Promise(() => {})
+      for (;;) yield new TextEncoder().encode(`data: ${JSON.stringify(await new Promise<object>((r) => (push = r)))}\n\n`)
     })()
     return Promise.resolve({ ok: true, status: 200, body })
   }) as any
+  return { fetchImpl, push: (frame: object) => push(frame) }
+}
 
-test('2.x: a directory whose listing fails goes offline alone, retries, and then gets the frames it missed', async () => {
+test('2.x: a directory whose listing fails goes offline alone and retries on the same stream', async () => {
   let calls = 0
   const listing = () => (calls++ === 0 ? Promise.reject(new Error('listing failed')) : Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('{"data":[]}') }))
-  const fetchImpl = heldOpen(transcript, listing)
+  const { fetchImpl, push } = pushedStream(listing)
   const events: any[] = []
   const seen: string[] = []
   const conn = connectEvents(
     { host: '127.0.0.1', port: 4808, directory: '/fv/repo' },
     { fetchImpl, onEvent: (_d, e) => events.push(e), onOnline: () => seen.push('online'), onOffline: () => seen.push('offline'), reconnect: true },
   )
-  await vi.waitFor(() => expect(sessionsIn(events)).toEqual([MINE]), { timeout: 5000 })
-  expect(seen).toEqual(['online', 'offline', 'online'])
+  await vi.waitFor(() => expect(seen).toEqual(['online']))
+  push({ type: 'server.connected', data: {} }) // first bytes: the seed is listed, and fails
+  await vi.waitFor(() => expect(seen).toEqual(['online', 'offline', 'online']), { timeout: 5000 })
+  await vi.waitFor(() => expect(calls).toBe(2))
+  push({ type: 'session.renamed', created: 1, location: { directory: '/fv/repo' }, data: { sessionID: 'ses_x', title: 'after' } })
+  await vi.waitFor(() => expect(events).toEqual([{ type: 'session.updated', properties: { info: { id: 'ses_x', title: 'after', time: { updated: 1 } } } }]))
   expect(fetchImpl.mock.calls.filter(([u]: [string]) => u.includes('/api/event'))).toHaveLength(1) // the stream itself never dropped
   conn.stop()
   await conn.done
