@@ -303,3 +303,19 @@ test('2.x: a recorded shell job reads as busy then idle', async () => {
   const statuses = (await replay('/fv/repo')).filter((e) => e.type === 'session.status').map((e) => [e.properties.sessionID, e.properties.status.type])
   expect(statuses).toEqual([[MINE, 'busy'], [MINE, 'idle']])
 })
+
+// A shell may overlap a model execution on 2.x; idle (which clears pending permissions) waits for both.
+test('2.x translator: a shell ending mid-execution, or an execution ending mid-shell, is not idle', () => {
+  const t = createV2Translator()
+  const status = (type: string) => t({ type, data: { sessionID: 's' } }).filter((e) => e.type === 'session.status').map((e: any) => e.properties.status.type)
+  expect(status('session.execution.started')).toEqual(['busy'])
+  expect(status('session.shell.started')).toEqual(['busy'])
+  expect(status('session.shell.ended')).toEqual([])
+  expect(status('session.execution.succeeded')).toEqual(['idle'])
+  expect(status('session.shell.started')).toEqual(['busy'])
+  expect(status('session.execution.started')).toEqual(['busy'])
+  expect(status('session.execution.failed')).toEqual([])
+  expect(status('session.shell.ended')).toEqual(['idle'])
+  // an end the translator never saw start (a reconnect) is still idle
+  expect(status('session.execution.succeeded')).toEqual(['idle'])
+})
