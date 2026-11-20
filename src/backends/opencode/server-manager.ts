@@ -105,9 +105,7 @@ async function askServer(
   }
 }
 
-// opencode 2.x's GET /api/info: {version, pid, urls, paths, ...} (opencode v2.3.2
-// packages/server/src/handlers/server.ts). Same bar-raising idea as isProjectList: the fields a
-// real server always sends, so a bare `{}` from any listener doesn't pass.
+// 2.x's own 401 body on /api/info (the same test opencodeApi in client.ts uses).
 async function isV2Unauthorized(res: Response): Promise<boolean> {
   try {
     const body = await res.json()
@@ -117,6 +115,9 @@ async function isV2Unauthorized(res: Response): Promise<boolean> {
   }
 }
 
+// opencode 2.x's GET /api/info: {version, pid, urls, paths, ...} (opencode v2.3.2
+// packages/server/src/handlers/server.ts). Same bar-raising idea as isProjectList: the fields a
+// real server always sends, so a bare `{}` from any listener doesn't pass.
 function isV2Info(body: unknown): boolean {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return false
   const info = body as Record<string, unknown>

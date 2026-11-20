@@ -60,7 +60,6 @@ export function openPrivateAppend(dir: string, file: string): number {
   return fd
 }
 
-
 // mkdir-chmod-tmp-rename-0600, the way every state file is written:
 // - mkdir's `mode` only applies when it creates the dir, so a pre-existing one keeps whatever perms
 //   it had — re-tighten on every write. Best-effort: a dir we can't chmod is no reason to fail the

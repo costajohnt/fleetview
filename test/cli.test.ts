@@ -1187,6 +1187,18 @@ test('#33: an empty or whitespace id matches nothing rather than every session',
   expect(client.listSessions).not.toHaveBeenCalled() // rejected before the server is asked anything
 })
 
+// #182: whatever matchSessions returns is printed by its callers (sent to, removed, the ambiguous
+// listing), so a server-supplied id or worktree carrying control bytes never comes out of it.
+test('matchSessions drops ids that fail SESSION_ID_RE and worktrees with control bytes', async () => {
+  const client = {
+    listSessions: vi.fn((dir) =>
+      Promise.resolve(dir === '/x/alpha' ? [{ id: 'ses_abc\x1b]52;c;aGk=\x07' }, { id: 'ses_abc1' }] : [{ id: 'ses_abc2' }]),
+    ),
+  }
+  expect(await matchSessions(client, projectsFor('/x/alpha', '/x/\nbeta'), 'ses_abc')).toEqual([{ session: { id: 'ses_abc1' }, worktree: '/x/alpha' }])
+  expect(client.listSessions).toHaveBeenCalledTimes(1)
+})
+
 test('#33: an id too short to resolve matches nothing', async () => {
   const client = { listSessions: vi.fn(() => Promise.resolve([{ id: 'ses_abc1' }, { id: 'ses_zzz2' }])) }
   expect(await matchSessions(client, projectsFor('/x/alpha'), 's')).toEqual([])

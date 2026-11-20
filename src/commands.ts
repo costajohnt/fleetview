@@ -21,6 +21,7 @@ import { sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdP
 import { stripControl } from './text-utils.ts'
 import type { ParsedArgs } from './cli-args.ts'
 import { isListedSession, isRecord } from './types.ts'
+import { SESSION_ID_RE } from './backends/session-id.ts'
 import type { Backend, ListedSession, Project, ServerRef } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { RosterSession as RosterMember } from './roster-store.ts'
@@ -209,6 +210,8 @@ export async function runBg(
 // deleted) an arbitrary one of the matches. Exported for tests.
 // Takes only the one method it calls, in method syntax, for the same reason RosterClient does: the
 // tests hand over a two-line fake and the real client satisfies it unchanged.
+const CONTROL = /[\x00-\x1f\x7f-\x9f]/
+
 export async function matchSessions(
   client: { listSessions(directory: string): Promise<unknown> },
   projects: { worktree: string }[],
@@ -218,13 +221,15 @@ export async function matchSessions(
   // caller, because prefix matching is what makes '' and 's' match every session on the server —
   // any future caller gets the guard for free. withSession says why before it gets this far.
   if (sessionIdProblem(id)) return []
-  const lists = await Promise.all(projects.map((p) => client.listSessions(p.worktree).catch(() => [])))
+  // #182: a worktree with control bytes is no real path, and every caller prints the ones it keeps.
+  const lists = await Promise.all(projects.map((p) => (CONTROL.test(p.worktree) ? [] : client.listSessions(p.worktree).catch(() => []))))
   const matches: { session: ListedSession; worktree: string }[] = []
   lists.forEach((sessions, i) => {
     // A listing is whatever the server sent, so both the array and each row go through a check
     // before an id is read off them — the same treatment every other wire payload gets.
     for (const session of Array.isArray(sessions) ? sessions : []) {
-      if (!isListedSession(session)) continue
+      // #182: and an id that fails SESSION_ID_RE is one every caller would print raw and attach refuses.
+      if (!isListedSession(session) || !SESSION_ID_RE.test(session.id)) continue
       if (session.id === id || session.id.startsWith(id)) matches.push({ session, worktree: projects[i].worktree })
     }
   })
