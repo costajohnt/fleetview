@@ -71,10 +71,19 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // opencode 1.x answers GET /project with its project list. 2.x serves its web app there (200
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl)
-  return v1 === 'unreachable' ? askServer(server, '/api/info', isV2Info, fetchImpl) : v1
+  // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
+  // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
+  // the password (the reason opencodeApi in client.ts asks this route credential-free).
+  return v1 === 'unreachable' ? askServer(server, '/api/info', isV2Info, fetchImpl, isV2Unauthorized) : v1
 }
 
-async function askServer(server: ServerRef, path: string, looksRight: (body: unknown) => boolean, fetchImpl: typeof fetch): Promise<ProbeState> {
+async function askServer(
+  server: ServerRef,
+  path: string,
+  looksRight: (body: unknown) => boolean,
+  fetchImpl: typeof fetch,
+  wantsCredential: (res: Response) => Promise<boolean> = async () => true,
+): Promise<ProbeState> {
   const url = `http://${server.host}:${server.port}${path}`
   let presented = false
   try {
@@ -87,7 +96,7 @@ async function askServer(server: ServerRef, path: string, looksRight: (body: unk
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(2000) })
     if (res.status !== 401) return (await answered(res, looksRight)) ? 'healthy' : 'unreachable'
     const auth = authHeader()
-    if (!auth) return 'unauthorized'
+    if (!auth || !(await wantsCredential(res))) return 'unauthorized'
     presented = true
     const authed = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
     // #202: the credential has now been shown. A 401 or a 2xx that isn't opencode is a rejection;
@@ -109,6 +118,16 @@ async function answered(res: Response, looksRight: (body: unknown) => boolean) {
 async function bodyLooksRight(res: Response, looksRight: (body: unknown) => boolean) {
   try {
     return looksRight(await res.json())
+  } catch {
+    return false
+  }
+}
+
+// 2.x's own 401 body on /api/info (the same test opencodeApi in client.ts uses).
+async function isV2Unauthorized(res: Response): Promise<boolean> {
+  try {
+    const body = await res.json()
+    return typeof body === 'object' && body !== null && (body as Record<string, unknown>)._tag === 'UnauthorizedError'
   } catch {
     return false
   }
@@ -160,11 +179,12 @@ export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.f
   try {
     // Either API refusing counts. 2.x serves /project (its web app) to anyone and enforces on /api,
     // so asking /project alone would call every 2.x server unprotected.
-    for (const path of ['/project', '/api/info']) {
-      const res = await fetchImpl(`http://${server.host}:${server.port}${path}`, { signal: AbortSignal.timeout(2000) })
-      if (res.status === 401) return true
-    }
-    return false
+    // On /api/info only 2.x's own 401 body counts: a 1.x without its embedded UI proxies that path to
+    // app.opencode.ai, whose 401 would otherwise hide an unprotected 1.x (same test as probeServer).
+    const base = `http://${server.host}:${server.port}`
+    if ((await fetchImpl(`${base}/project`, { signal: AbortSignal.timeout(2000) })).status === 401) return true
+    const info = await fetchImpl(`${base}/api/info`, { signal: AbortSignal.timeout(2000) })
+    return info.status === 401 && (await isV2Unauthorized(info))
   } catch {
     return null
   }

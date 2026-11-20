@@ -611,6 +611,35 @@ test('seen map prewarms done status on mount; persistSeen called with snapshot',
   expect(snap['/x/alpha:s1']).toEqual({ updated: 0, hasRun: true, stopped: false })
 })
 
+// #176: the first ^x stops, the second deletes. A first ^x on a finished row that is never confirmed
+// must leave its result alone, not relabel it `stopped` (persisted, and outranking done).
+test('a first ^x on a finished row does not relabel it stopped', async () => {
+  const deps = makeDeps()
+  deps.client.listSessions = vi.fn(() => Promise.resolve([{ id: 's1', title: 'fix tests', time: { updated: 0 } }]))
+  const persistSeen = vi.fn()
+  const seen = { '/x/alpha:s1': { updated: 0, hasRun: true } }
+  const { stdin, lastFrame, unmount } = render(React.createElement(App, { ...deps, onAction: vi.fn(), seen, persistSeen }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('\x18')
+  await waitFor(() => lastFrame().includes('stopped "fix tests"')) // the abort itself went through
+  unmount() // flushes the coalesced seen.json write
+  expect(persistSeen.mock.calls.at(-1)![0]['/x/alpha:s1']).toMatchObject({ hasRun: true, stopped: false })
+})
+
+test('a first ^x on a running row still records the stop', async () => {
+  const deps = makeDeps()
+  const persistSeen = vi.fn()
+  const { stdin, lastFrame, unmount } = render(React.createElement(App, { ...deps, onAction: vi.fn(), persistSeen }))
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  await waitFor(() => lastFrame().includes('1 working'))
+  stdin.write('\x18')
+  await waitFor(() => lastFrame().includes('stopped "fix tests"'))
+  unmount()
+  expect(persistSeen.mock.calls.at(-1)![0]['/x/alpha:s1']).toMatchObject({ stopped: true })
+})
+
 test('a mid-arm reorder cannot make the second ^x delete a different session than the one it armed', async () => {
   const deps = makeDeps()
   deps.client.listSessions = vi.fn(() =>
@@ -2733,6 +2762,28 @@ test('a worktree the server refuses to create falls back to the repository, and 
   expect(deps.client.createSession).toHaveBeenCalledWith(expect.anything(), '/x/alpha')
   // Said in the confirmation itself: a separate notice would be replaced by it milliseconds later.
   await waitFor(() => lastFrame().includes('not isolated'))
+})
+
+// #192: the fallback note said nothing about why, so a server too old for worktrees read the same as
+// one naming a directory fleetview refused. The reason rides the confirmation (one short, control-
+// free line) and lands whole in dispatch-debug.ndjson.
+test('#192: an isolation failure names its reason in the confirmation and the dispatch debug log', async () => {
+  const { deps } = isolatingDeps()
+  const marker = `m${Date.now()}`
+  deps.client.createWorktree = vi.fn(() =>
+    Promise.reject(new Error(`refusing worktree, not a new\x1b]0;evil\x07 worktree of /x/alpha:\n/srv/${marker}/${'z'.repeat(200)}`)),
+  )
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick() // the input state must flush, or Enter sees an empty input and attaches instead
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('not isolated (worktree failed: refusing worktree, not a new'))
+  expect(lastFrame()).not.toContain('z'.repeat(80)) // shortened, the full text is in the log
+  const logged = readFileSync(join(process.env.FLEETVIEW_STATE_DIR!, 'dispatch-debug.ndjson'), 'utf8')
+    .trim().split('\n').map((l) => JSON.parse(l)).find((l) => l.event === 'isolation-failed' && l.reason.includes(marker))
+  expect(logged).toMatchObject({ target: '/x/alpha' })
+  expect(logged.reason).toContain(`not a new]0;evil worktree of /x/alpha: /srv/${marker}/`) // control bytes and newline gone
 })
 
 // "Ctrl+X twice removes the worktree and uncommitted changes."

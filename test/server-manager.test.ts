@@ -47,6 +47,24 @@ test('isAuthEnforced is false when a password is set but the server answers anyw
   })
 })
 
+test('isAuthEnforced does not count a proxied 401 on /api/info that is not 2.x\'s own', async () => {
+  const fetchImpl = vi.fn((url: string) =>
+    Promise.resolve(url.endsWith('/project') ? { status: 200 } : { status: 401, json: () => Promise.resolve({ error: 'unauthorized' }) }),
+  )
+  await withPassword('hunter2', async () => {
+    expect(await isAuthEnforced({ host: '127.0.0.1', port: 4900 }, fetchImpl as any)).toBe(false)
+  })
+})
+
+test('isAuthEnforced counts 2.x\'s own 401 on /api/info', async () => {
+  const fetchImpl = vi.fn((url: string) =>
+    Promise.resolve(url.endsWith('/project') ? { status: 200 } : { status: 401, json: () => Promise.resolve({ _tag: 'UnauthorizedError' }) }),
+  )
+  await withPassword('hunter2', async () => {
+    expect(await isAuthEnforced({ host: '127.0.0.1', port: 4900 }, fetchImpl as any)).toBe(true)
+  })
+})
+
 // #202: a failed check is no evidence either way. Reading it as "enforced" let a listener that hung
 // this one request keep receiving the password.
 test('isAuthEnforced reports null, not true, on a network failure', async () => {
@@ -300,4 +318,34 @@ test('spawnServer closes the log descriptor it opened, and leaves a caller-suppl
   expect(closed).toHaveLength(1)
   expect(closed[0]).toBeTypeOf('number')
   expect(existsSync(join(dir, 'server.log'))).toBe(true) // the fd it closed was the log it opened
+})
+
+// #182: a 1.x without its embedded UI proxies /api/info, authorization header included, to
+// app.opencode.ai. Only 2.x's own UnauthorizedError earns the credential on that route.
+test('probeServer presents the password on /api/info only to a 401 that is 2.x\'s own', async () => {
+  const server = { host: '127.0.0.1', port: 4900 }
+  const asked = (unauthorized: unknown) =>
+    vi.fn((url: string) =>
+      url.endsWith('/project')
+        ? Promise.resolve({ ok: false, status: 404 })
+        : Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve(unauthorized) }),
+    )
+  const foreign = asked({ error: 'nope' })
+  await withPassword('hunter2', async () => {
+    expect(await probeServer(server, foreign as any)).toBe('unauthorized')
+  })
+  expect(foreign.mock.calls.every((c: any) => c[1].headers === undefined)).toBe(true)
+
+  // A password-protected 2.x still comes back healthy once the credential is presented.
+  const v2 = vi.fn((url: string, init: any) =>
+    url.endsWith('/project')
+      ? Promise.resolve({ ok: false, status: 404 })
+      : init.headers
+        ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: '2.3.2', pid: 1 }) })
+        : Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({ _tag: 'UnauthorizedError' }) }),
+  )
+  await withPassword('hunter2', async () => {
+    expect(await probeServer(server, v2 as any)).toBe('healthy')
+  })
+  expect(v2).toHaveBeenLastCalledWith('http://127.0.0.1:4900/api/info', expect.objectContaining({ headers: { authorization: expect.any(String) } }))
 })

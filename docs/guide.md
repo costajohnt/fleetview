@@ -268,8 +268,9 @@ worktree, and the rows show under the repository like opencode's.
 
 Three cases skip isolation, matching agent view: a directory that isn't a git repository, one
 that is already a linked worktree, and a worktree that could not be made (a server with no
-worktree support, or `git worktree add` failing). The last says `not isolated, it edits the
-checkout` on the dispatch line rather than failing.
+worktree support, or `git worktree add` failing). The last says `not isolated (worktree failed:
+<reason>), it edits the checkout` on the dispatch line rather than failing, and the full reason is
+appended to `~/.local/state/fleetview/dispatch-debug.ndjson`.
 
 To turn isolation off entirely — a single-session flow, or a build that depends on paths in the
 main working tree — set `FLEETVIEW_NO_ISOLATE=1`. Every dispatch then edits the checkout directly

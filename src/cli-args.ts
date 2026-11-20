@@ -1,4 +1,5 @@
 import { resolve } from 'node:path'
+import { stripControl } from './text-utils.ts'
 
 // Agent view has a shell surface next to the view itself — `claude agents --cwd/--json`, and
 // `attach`, `logs`, `stop`, `rm` as subcommands. fleetview took no arguments at all, which made the
@@ -298,5 +299,6 @@ export function underCwd(path: string, cwd?: string): boolean {
   return path === root || path.startsWith(`${root}/`)
 }
 
+// Ids and titles are server- or session-supplied and go to raw stdout: no control bytes, one line.
 export const formatRow = (row: { id: string; state: string; name?: string; summary?: string }): string =>
-  [row.id, row.state.padEnd(8), row.name ?? '', row.summary ? `— ${row.summary}` : ''].filter(Boolean).join('  ')
+  stripControl([row.id, row.state.padEnd(8), row.name ?? '', row.summary ? `— ${row.summary}` : ''].filter(Boolean).join('  ')).replace(/\n/g, ' ')
