@@ -1,4 +1,5 @@
 import { test, expect, vi } from 'vitest'
+import { waitForExpect } from './helpers.ts'
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, readdirSync, renameSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -383,12 +384,12 @@ test('events tails a dispatched run’s log, emitting only what was appended sin
   const sub = b.events({ directory: '/repo/alpha' }, { onEvent, onOnline })
   try {
     appendFileSync(log, JSON.stringify({ type: 'system', subtype: 'init', session_id: ref.id }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     expect(onEvent).toHaveBeenCalledWith('/repo/alpha', { type: 'system', subtype: 'init', session_id: ref.id })
     // Written in two pieces so the poll that reads the first half has to buffer the partial line.
     appendFileSync(log, '{"type":"assistant","mess')
     appendFileSync(log, 'age":{"content":[{"type":"text","text":"hello"}]}}\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(2))
     expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', { type: 'assistant', message: { content: [{ type: 'text', text: 'hello' }] } })
   } finally {
     sub.stop()
@@ -412,13 +413,13 @@ test('a multi-byte character split across two polls survives', async () => {
   try {
     // A complete line first, so its event proves the reader is polling and caught up.
     appendFileSync(log, JSON.stringify({ type: 'system', subtype: 'marker' }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     appendFileSync(log, line.subarray(0, split))
     // Long enough for several polls: the halves have to land in separate reads, or the decoder is
     // never asked the question this test exists for.
     await new Promise((r) => setTimeout(r, pollMs * 5))
     appendFileSync(log, line.subarray(split))
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(2))
     expect(onEvent.mock.calls.at(-1)?.[1]).toEqual({ type: 'assistant', message: { content: [{ type: 'text', text: 'done — 3 tests → green' }] } })
   } finally {
     sub.stop()
@@ -438,11 +439,11 @@ test('a file rewritten shorter is re-read from the start rather than going silen
   const sub = b.events({ directory: '/repo/alpha' }, { onEvent })
   try {
     appendFileSync(log, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'a long first answer that the rewrite will replace' }] } }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     writeFileSync(log, JSON.stringify({ type: 'system', subtype: 'compacted' }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', { type: 'system', subtype: 'compacted' }))
+    await waitForExpect(() => expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', { type: 'system', subtype: 'compacted' }))
     appendFileSync(log, JSON.stringify({ type: 'result', subtype: 'success', session_id: ref.id }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', { type: 'result', subtype: 'success', session_id: ref.id }))
+    await waitForExpect(() => expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', { type: 'result', subtype: 'success', session_id: ref.id }))
   } finally {
     sub.stop()
     await sub.done
@@ -463,14 +464,14 @@ test('a file replaced by a LARGER rename-over is re-read from the start, not fro
   const sub = b.events({ directory: '/repo/alpha' }, { onEvent })
   try {
     appendFileSync(log, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'the answer the rewrite replaces' }] } }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     // Padded so the replacement is comfortably larger than what it replaces.
     const rewritten = { type: 'system', subtype: 'rewritten', pad: 'x'.repeat(500) }
     writeFileSync(`${log}.new`, JSON.stringify(rewritten) + '\n')
     renameSync(`${log}.new`, log)
     // The first line of the new file is only reachable from offset 0 — reading it at all is the
     // proof the cursor reset, and it is what a stale offset would have skipped.
-    await vi.waitFor(() => expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', rewritten))
+    await waitForExpect(() => expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', rewritten))
     expect(onEvent).toHaveBeenCalledTimes(2) // nothing decoded from the middle of a line in between
   } finally {
     sub.stop()
@@ -487,7 +488,7 @@ test('events ignores runs belonging to another directory', async () => {
   const onEvent = vi.fn()
   const sub = b.events({ directory: '/repo/alpha' }, { onEvent })
   try {
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
     expect(onEvent.mock.calls.map(([, e]: any) => e.session_id)).toEqual([alpha.id])
   } finally {
     sub.stop()
@@ -504,9 +505,9 @@ test('events tails a discovered session’s transcript, so a hand-started sessio
   const onEvent = vi.fn()
   const sub = b.events({ directory: '/repo/alpha' }, { onEvent })
   try {
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     appendFileSync(file, JSON.stringify({ type: 'assistant', cwd: '/repo/alpha', message: { content: [{ type: 'text', text: '17 passed' }] } }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(2))
     // Tagged so the normaliser seeds it 'idle' rather than 'working': a transcript has no `result`,
     // so a session read out of one can never move off its seed (run lines above are untagged).
     expect(onEvent.mock.calls.at(-1)?.[1]).toMatchObject({ type: 'assistant', __source: 'transcript', message: { content: [{ type: 'text', text: '17 passed' }] } })
@@ -527,7 +528,7 @@ test('a dispatched session is tailed from its captured stream only, never twice'
   const onEvent = vi.fn()
   const sub = b.events({ directory: '/repo/alpha' }, { onEvent })
   try {
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
     await new Promise((r) => setTimeout(r, pollMs * 5)) // give a duplicate every chance to arrive
     expect(onEvent).toHaveBeenCalledTimes(1)
   } finally {
@@ -547,7 +548,7 @@ test('events survives an absent run directory and picks up a run that appears la
   try {
     const ref = await b.dispatch({ prompt: 'fix the flake', directory: '/repo/alpha' })
     appendFileSync(join(runDir, `${ref.id}.jsonl`), JSON.stringify({ type: 'result', subtype: 'success' }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledWith('/repo/alpha', { type: 'result', subtype: 'success' }))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledWith('/repo/alpha', { type: 'result', subtype: 'success' }))
   } finally {
     sub.stop()
     await sub.done
@@ -598,7 +599,7 @@ test('a cursor whose session vanished is pruned, so the log is re-read from the 
   const sub = b.events({ directory: '/repo/alpha' }, { onEvent })
   try {
     appendFileSync(log, JSON.stringify({ type: 'system', subtype: 'init', session_id: ref.id }) + '\n')
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     // The meta is what makes the run visible to the poll; hiding it simulates a reaped run. The log
     // itself stays put, so its inode and size never change — a surviving cursor would resume at the
     // old offset and stay silent forever.
@@ -606,7 +607,7 @@ test('a cursor whose session vanished is pruned, so the log is re-read from the 
     await new Promise((r) => setTimeout(r, pollMs * 5)) // several polls with the session invisible
     renameSync(`${meta}.hidden`, meta)
     // The same line again is only reachable from offset zero: a fresh cursor, which is the prune.
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(2))
     expect(onEvent).toHaveBeenLastCalledWith('/repo/alpha', { type: 'system', subtype: 'init', session_id: ref.id })
   } finally {
     sub.stop()

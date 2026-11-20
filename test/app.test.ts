@@ -1,6 +1,7 @@
 import React from 'react'
 import { test, expect, vi, afterEach } from 'vitest'
-import { tick, waitFor } from './helpers.ts'
+import { tick, waitFor, WAIT_MS } from './helpers.ts'
+import type { RosterClient } from '../src/backends/opencode/client.ts'
 import { render as inkRender } from 'ink-testing-library'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
@@ -70,7 +71,16 @@ function makeDeps(): any {
     listQuestions: vi.fn(() => Promise.resolve([])),
     abortSession: vi.fn(() => Promise.resolve({})),
     respondPermission: vi.fn(() => Promise.resolve({})),
-  }
+    forkSession: vi.fn(() => Promise.resolve({ id: 's10' })),
+    runShell: vi.fn(() => Promise.resolve({})),
+    respondQuestion: vi.fn(() => Promise.resolve({})),
+    // #185: the project is `vcs: 'git'`, so every dispatch tries to isolate. Without these the
+    // missing method threw a TypeError into use-dispatch's isolation catch. A null worktree is now
+    // a deliberate refusal: default-fixture dispatches take the "not isolated (worktree failed)"
+    // path and run in the repository. Tests about isolation itself use isolatingDeps below.
+    listWorktrees: vi.fn(() => Promise.resolve([])),
+    createWorktree: vi.fn(() => Promise.resolve(null)),
+  } satisfies RosterClient
   return {
     server,
     client,
@@ -92,7 +102,7 @@ function makeDeps(): any {
 // click-after-detach test unpinnable) — a retry makes the tests version-proof without hiding a
 // real regression: a broken handler never satisfies the condition no matter how often the key
 // lands, and every use sends a key whose repeat is idempotent for what the test asserts.
-const pressUntil = async (stdin: any, key: string, fn: () => any, timeoutMs = 3000) => {
+const pressUntil = async (stdin: any, key: string, fn: () => any, timeoutMs = WAIT_MS) => {
   const start = Date.now()
   for (;;) {
     stdin.write(key)
