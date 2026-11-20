@@ -2735,6 +2735,28 @@ test('a worktree the server refuses to create falls back to the repository, and 
   await waitFor(() => lastFrame().includes('not isolated'))
 })
 
+// #192: the fallback note said nothing about why, so a server too old for worktrees read the same as
+// one naming a directory fleetview refused. The reason rides the confirmation (one short, control-
+// free line) and lands whole in dispatch-debug.ndjson.
+test('#192: an isolation failure names its reason in the confirmation and the dispatch debug log', async () => {
+  const { deps } = isolatingDeps()
+  const marker = `m${Date.now()}`
+  deps.client.createWorktree = vi.fn(() =>
+    Promise.reject(new Error(`refusing worktree, not a new\x1b]0;evil\x07 worktree of /x/alpha:\n/srv/${marker}/${'z'.repeat(200)}`)),
+  )
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick() // the input state must flush, or Enter sees an empty input and attaches instead
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('not isolated (worktree failed: refusing worktree, not a new'))
+  expect(lastFrame()).not.toContain('z'.repeat(80)) // shortened, the full text is in the log
+  const logged = readFileSync(join(process.env.FLEETVIEW_STATE_DIR!, 'dispatch-debug.ndjson'), 'utf8')
+    .trim().split('\n').map((l) => JSON.parse(l)).find((l) => l.event === 'isolation-failed' && l.reason.includes(marker))
+  expect(logged).toMatchObject({ target: '/x/alpha' })
+  expect(logged.reason).toContain(`not a new]0;evil worktree of /x/alpha: /srv/${marker}/`) // control bytes and newline gone
+})
+
 // "Ctrl+X twice removes the worktree and uncommitted changes."
 test('deleting an isolated session removes its worktree when nothing would be lost', async () => {
   const { deps, wt } = isolatingDeps()

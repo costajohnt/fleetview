@@ -13,8 +13,9 @@
 [36m⌥1..9    [39m [2mwhile attached, jump to that row (best-effort; see FLEETVIEW_NO_ALT_SWITCH)[22m
 [36m←        [39m [2mwhile attached, back on empty prompt (opencode app_exit keybind, see docs/guide.md)[22m
 [36m^s       [39m [2mswitch grouping between state and project[22m
-[36m^r       [39m [2mrename the selected session[22m
+[36m^r       [39m [2mrename the selected session (^u clears the name, ^w drops a word)[22m
 [36m^x       [39m [2mstop the session; press again within 2s to delete it[22m
+[36m^x^x     [39m [2mon a group header: delete every session in that group[22m
 [36mesc      [39m [2mclose peek, clear the input, or quit when there is nothing to clear[22m
 [36mtab      [39m [2mapply the highlighted @ or / suggestion[22m
 [36m^j       [39m [2minsert a newline in the prompt instead of dispatching[22m
@@ -26,5 +27,4 @@
 [36m@agent   [39m [2mrun the session as that subagent (also works as the first word)[22m
 [36m@backend [39m [2mdispatch on a backend — @claude, @copilot (a subagent or repo of the same name wins)[22m
 [36m/command [39m [2mrun one of opencode's commands as the session's first prompt[22m
-[36m! cmd    [39m [2mrun a shell command as a job instead of starting a session[22m
 [2many key to close · ↓ more (1/2)[22m

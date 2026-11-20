@@ -1,6 +1,7 @@
 import { test, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer } from '../src/backends/opencode/server-manager.ts'
+import { serverHome } from '../src/backends/opencode/client-v2.ts'
 import { homedir, tmpdir } from 'node:os'
 import { mkdtempSync, existsSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
@@ -53,7 +54,7 @@ test('isAuthEnforced does not nag on a transient network failure', async () => {
   })
 })
 
-test('spawnServer runs opencode serve detached from the home directory', () => {
+test('spawnServer runs opencode serve detached from its own empty directory, not ~ (#172)', () => {
   const child = { pid: 999, unref: vi.fn(), on: vi.fn() }
   const spawnImpl = vi.fn(() => child)
   const server = { host: '127.0.0.1', port: 4900 }
@@ -62,8 +63,10 @@ test('spawnServer runs opencode serve detached from the home directory', () => {
   expect(spawnImpl).toHaveBeenCalledWith(
     'opencode',
     ['serve', '--port', '4900', '--hostname', '127.0.0.1'],
-    expect.objectContaining({ cwd: homedir(), detached: true, stdio: ['ignore', 'ignore', 'ignore'] }),
+    expect.objectContaining({ cwd: serverHome(), detached: true, stdio: ['ignore', 'ignore', 'ignore'] }),
   )
+  expect(serverHome()).not.toBe(homedir())
+  expect(existsSync(serverHome())).toBe(true)
   expect(child.unref).toHaveBeenCalled()
 })
 
