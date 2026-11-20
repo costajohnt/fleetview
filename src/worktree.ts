@@ -139,15 +139,16 @@ export function worktreeName(prompt: string, existing: string[] = []) {
 // (prompt, chosen name, taken slots) to a local NDJSON file so the next occurrence self-documents.
 // Best-effort by design: a debug log must never cost anyone their dispatch.
 export function logNameCollision(entry: { prompt: string; name: string; existing: string[] }) {
+  // The prompt is capped: this is a lookup key for the bug, not an archive of pasted walls.
+  logDispatchDebug({ ...entry, prompt: entry.prompt.slice(0, 200) })
+}
+
+// The same file, for any dispatch evidence (#192 logs why isolation fell back here too).
+export function logDispatchDebug(entry: Record<string, unknown>) {
   try {
     const dir = (process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? fleetviewDir(join(homedir(), '.local', 'state'))
     mkdirSync(dir, { recursive: true, mode: 0o700 })
-    appendFileSync(
-      join(dir, 'dispatch-debug.ndjson'),
-      // The prompt is capped: this is a lookup key for the bug, not an archive of pasted walls.
-      `${JSON.stringify({ ts: new Date().toISOString(), ...entry, prompt: entry.prompt.slice(0, 200) })}\n`,
-      { mode: 0o600 },
-    )
+    appendFileSync(join(dir, 'dispatch-debug.ndjson'), `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 })
   } catch {}
 }
 
