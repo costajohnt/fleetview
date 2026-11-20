@@ -1,6 +1,7 @@
-import { test, expect, vi } from 'vitest'
+import { beforeEach, test, expect, vi } from 'vitest'
 import { waitForExpect } from './helpers.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
+import { noteOpencodeApi, resetOpencodeApiMemo } from '../src/backends/opencode/client.ts'
 
 const server = { host: '127.0.0.1', port: 4900 }
 // Only the methods the adapter is allowed to reach for: a fake that grew every OpencodeClient method
@@ -12,6 +13,12 @@ const fakeClient = () => ({
   abortSession: vi.fn(() => Promise.resolve(null)),
   renameSession: vi.fn(() => Promise.resolve(null)),
   deleteSession: vi.fn(() => Promise.resolve(null)),
+})
+
+// As probeServer leaves it for a 1.x server; attach reads the probed API.
+beforeEach(() => {
+  resetOpencodeApiMemo()
+  noteOpencodeApi('http://127.0.0.1:4900', 1)
 })
 
 const backend = (client: any = fakeClient(), fetchImpl?: any) => createOpencodeBackend({ server, client, fetchImpl })
@@ -89,4 +96,12 @@ test('attach refuses a session id with flag syntax or control bytes', () => {
 test('1.x attach refuses a directory that is not absolute', () => {
   expect(() => backend().attach({ id: 's1', directory: '--help' })).toThrow(/non-absolute directory/)
   expect(() => backend().attach({ id: 's1', directory: 'rel/dir' })).toThrow(/non-absolute directory/)
+})
+
+// #186: the API comes from the probe, and a server nothing probed gets no guessed 1.x argv.
+test('attach follows the probed API, and refuses a server that was never probed', () => {
+  noteOpencodeApi('http://127.0.0.1:4900', 2)
+  expect(backend().attach({ id: 's1', directory: '/x/alpha' })).toEqual(['opencode', '--server', 'http://127.0.0.1:4900', '-s', 's1', '/x/alpha'])
+  resetOpencodeApiMemo()
+  expect(() => backend().attach({ id: 's1', directory: '/x/alpha' })).toThrow(/not been probed/)
 })

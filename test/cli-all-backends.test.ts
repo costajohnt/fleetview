@@ -6,11 +6,14 @@ import { listSessions, runAttach, runLogs, runRm, runStatus, runStop } from '../
 import { createClaudeBackend } from '../src/backends/claude/index.ts'
 import { encodeProjectDir } from '../src/backends/claude/projects.ts'
 import { OPENCODE_MISSING } from '../src/backends/opencode/server-manager.ts'
+import { noteOpencodeApi } from '../src/backends/opencode/client.ts'
 
 // M10: the shell commands see every backend, not only opencode. claude is the real adapter over a
 // fake ~/.claude (so discovery is the same code the roster runs); opencode is a fake client.
 const CLAUDE_ID = 'c1a0de00-0000-4000-8000-000000000001'
 const server = { host: '127.0.0.1', port: 4900 }
+// What the real ensureServer's probe records; the fake one below probes nothing.
+noteOpencodeApi('http://127.0.0.1:4900', 1)
 
 function setup({ opencodeUp = true, opencodeSessions = [{ id: 'ses_open1', title: 'opencode work', time: { created: 1, updated: 3000 } }] as any[] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'fleetview-all-home-'))
