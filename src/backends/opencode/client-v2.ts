@@ -125,9 +125,12 @@ export function v1Messages(rows: Record<string, unknown>[]): OpencodeMessage[] {
       )
       out.push({ info: { id, role: 'assistant', ...(m.error ? { error: v1Error(m.error) } : {}) }, parts })
     } else if (m.type === 'shell') {
-      // A job with no output yet would render as an empty `opencode:` label.
+      // A running job with no output yet would render as an empty `opencode:` label; a finished one
+      // says so, or `! false` would leave no trace. Cut-off output says it was cut.
       const output = isRecord(m.output) ? asString(m.output.output) : undefined
-      if (output) out.push({ info: { id, role: 'assistant' }, parts: [toolPart(output, id)] })
+      const cut = isRecord(m.output) && m.output.truncated === true ? '\n(output truncated)' : ''
+      if (output?.trim()) out.push({ info: { id, role: 'assistant' }, parts: [toolPart(output + cut, id)] })
+      else if (typeof m.status === 'string' && m.status !== 'running') out.push({ info: { id, role: 'assistant' }, parts: [toolPart(`(${m.status}, no output)`, id)] })
     } else if (m.type === 'idle' && m.outcome === 'failed' && m.error) out.push({ info: { id, role: 'assistant', error: v1Error(m.error) }, parts: [] })
   }
   return out

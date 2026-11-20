@@ -234,11 +234,15 @@ test('2.x shell jobs and tool-only turns render their output', () => {
   const rows = [
     { id: 'msg_1', type: 'shell', command: 'sleep 4; echo shellhi', status: 'exited', output: { output: 'shellhi\n', cursor: 8, size: 8, truncated: false } },
     { id: 'msg_2', type: 'shell', command: 'sleep 9', status: 'running' },
+    { id: 'msg_2b', type: 'shell', command: 'echo; false', status: 'exited', output: { output: '\n' } },
+    { id: 'msg_2c', type: 'shell', command: 'yes', status: 'exited', output: { output: 'y\n', truncated: true } },
     { id: 'msg_3', type: 'assistant', content: [{ type: 'reasoning', text: 'ask' }, { type: 'tool', name: 'question', state: { status: 'completed', content: [{ type: 'text', text: 'User has answered your questions: "Which color?"="blue".' }] } }] },
     { id: 'msg_4', type: 'assistant', content: [{ type: 'text', text: 'blue it is' }, { type: 'tool', name: 'read', state: { status: 'completed', content: [{ type: 'text', text: 'file contents' }] } }] },
   ]
   expect(v1Messages(rows).map((m) => [m.info?.role, messageBody(m)])).toEqual([
     ['assistant', 'shellhi\n'],
+    ['assistant', '(exited, no output)'],
+    ['assistant', 'y\n\n(output truncated)'],
     ['assistant', 'User has answered your questions: "Which color?"="blue".'],
     ['assistant', 'blue it is'],
   ])
