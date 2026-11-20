@@ -1602,12 +1602,44 @@ test('an out-of-range option lists the real ones instead of answering', async ()
   expect(h.client.respondQuestion).not.toHaveBeenCalled()
 })
 
-// A digit is only an option pick when a question is actually waiting — otherwise it is a short reply.
-test('a number with no question waiting is sent as text', async () => {
+// #175: a bare number is always an option pick; with no question waiting it refuses instead of
+// prompting the model with "2".
+test('a number with no question waiting refuses rather than sending a stray prompt', async () => {
   const h = answerHarness()
   await runAnswer({ command: 'answer', id: 'ses_abc1', reply: '2' }, h.deps)
-  expect(h.client.promptAsync).toHaveBeenCalledWith('ses_abc123', '2', '/x/repo')
-  expect(h.out).toEqual(['sent to ses_abc123'])
+  expect(h.errs).toEqual(['nothing is waiting on ses_abc123'])
+  expect(h.codes).toEqual([1])
+  expect(h.client.promptAsync).not.toHaveBeenCalled()
+})
+
+test('a number on a session waiting for a permission points at y/a/d', async () => {
+  const h = answerHarness({ permissions: [pendingPermission] })
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: '1' }, h.deps)
+  expect(h.errs[0]).toMatch(/waiting on a permission/)
+  expect(h.codes).toEqual([1])
+  expect(h.client.respondPermission).not.toHaveBeenCalled()
+  expect(h.client.promptAsync).not.toHaveBeenCalled()
+})
+
+// #175: an unreadable /question or /permission is not "nothing pending" — a pick or y/a/d refuses.
+test('a failed pending-request read refuses a number or y/a/d instead of prompting with it', async () => {
+  for (const [reply, failing] of [['2', 'listQuestions'], ['y', 'listPermissions']]) {
+    const h = answerHarness({ questions: [pendingQuestion] })
+    h.client[failing as 'listQuestions'] = vi.fn(() => Promise.reject(new Error('503')))
+    await runAnswer({ command: 'answer', id: 'ses_abc1', reply }, h.deps)
+    expect(h.errs).toEqual(["couldn't read pending requests on ses_abc123"])
+    expect(h.codes).toEqual([1])
+    expect(h.client.promptAsync).not.toHaveBeenCalled()
+    expect(h.client.respondQuestion).not.toHaveBeenCalled()
+  }
+})
+
+test('free text still sends when the pending-request read fails', async () => {
+  const h = answerHarness()
+  h.client.listQuestions = vi.fn(() => Promise.reject(new Error('503')))
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'use the other branch' }, h.deps)
+  expect(h.client.promptAsync).toHaveBeenCalledWith('ses_abc123', 'use the other branch', '/x/repo')
+  expect(h.codes).toEqual([])
 })
 
 test('anything else is sent as a follow-up prompt', async () => {
