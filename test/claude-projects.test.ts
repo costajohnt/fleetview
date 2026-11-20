@@ -288,10 +288,12 @@ test('meta, sidechain, injected and non-human records, unknown types and malform
       userText('subagent prompt', { isSidechain: true }),
       asst('s1', { type: 'text', text: 'subagent reply' }, { isSidechain: true }),
       userText('summary of the session so far', { isCompactSummary: true }),
-      userText('<command-name>/clear</command-name>'),
+      userText('<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>', { isMeta: true }),
       userText('<local-command-stdout>done</local-command-stdout>'),
       userText('<task-notification>finished</task-notification>', { origin: { kind: 'task-notification' } }),
       userText('a peer said hi', { origin: { kind: 'peer' } }),
+      userText('<teammate-message teammate_id="lead">do the thing</teammate-message>'),
+      userText('<bash-stdout>output</bash-stdout><bash-stderr></bash-stderr>'),
       userText([{ type: 'image', source: {} }]),
       asst('m1', { type: 'text', text: '   ' }),
       result('gone', 'result for a call outside the window'),
@@ -317,4 +319,27 @@ test('readTranscriptMessages reads from the tail, keeps the last `limit`, and tr
   expect(await readTranscriptMessages(id, '/x/r', { home: h, window: 512 })).toHaveLength(50)
   expect(await readTranscriptMessages('c1a0de00-0000-4000-8000-0000000000bb', '/x/r', { home: h })).toEqual([])
   await expect(readTranscriptMessages('../escape', '/x/r', { home: h })).rejects.toThrow(/malformed session id/)
+  // Unreadable is not empty: anything but a missing file rejects, so peek and logs report it.
+  mkdirSync(join(h, '.claude', 'projects', encodeProjectDir('/x/r'), 'c1a0de00-0000-4000-8000-0000000000cc.jsonl'))
+  await expect(readTranscriptMessages('c1a0de00-0000-4000-8000-0000000000cc', '/x/r', { home: h })).rejects.toThrow()
+})
+
+test('a typed slash command reads as typed, and a user interrupt reads as stopped', () => {
+  const msgs = transcriptMessages(
+    lines([
+      userText('<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>the parser</command-args>'),
+      userText('<command-name>/clear</command-name><command-message>clear</command-message><command-args></command-args>'),
+      asst('m1', { type: 'tool_use', id: 't1', name: 'Bash', input: {} }),
+      userText([
+        { type: 'tool_result', tool_use_id: 't1', content: 'interrupted', is_error: true },
+        { type: 'text', text: '[Request interrupted by user for tool use]' },
+      ]),
+    ]),
+  )
+  expect(msgs).toEqual([
+    { info: { role: 'user' }, parts: [{ type: 'text', text: '/review the parser' }] },
+    { info: { role: 'user' }, parts: [{ type: 'text', text: '/clear' }] },
+    { info: { id: 'm1', role: 'assistant' }, parts: [{ type: 'tool', tool: 'Bash', state: { status: 'error', output: 'Bash failed: interrupted' } }] },
+    { info: { role: 'assistant', error: { name: 'aborted' } }, parts: [] },
+  ])
 })

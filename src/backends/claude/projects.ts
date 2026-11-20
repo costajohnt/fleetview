@@ -212,9 +212,22 @@ export function listTranscripts(directory: string, { home = homedir() }: { home?
 export const TRANSCRIPT_MESSAGES = 200
 // One tool line's cap: a summary, not the output. A full `cat` of a file is not a log line.
 const TOOL_SUMMARY_CAP = 200
-// Claude Code's own injections that arrive as user records with no flag on them: slash-command
-// echoes, their captured stdout, and background-task notifications. None of it was typed.
-const INJECTED_RE = /^<(command-|local-command-|task-notification|system-reminder)/
+// Claude Code's own injections that arrive as user records with no flag on them: captured command
+// output, background-task notifications, and messages from a team lead agent. None of it was typed.
+const INJECTED_RE = /^<(local-command-|task-notification|system-reminder|teammate-message|bash-stdout|bash-stderr)/
+// A slash command the user typed is recorded as tags, not as the text they typed; it is rebuilt.
+const COMMAND_RE = /<command-name>([^<]*)<\/command-name>/
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/
+// What claude writes as a user record when the user stops a turn. Mapped to the abort shape
+// (session-store isAbortError) so peek and logs say `stopped`, as they do for opencode.
+const INTERRUPT_RE = /^\[Request interrupted by user/
+
+function userLine(text: string): string {
+  const t = text.trimStart()
+  const command = COMMAND_RE.exec(t)
+  if (command) return `${command[1]} ${COMMAND_ARGS_RE.exec(t)?.[1] ?? ''}`.trim()
+  return t.trim() && !INJECTED_RE.test(t) ? text : ''
+}
 
 const blocks = (content: unknown): Record<string, unknown>[] =>
   typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content.filter(isRecord) : []
@@ -274,7 +287,6 @@ export function transcriptMessages(lines: string[]): OpencodeMessage[] {
     } else if (rec.type === 'user') {
       // An origin that isn't a person (a peer agent's message, a task notification) is not the user.
       if (isRecord(rec.origin) && rec.origin.kind !== undefined && rec.origin.kind !== 'human') continue
-      const text = content.map(textOf).filter((t) => t.trim() && !INJECTED_RE.test(t.trimStart())).join('\n')
       for (const b of content) {
         if (b.type !== 'tool_result' || typeof b.tool_use_id !== 'string') continue
         const part = tools.get(b.tool_use_id)
@@ -283,16 +295,27 @@ export function transcriptMessages(lines: string[]): OpencodeMessage[] {
         const name = typeof part.tool === 'string' ? part.tool : 'tool'
         part.state = { status: b.is_error === true ? 'error' : 'completed', output: toolSummary(name, b) }
       }
+      // After the results above: an interrupt record can carry the result of the call it stopped.
+      const texts = content.map(textOf)
+      if (texts.some((t) => INTERRUPT_RE.test(t))) {
+        out.push({ info: { role: 'assistant', error: { name: 'aborted' } }, parts: [] })
+        continue
+      }
+      const text = texts.map(userLine).filter(Boolean).join('\n')
       if (text) out.push({ info: { role: 'user' }, parts: [{ type: 'text', text }] })
     }
   }
   return out
 }
 
-// Starting window for reading a transcript from its end; grown 4x until enough messages are found or
-// the whole file has been read. Most of a long transcript's bytes are records peek never shows, so
-// the last 1MB usually holds well over a peek's worth.
+// Starting window for reading a transcript from its end; grown 4x until enough messages are found,
+// the whole file has been read, or MAX_WINDOW is reached. Tool results make a long session's
+// messages large (real 10MB transcripts hold under 200), so without the ceiling most peeks would
+// parse the whole file on the event loop.
+// ponytail: past 16MB the oldest messages are left out even for `logs --all`; a backwards
+// incremental reader lifts that if anyone needs the full history of a huge session.
 const TAIL_WINDOW = 1 << 20
+const MAX_WINDOW = 16 << 20
 
 // The last `limit` messages of session `id`'s transcript in `directory`. A transcript that doesn't
 // exist yet (a dispatch claude hasn't written to) is an empty session, not a failure; any other read
@@ -322,7 +345,7 @@ export async function readTranscriptMessages(
       // Read from mid-file, the first line is the tail of a record cut in half.
       if (start > 0) lines.shift()
       const messages = transcriptMessages(lines)
-      if (messages.length >= limit || start === 0) return messages.slice(-limit)
+      if (messages.length >= limit || start === 0 || span >= MAX_WINDOW) return messages.slice(-limit)
     }
   } finally {
     await fd.close()
