@@ -315,7 +315,7 @@ export class OpencodeV2Client {
     // The server named `dir`, so it is checked before anything writes to it: a linked worktree root
     // of the repository fleetview asked about, not that repository's own checkout. A refusal leaves
     // the server's worktree alone, because removing a path that failed this check is the same risk.
-    if (!isAbsolute(dir) || !directory) throw new Error(`refusing worktree ${dir}: no repository to check it against`)
+    if (!isAbsolute(dir) || !directory) throw new Error(`refusing worktree, no repository to check it against: ${dir}`)
     const top = (d: string) => realpathSync(git(d, ['rev-parse', '--show-toplevel']))
     // Resolved here rather than with --path-format=absolute, which needs git 2.31.
     const common = (d: string) => realpathSync(resolve(d, git(d, ['rev-parse', '--git-common-dir'])))
@@ -323,9 +323,10 @@ export class OpencodeV2Client {
     try {
       linked = top(dir) === realpathSync(dir) && top(dir) !== top(directory) && common(dir) === common(directory)
     } catch (e) {
-      throw new Error(`cannot validate worktree ${dir}: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
+      throw new Error(`cannot validate worktree (${e instanceof Error ? e.message : String(e)}): ${dir}`, { cause: e })
     }
-    if (!linked) throw new Error(`refusing worktree ${dir}: not a new worktree of ${directory}`)
+    // #192: the verdict leads and the server-named path trails, so the dispatch line's short form keeps it.
+    if (!linked) throw new Error(`refusing worktree, not a new worktree of ${directory}: ${dir}`)
     // Already on a branch (a server that makes it, as 1.x did): leave it there. Exit 1 is detached.
     try {
       git(dir, ['symbolic-ref', '-q', 'HEAD'])

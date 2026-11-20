@@ -21,8 +21,10 @@ const SHORTCUTS = [
   ['⌥1..9', 'while attached, jump to that row (best-effort; see FLEETVIEW_NO_ALT_SWITCH)'],
   ['←', 'while attached, back on empty prompt (opencode app_exit keybind, see docs/guide.md)'],
   ['^s', 'switch grouping between state and project'],
-  ['^r', 'rename the selected session'],
+  ['^r', 'rename the selected session (^u clears the name, ^w drops a word)'],
   ['^x', 'stop the session; press again within 2s to delete it'],
+  // #188: ↑ from the first row lands on a group header, and ^x^x there takes the whole group.
+  ['^x^x', 'on a group header: delete every session in that group'],
   ['esc', 'close peek, clear the input, or quit when there is nothing to clear'],
   ['tab', 'apply the highlighted @ or / suggestion'],
   ['^j', 'insert a newline in the prompt instead of dispatching'],

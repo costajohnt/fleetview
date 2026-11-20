@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Text, useInput } from 'ink'
 import { stripEscapeResidue } from '../text-utils.ts'
-import { atEnd, backspaceAt, deleteForwardAt, insertAt, motionOf, move, withCaret, type TextCursor } from '../text-cursor.ts'
+import { atEnd, backspaceAt, deleteForwardAt, insertAt, killToStart, killWordBack, motionOf, move, withCaret, type TextCursor } from '../text-cursor.ts'
 import { parseMouseEvents } from './mouse.ts'
 
 // The ^r rename prompt. App owns what a submitted title does; this only edits it.
@@ -14,7 +14,10 @@ export function RenameInput({ initial, onSubmit, onCancel }: { initial: string; 
     if (parseMouseEvents(input).length) return // mouse sequences are not text
     const motion = motionOf(input, key) // #134: same caret and word motion as the prompt
     if (motion) return setEdit((s) => move(s, motion))
-    if (key.backspace) setEdit(backspaceAt)
+    // #188: the field opens prefilled with the current title, so clearing it has to be one key.
+    if (key.ctrl && input === 'u') setEdit(killToStart)
+    else if (key.ctrl && input === 'w') setEdit(killWordBack)
+    else if (key.backspace) setEdit(backspaceAt)
     else if (key.delete) setEdit(deleteForwardAt)
     else if (input && !key.ctrl && !key.meta) {
       // #112.3: strip control bytes / escape residue the same way the dispatch input does, so a

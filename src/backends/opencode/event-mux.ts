@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { authHeader, opencodeApi } from './client.ts'
 import { OpencodeV2Client, isSessionForm, v1Error, v1Permission, v1Question } from './client-v2.ts'
 import type { OpencodeEvent } from '../../types.ts'
@@ -55,8 +56,9 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
         const auth = authHeader()
         // 2.x has one server-wide stream in its own vocabulary; it is cut to this directory and
         // translated to 1.x's events here, so the store downstream never knows which it got.
-        const v2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 ? await v2Filter(base, directory, fetchImpl) : null // unanswered: the stream attempt below fails the same way and backs off
-        const url = v2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
+        const isV2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 // unanswered: the stream attempt below fails the same way and backs off
+        let v2: ((frame: unknown) => OpencodeEvent[]) | null = null
+        const url = isV2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
         const res = await fetchImpl(url, { signal: ac.signal, headers: auth ? { authorization: auth } : undefined })
         if (stopped) return
         if (!res.ok || !res.body) throw new Error(`event stream ${res.status}`)
@@ -78,6 +80,15 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
             const step = await Promise.race([iterator.next(), idle]).finally(() => clearTimeout(timer))
             if (step.done) break
             if (stopped) return
+            // The 2.x seed is listed once the first bytes are in, not before the stream opens (#184):
+            // 2.3.2 subscribes only when the body starts flowing (handlers/event.ts, announced by
+            // server.connected), so a session created before that was known to nobody and its
+            // location-less frames were dropped until reconnect. Later frames wait unread meanwhile;
+            // a failed listing throws into the reconnect path, and the finally releases the body.
+            if (isV2 && !v2) {
+              v2 = await v2Filter(base, directory, fetchImpl)
+              if (stopped) return
+            }
             const chunk = step.value
             buf += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
             const { events, rest } = parseSseChunk(buf)
@@ -117,16 +128,24 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
 // One directory's slice of 2.x's server-wide stream, already translated. Events carry the
 // session's `location` (opencode v2.3.2 publishes session.created with it); one that doesn't is
 // kept when its session is one this directory is known to hold, seeded from the listing at every
-// (re)connect and grown by session.created.
+// (re)connect and grown by session.created. Session renames and deletes carry no location (verified
+// live against 2.3.2, recorded in test/fixtures/opencode-2.3.2-events.sse), so the seed is what
+// routes them.
+//
+// Paths are compared resolved: 2.x strips a trailing slash from the directory it is given (verified
+// live), so a roster directory spelled with one never matched. Not realpath: 2.x keeps a symlinked
+// spelling as given (also verified), so its sessions are listed under that spelling, not the target.
 async function v2Filter(base: string, directory: string, fetchImpl: typeof fetch) {
   const mine = new Set((await new OpencodeV2Client(base, fetchImpl, () => authHeader()).listSessions(directory)).map((s) => s.id))
+  const here = resolve(directory)
   const translate = createV2Translator()
   return (frame: unknown): OpencodeEvent[] => {
     if (!isRecord(frame) || !isRecord(frame.data)) return []
-    const where = isRecord(frame.location) ? asString(frame.location.directory) : undefined
+    const raw = isRecord(frame.location) ? asString(frame.location.directory) : undefined
+    const where = raw === undefined ? undefined : resolve(raw)
     const sessionID = asString(frame.data.sessionID) ?? (isRecord(frame.data.form) ? asString(frame.data.form.sessionID) : undefined)
-    if (frame.type === 'session.created' && where === directory && sessionID) mine.add(sessionID)
-    if (where !== undefined ? where !== directory : !sessionID || !mine.has(sessionID)) return []
+    if (frame.type === 'session.created' && where === here && sessionID) mine.add(sessionID)
+    if (where !== undefined ? where !== here : !sessionID || !mine.has(sessionID)) return []
     return translate(frame)
   }
 }
