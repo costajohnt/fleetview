@@ -1,5 +1,5 @@
 // The shell subcommands (`ls`/`--json`, `attach`, `logs`, `stop`, `rm`, `add`, `answer`, `watch`,
-// `status`, `bg`), lifted out of cli.ts so that file keeps only the server lifecycle, the roster
+// `status`, `bg`), lifted out of cli.ts so that file keeps argument handling, the roster
 // loop and the attach loop. Every command takes its collaborators as an options object with real
 // defaults: main() passes what it holds, tests pass fakes.
 import { spawnSync } from 'node:child_process'
@@ -19,6 +19,7 @@ import { summarise } from './ui/header.ts'
 import { sandboxParents, displayProject, worktreeSafety, allProjectDirectories, isLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import { sessionJson, filterForList, underCwd, formatRow, parseModel, sessionIdProblem } from './cli-args.ts'
 import { stripControl } from './text-utils.ts'
+import { applyProcessListing, seedPending, streamProcessBackend } from './seeding.ts'
 import type { ParsedArgs } from './cli-args.ts'
 import { isListedSession, isRecord } from './types.ts'
 import { SESSION_ID_RE } from './backends/session-id.ts'
@@ -26,7 +27,7 @@ import type { Backend, ListedSession, ProcessBackend, Project, ServerRef } from 
 import type { SeenMap } from './seen-store.ts'
 import type { RosterSession as RosterMember } from './roster-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
-import type { EnsureServer } from './cli.ts'
+import type { EnsureServer } from './backends/opencode/server-manager.ts'
 
 export const DEFAULT_SERVER: ServerRef = { host: '127.0.0.1', port: 4900, pid: null }
 const RECENT_MESSAGES = 10
@@ -56,6 +57,8 @@ type RunBgDeps = {
 // it is reached through the server each command resolves, and its adapter is built from that
 // connection. Empty means "opencode only", which is what every caller that passes nothing gets.
 export type Backends = Record<string, ProcessBackend>
+
+const newClient = (url: string) => new OpencodeClient(url)
 
 type ListSessionsDeps = {
   createClient?(url: string): RosterClient
@@ -140,7 +143,7 @@ export async function runBg(
     ensureServer,
     serverFile,
     loadServerImpl = loadServer,
-    createClient = (url: string) => new OpencodeClient(url),
+    createClient = newClient,
     realpath = realpathSync,
     // Evaluated only when omitted, which keeps the config-dir read as lazy as it was inline — tests
     // (and anything with ROOST_CONFIG_DIR set after import) must not be bound to a path resolved at
@@ -286,7 +289,7 @@ export async function runRm(
   {
     ensureServer,
     serverFile,
-    createClient = (url: string) => new OpencodeClient(url),
+    createClient = newClient,
     rosterFile = defaultRosterFile(),
     worktreeSafetyImpl = worktreeSafety,
     isLocalWorktreeImpl = isLocalWorktree,
@@ -393,7 +396,7 @@ export async function runAdd(
   {
     ensureServer,
     serverFile,
-    createClient = (url: string) => new OpencodeClient(url),
+    createClient = newClient,
     rosterFile = defaultRosterFile(),
     loadRosterImpl = loadRoster,
     saveRosterImpl = saveRoster,
@@ -432,7 +435,7 @@ export async function runAnswer(
   {
     ensureServer,
     serverFile,
-    createClient = (url: string) => new OpencodeClient(url),
+    createClient = newClient,
     log = console.log,
     error = console.error,
     setExitCode = (code: number) => {
@@ -543,7 +546,7 @@ export async function runWatch(
   {
     ensureServer,
     serverFile,
-    createClient = (url: string) => new OpencodeClient(url),
+    createClient = newClient,
     connect = connectEvents,
     log = console.log,
     error = console.error,
@@ -717,18 +720,7 @@ async function seedOpencode(
   // clock grows by about one round trip rather than 2N; each catch degrades that project to the
   // previous behaviour rather than failing the listing.
   const mark = store.seedMark()
-  await Promise.all(
-    projects.flatMap((p) => [
-      client
-        .listPermissions(p.worktree)
-        .then((x) => store.seedPermissions(p.worktree, x, mark))
-        .catch(() => {}),
-      client
-        .listQuestions(p.worktree)
-        .then((x) => store.seedQuestions(p.worktree, x, mark))
-        .catch(() => {}),
-    ]),
-  )
+  await Promise.all(projects.map((p) => seedPending(store, client, p.worktree, mark)))
 }
 
 // The roster's discovery for a process-backed backend (use-discovery's streamBackend), run once per
@@ -741,24 +733,10 @@ async function seedProcessBackends(store: SessionStore, backends: Backends, dirs
     Object.entries(backends).flatMap(([name, backend]) =>
       dirs.map(async (dir) => {
         try {
-          const normalise = backend.createNormaliser()
-          const sub = backend.events(
-            { directory: dir },
-            {
-              onEvent: (directory, event) => {
-                for (const e of normalise(event)) {
-                  const id = (e.properties as { sessionID?: string }).sessionID
-                  if (id) store.noteOrigin(directory, id, name)
-                  store.apply(directory, e)
-                }
-              },
-            },
-          )
+          const sub = streamProcessBackend(store, name, backend, dir)
           sub.stop()
           await sub.done
-          const list = backend.normaliseSessions(await backend.listSessions(dir))
-          for (const s of list) store.noteOrigin(dir, s.id, name)
-          store.setSessions(dir, list, seen)
+          applyProcessListing(store, name, dir, backend.normaliseSessions(await backend.listSessions(dir)), seen)
         } catch {
           // A CLI that isn't installed, or a state directory that doesn't exist: no sessions here.
         }
@@ -776,7 +754,7 @@ export async function listSessions(
   ensureServer: EnsureServer,
   serverFile: string,
   {
-    createClient = (url: string) => new OpencodeClient(url),
+    createClient = newClient,
     loadSeenImpl = loadSeen,
     seenFile = defaultSeenFile,
     loadRosterImpl = loadRoster,
@@ -839,7 +817,7 @@ export async function runStatus(
   {
     ensureServer,
     serverFile,
-    createClient = (url: string) => new OpencodeClient(url),
+    createClient = newClient,
     loadSeenImpl = loadSeen,
     seenFile = defaultSeenFile,
     backends = {},
@@ -950,7 +928,7 @@ type SessionCommandDeps = {
 }
 
 const withDefaults = ({
-  createClient = (url: string) => new OpencodeClient(url),
+  createClient = newClient,
   backends = {},
   rosterFile = defaultRosterFile(),
   spawnSyncImpl = spawnSync,

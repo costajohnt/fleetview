@@ -106,6 +106,25 @@ test('with no other backend, opencode missing is still an error', async () => {
   expect(h.out).toEqual([])
 })
 
+// #187 characterization: a process backend's session known only from its events (not yet in its
+// listing) is still that backend's row, because the event stream tags it before the store sees it.
+test('--json names the backend of a session that only its event stream has reported', async () => {
+  const h = setup()
+  const events = vi.fn((target: { directory: string }, handlers: any) => {
+    if (target.directory === '/x/beta') handlers.onEvent(target.directory, { raw: true })
+    return { done: Promise.resolve(), stop: () => {} }
+  })
+  const fake = {
+    ...h.claude,
+    events,
+    createNormaliser: () => () => [{ type: 'session.status' as const, properties: { sessionID: 'evt-only', status: { type: 'busy' as const } } }],
+    listSessions: async () => [],
+  }
+  await listSessions({ command: 'ls', json: true, all: true }, h.ensureServer, '/tmp/s.json', { ...h.lsDeps, backends: { claude: fake } })
+  const row = JSON.parse(h.out.join('\n')).find((r: any) => r.id === 'evt-only')
+  expect(row).toMatchObject({ backend: 'claude' })
+})
+
 // A run fleetview dispatched: meta plus a captured stream that has started and not finished.
 const startRun = (runDir: string) => {
   writeFileSync(join(runDir, `${CLAUDE_ID}.json`), JSON.stringify({ id: CLAUDE_ID, directory: '/x/beta', pid: 4242, startedAt: 1 }))

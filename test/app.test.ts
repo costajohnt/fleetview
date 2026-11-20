@@ -2524,6 +2524,40 @@ test('the periodic reseed does not drop a pending request the server list omits'
   expect(lastFrame()).toContain('1 awaiting input') // additive: it adds, it never sweeps
 })
 
+// #187 characterization: the permission half of the additive periodic reseed.
+test('the periodic reseed does not drop a pending permission the server list omits', async () => {
+  const deps = withVocab(makeDeps())
+  const { lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn(), projectPollMs: 60 }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  onEvent('/x/alpha', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p9', permission: 'bash' } })
+  await waitFor(() => lastFrame().includes('1 awaiting input'))
+  const permissionCalls = () => deps.client.listPermissions.mock.calls.length
+  const at = permissionCalls()
+  await waitFor(() => permissionCalls() > at + 1, 15000) // two full poll passes over an empty GET /permission
+  expect(lastFrame()).toContain('1 awaiting input') // additive: it adds, it never sweeps
+})
+
+// #187 characterization: the question twin of I1's blind re-add. A failed answer whose reconcile
+// cannot read /question either puts the question back rather than leaving it silently cleared.
+test('respondQuestion failure + listQuestions failure falls back to a blind re-add', async () => {
+  const deps = withVocab(makeDeps())
+  deps.client.respondQuestion = vi.fn(() => Promise.reject(new Error('down')))
+  deps.client.listQuestions = vi.fn(() => Promise.reject(new Error('down')))
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  onEvent('/x/alpha', {
+    type: 'question.asked',
+    properties: { sessionID: 's1', id: 'q1', questions: [{ question: 'go on?', header: 'go', options: [{ label: 'yes', description: '' }] }] },
+  })
+  stdin.write(' ')
+  await waitFor(() => lastFrame().includes('1. yes'))
+  stdin.write('1')
+  await waitFor(() => lastFrame().includes("couldn't answer question"))
+  await waitFor(() => lastFrame().includes('1. yes')) // rolled back, not left cleared
+})
+
 // "Clear the input; press twice to exit" — quitting on the first press lost the view for anyone
 // reaching for Ctrl+C to dismiss something.
 test('ctrl+c on an empty input warns before it quits', async () => {
