@@ -9,6 +9,7 @@ import type { AppAction, Backend, EventSubscription, ListedSession, OpencodeEven
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
+import { ownershipKnown } from './backends/opencode/request.ts'
 import type { Roster } from './roster-store.ts'
 import type { connectEvents } from './backends/opencode/event-mux.ts'
 
@@ -216,7 +217,12 @@ export function useDiscovery({
                 onSessionDeleted(directory, id)
               }
             },
-            onOffline: (directory) => setOfflineProjects((s) => new Set(s).add(directory)),
+            onOffline: (directory) => {
+              setOfflineProjects((s) => new Set(s).add(directory))
+              // #216: a lost stream withholds the password until a probe re-checks the server; the
+              // poll's recovery path is that probe, so run it now rather than up to an interval later.
+              if (!ownershipKnown(`http://${server.host}:${server.port}`)) void refresh()
+            },
             onOnline: (directory) => {
               setOfflineProjects((s) => {
                 const next = new Set(s)

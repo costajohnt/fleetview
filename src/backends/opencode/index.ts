@@ -3,7 +3,8 @@
 // not here (#187): the roster runs those over the client and the shared event stream directly
 // (use-discovery, use-dispatch), so adapter copies of them only ever ran in tests and drifted.
 import type { Backend, ServerRef } from '../../types.ts'
-import { knownOpencodeApi, type RosterClient } from './client.ts'
+import { authHeader, knownOpencodeApi, type RosterClient } from './client.ts'
+import { ownershipKnown } from './request.ts'
 import { assertSessionId } from '../session-id.ts'
 import { isAbsolute } from 'node:path'
 
@@ -27,6 +28,8 @@ export function createOpencodeBackend({ server, client }: { server: ServerRef; c
   const serverApi = () => {
     const api = knownOpencodeApi(url)
     if (!api) throw new Error(`opencode server at ${url} has not been probed yet`)
+    // #216: the attached TUI sends the password from its env, so it waits for the same re-check.
+    if (authHeader() && !ownershipKnown(url)) throw new Error(`lost the connection to the opencode server at ${url}; reconnecting, try again in a moment`)
     return api
   }
   return {

@@ -221,6 +221,35 @@ test('probeServer does not offer a 2.x server\'s password on 1.x\'s route', asyn
   expect(fetchImpl.mock.calls.every((call: any) => !call[1].headers)).toBe(true)
 })
 
+// #216 follow-up: nor does a 1.x answer stand in for it. A stranger on a recorded 2.x server's port
+// that answers /project with a project list would otherwise pass with no credential and no pid.
+test('probeServer treats a 1.x answer for a server recorded as 2.x as a stranger', async () => {
+  const fetchImpl = vi.fn((url: string) =>
+    Promise.resolve(url.endsWith('/project') ? { ok: true, status: 200, json: () => Promise.resolve(PROJECTS) } : { ok: false, status: 404, json: () => Promise.resolve({}) }),
+  )
+  await withPassword('hunter2', async () => {
+    expect(await probeServer({ host: '127.0.0.1', port: 4900, pid: 4242, api: 2 }, fetchImpl as any)).toBe('stranger')
+    // Unrecorded, the same answer is a 1.x server as before.
+    expect(await probeServer({ host: '127.0.0.1', port: 4900, pid: 4242 }, fetchImpl as any)).toBe('healthy')
+  })
+  expect(fetchImpl.mock.calls.every((call: any) => !call[1]?.headers)).toBe(true)
+})
+
+// #216: a 2.x record with fleetview's own password and no pid has nothing to match an answer against.
+test('probeServer never offers a 2.x record\'s own password when it has no pid', async () => {
+  const fetchImpl = vi.fn((url: string, init: any) => {
+    if (url.endsWith('/project')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error('html')) })
+    if (!init?.headers) return Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({ _tag: 'UnauthorizedError' }) })
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: '2.3.2', pid: 999 }) })
+  })
+  await withPassword('minted', async () => {
+    expect(await probeServer({ host: '127.0.0.1', port: 4900, pid: null, api: 2, password: 'minted' }, fetchImpl as any)).toBe('stranger')
+    expect(fetchImpl.mock.calls.every((call: any) => !call[1]?.headers)).toBe(true)
+    // A user-set password (no password on the record) is still offered unmatched, as #213 decided.
+    expect(await probeServer({ host: '127.0.0.1', port: 4900, pid: null, api: 2 }, fetchImpl as any)).toBe('healthy')
+  })
+})
+
 test('probeServer reports unauthorized when the retried password is rejected too', async () => {
   const server = { host: '127.0.0.1', port: 4900 }
   const fetchImpl = vi.fn(() => Promise.resolve({ ok: false, status: 401 }))
