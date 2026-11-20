@@ -202,11 +202,11 @@ test('rm on a claude session in a local worktree keeps it while another session 
 test('attach on a claude session runs claude --resume in its directory without the server password', async () => {
   const h = setup({ opencodeUp: false })
   const spawnSyncImpl = vi.fn(() => ({}) as any)
-  process.env.OPENCODE_SERVER_PASSWORD = 'secret-for-test'
+  vi.stubEnv('OPENCODE_SERVER_PASSWORD', 'secret-for-test')
   try {
     await runAttach({ command: 'attach', id: CLAUDE_ID }, { ...h.deps, spawnSyncImpl })
   } finally {
-    delete process.env.OPENCODE_SERVER_PASSWORD
+    vi.unstubAllEnvs()
   }
   const [command, argv, options] = spawnSyncImpl.mock.calls[0] as any
   expect([command, ...argv]).toEqual(['claude', '--resume', CLAUDE_ID])

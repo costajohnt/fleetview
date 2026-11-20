@@ -10,6 +10,7 @@
 // `GIT_CONFIG_NOSYSTEM` does not close this. It suppresses /etc/gitconfig, and the vector is the
 // repository's own config, which it does not touch — confirmed: the payload still ran with it set.
 // Command-line `-c` is what outranks repository-local config, so that is what this uses.
+import { execFileSync } from 'node:child_process'
 
 // Only the keys that actually fire on the read-only commands fleetview runs, each one confirmed
 // rather than assumed. `core.sshCommand` and `credential.helper` are deliberately absent HERE:
@@ -30,6 +31,44 @@ const OVERRIDES = [
 // For git calls whose argv fleetview builds itself. `-c` beats repository-local config, and git
 // re-exports these to any git subprocess of its own, so a submodule is covered too.
 export const GIT_SAFE_ARGS = OVERRIDES.flatMap(([key, value]) => ['-c', `${key}=${value}`])
+
+// #181: a filter driver named by an in-tree `.gitattributes` runs its `clean`, `smudge` or `process`
+// command on `status` and on the checkout `worktree add` does, and the driver name is the
+// attacker's choice, so no fixed list can cover it. `git config --get-regexp` only reads config
+// (verified: it runs nothing), so every driver any config scope defines is listed and blanked by
+// name; an empty command is git's "no filter". `required=false` too, or a blanked required driver
+// makes git die rather than pass the file through. Global drivers are blanked as well: the user's
+// own `filter.lfs` runs git-lfs, which reads repository-local `lfs.*` config that can name programs
+// for it to execute. The cost is that LFS files land as pointers in a worktree fleetview makes, and
+// `status` may call an LFS file modified, which only keeps a worktree that could have gone. Throws
+// when the config cannot be read, so callers fail closed.
+export function gitFilterOverrides(dir: string, run = execFileSync) {
+  let out = ''
+  try {
+    out = run('git', [...GIT_SAFE_ARGS, '-C', dir, 'config', '--name-only', '--get-regexp', '^filter\\.'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+  } catch (err) {
+    // 1 with nothing printed is "no filter keys"; anything else is unknown, so refuse.
+    const { status, stdout } = err as { status?: number; stdout?: string }
+    if (status !== 1 || stdout) throw err
+  }
+  const drivers = new Set<string>()
+  for (const key of out.split('\n')) {
+    const dot = key.lastIndexOf('.')
+    if (dot <= 'filter'.length) continue // blank line, or `filter.<var>` with no subsection: no driver
+    // An empty subsection (`[filter ""]`, listed as `filter..clean`) is a real driver `filter=` selects.
+    const driver = key.slice('filter.'.length, dot)
+    // `-c` splits at the first `=`, so a driver named `a=b` cannot be overridden: refuse it outright.
+    if (driver.includes('=')) throw new Error(`unoverridable git filter driver name: ${driver}`)
+    drivers.add(driver)
+  }
+  return [...drivers].flatMap((d) => ['clean', 'smudge', 'process', 'required'].flatMap((v) => ['-c', `filter.${d}.${v}=${v === 'required' ? 'false' : ''}`]))
+}
+
+// Belt to the braces above for git-lfs, should anything still reach it: no download on checkout.
+export const gitFilterSafeEnv = (env = process.env) => ({ ...env, GIT_LFS_SKIP_SMUDGE: '1' })
 
 // gh-path-only additions to the list above. The denylist's safety argument ("neither key fires on
 // status/rev-parse/rev-list") was proven for fleetview's own commands, but gh's internal git
