@@ -318,6 +318,17 @@ test('the health probe accepts a 2.x server: its web app on /project, JSON on /a
   expect(await probeServer({ host: '127.0.0.1', port: 4900 }, fetchImpl as any)).toBe('healthy')
 })
 
+// #186: one detector. What the probe found is the client's answer too, with no second ask.
+test('a healthy probe records the API, so the client never asks /api/info itself', async () => {
+  const p = port++
+  const { fetchImpl, calls } = fakeServer({ 'GET /api/session': { data: [] } })
+  const probe = vi.fn((url: string) => (url.endsWith('/project') ? html() : fetchImpl(url)))
+  expect(await probeServer({ host: '127.0.0.1', port: p }, probe as any)).toBe('healthy')
+  calls.length = 0
+  await new OpencodeClient(`http://127.0.0.1:${p}`, fetchImpl as any).listSessions('/repo')
+  expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/api/session'])
+})
+
 test('a 2.x server still booting (503) is not healthy yet', async () => {
   const fetchImpl = vi.fn((url: string) => (url.endsWith('/project') ? html() : json({ version: '2.3.2', pid: 7 }, 503)))
   expect(await probeServer({ host: '127.0.0.1', port: 4900 }, fetchImpl as any)).toBe('unreachable')

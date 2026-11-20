@@ -33,6 +33,14 @@ export function createOpencodeBackend({
   client: RosterClient
   fetchImpl?: typeof fetch
 }): Backend {
+  const url = `http://${server.host}:${server.port}`
+  // probeServer recorded the server's API before anything on it could be listed, so there is no
+  // guess to make here: a server nothing has probed is refused rather than handed 1.x argv.
+  const serverApi = () => {
+    const api = knownOpencodeApi(url)
+    if (!api) throw new Error(`opencode server at ${url} has not been probed yet`)
+    return api
+  }
   return {
     name: 'opencode',
     capabilities: OPENCODE_CAPABILITIES,
@@ -50,12 +58,12 @@ export function createOpencodeBackend({
       connectEvents({ host: server.host, port: server.port, directory }, { ...handlers, fetchImpl }),
     // 2.x has no `attach`: its TUI takes the server as a flag and the directory as an argument, and
     // reads the password from the environment (OPENCODE_PASSWORD, else OPENCODE_SERVER_PASSWORD).
-    attach: ({ id, directory }) => knownOpencodeApi(`http://${server.host}:${server.port}`) === 2
-      ? ['opencode', '--server', `http://${server.host}:${server.port}`, '-s', assertSessionId(id), absoluteDirectory(directory)]
+    attach: ({ id, directory }) => serverApi() === 2
+      ? ['opencode', '--server', url, '-s', assertSessionId(id), absoluteDirectory(directory)]
       : [
       'opencode',
       'attach',
-      `http://${server.host}:${server.port}`,
+      url,
       '-s',
       // Server-supplied, and the server may be an adopted foreign one — asserted because it becomes
       // argv, same as the process backends (session-id.ts).

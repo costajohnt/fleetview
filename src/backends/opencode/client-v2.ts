@@ -11,7 +11,7 @@ import { homedir } from 'node:os'
 import { basename, isAbsolute, join, resolve } from 'node:path'
 import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
-import { stripControl } from '../../text-utils.ts'
+import { opencodeRequest } from './request.ts'
 import { stateDir } from '../../paths.ts'
 import { GIT_SAFE_ARGS } from '../../git-safe.ts'
 import type { AgentInfo, CommandInfo, ModelSelection, ProvidersResponse } from './client.ts'
@@ -161,22 +161,8 @@ export class OpencodeV2Client {
 
   // Location-scoped routes read the directory from this header (2.x ignores 1.x's ?directory=);
   // session-id routes resolve it from the session, and the header is harmless there.
-  async req(method: string, path: string, body?: unknown, directory?: string): Promise<unknown> {
-    const auth = this.auth()
-    const res = await this.fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        ...(body ? { 'content-type': 'application/json' } : {}),
-        ...(auth ? { authorization: auth } : {}),
-        ...(directory ? { 'x-opencode-directory': encodeURIComponent(directory) } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(10_000),
-    })
-    // Same treatment as the 1.x client: the body is an untrusted server's words.
-    if (!res.ok) throw Object.assign(new Error(`${method} ${path} → ${res.status}: ${stripControl(await res.text()).slice(0, 500)}`), { status: res.status })
-    const text = await res.text()
-    return text.trim() ? JSON.parse(text) : null
+  req(method: string, path: string, body?: unknown, directory?: string): Promise<unknown> {
+    return opencodeRequest(this.fetch, this.baseUrl, method, path, { body, auth: this.auth(), headers: directory ? { 'x-opencode-directory': encodeURIComponent(directory) } : {} })
   }
 
   async listProjects(): Promise<Project[]> {
@@ -247,7 +233,8 @@ export class OpencodeV2Client {
     return records(unwrap(await this.req('GET', '/api/form', undefined, directory))).filter(isSessionForm).map(v1Question)
   }
 
-  async listMessages(id: string): Promise<OpencodeMessage[]> {
+  // Session-id routes need no directory; the parameter is the shared client shape's.
+  async listMessages(id: string, _directory?: string): Promise<OpencodeMessage[]> {
     // Newest first by default; 1.x listed oldest first, which is what peek reads.
     const rows = records(unwrap(await this.req('GET', `/api/session/${encodeURIComponent(id)}/message?limit=200`)))
     return v1Messages(rows.reverse())
@@ -278,7 +265,7 @@ export class OpencodeV2Client {
     return this.req('POST', `/api/session/${encodeURIComponent(id)}/interrupt`, undefined, directory)
   }
   // 2.x has no agent on the shell call.
-  runShell(id: string, command: string, directory?: string) {
+  runShell(id: string, command: string, directory?: string, _agent?: string) {
     return this.req('POST', `/api/session/${encodeURIComponent(id)}/shell`, { command }, directory)
   }
 
