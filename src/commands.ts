@@ -266,7 +266,7 @@ async function resolveSession(
     return null
   }
   if (matches.length > 1) {
-    error([`${id} matches ${matches.length} sessions — use more of the id:`, ...matches.map((m) => `  ${m.session.id}  ${m.worktree}`)].join('\n'))
+    error([`${id} matches ${matches.length} sessions — use more of the id:`, ...matches.map((m) => stripControl(`  ${m.session.id}  ${m.worktree}`))].join('\n'))
     setExitCode(1)
     return null
   }
@@ -892,7 +892,8 @@ async function findSession<C extends Pick<RosterClient, 'listProjects' | 'listSe
   if (hits.length > 1) {
     // Listed, not resolved: the caller is about to attach to, stop, or delete one of these, and
     // guessing which is exactly the failure this replaces.
-    const line = (m: (typeof hits)[number]) => `  ${m.id}  ${m.worktree}${m.backend === DEFAULT_BACKEND ? '' : `  (${m.backend})`}`
+    // Ids and paths are server-supplied and this goes to the terminal.
+    const line = (m: (typeof hits)[number]) => stripControl(`  ${m.id}  ${m.worktree}${m.backend === DEFAULT_BACKEND ? '' : `  (${m.backend})`}`)
     error([`${want} matches ${hits.length} sessions — use more of the id:`, ...hits.map(line)].join('\n'))
     setExitCode(1)
     return null

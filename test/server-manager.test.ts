@@ -274,3 +274,26 @@ test('spawnServer closes the log descriptor it opened, and leaves a caller-suppl
   expect(closed[0]).toBeTypeOf('number')
   expect(existsSync(join(dir, 'server.log'))).toBe(true) // the fd it closed was the log it opened
 })
+
+// #182: a 1.x without its embedded UI proxies /api/info, authorization header included, to
+// app.opencode.ai. Only 2.x's own UnauthorizedError earns the credential on that route.
+test('probeServer presents the password on /api/info only to a 401 that is 2.x\'s own', async () => {
+  const server = { host: '127.0.0.1', port: 4900 }
+  const asked = (unauthorized: unknown) =>
+    vi.fn((url: string) =>
+      url.endsWith('/project')
+        ? Promise.resolve({ ok: false, status: 404 })
+        : Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve(unauthorized) }),
+    )
+  const foreign = asked({ error: 'nope' })
+  await withPassword('hunter2', async () => {
+    expect(await probeServer(server, foreign as any)).toBe('unauthorized')
+  })
+  expect(foreign.mock.calls.every((c: any) => c[1].headers === undefined)).toBe(true)
+
+  const v2 = asked({ _tag: 'UnauthorizedError' })
+  await withPassword('hunter2', async () => {
+    await probeServer(server, v2 as any)
+  })
+  expect(v2).toHaveBeenLastCalledWith('http://127.0.0.1:4900/api/info', expect.objectContaining({ headers: { authorization: expect.any(String) } }))
+})

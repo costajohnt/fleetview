@@ -1,6 +1,6 @@
 // The on-disk mechanics every state store shares (registry, roster-store, seen-store). Extracted
 // verbatim from the three copies each carried — a fix to how fleetview writes a file must land once.
-import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, chmodSync, renameSync, existsSync, appendFileSync } from 'node:fs'
+import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, chmodSync, fchmodSync, renameSync, existsSync, constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -26,10 +26,40 @@ export const defaultExitLogFile = () => join(stateDir(), 'exit.log')
 // ponytail: appends and never rotates. Only signals and crashes write here, one short line each.
 export function noteExit(reason: string, file = defaultExitLogFile(), now = () => new Date()) {
   try {
-    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-    appendFileSync(file, `${now().toISOString()} pid ${process.pid} ${reason}\n`, { mode: 0o600 })
+    appendPrivate(file, `${now().toISOString()} pid ${process.pid} ${reason}\n`)
   } catch {}
 }
+
+// One line through openPrivateAppend: no following a planted symlink, perms re-tightened each time.
+export function appendPrivate(file: string, text: string) {
+  const fd = openPrivateAppend(dirname(file), file)
+  try {
+    writeSync(fd, text)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+// Opens an append-mode log the way the state writers already write their files: private, and private
+// again on every open. `mode` on mkdir/open only applies when they create, so a pre-existing dir or
+// log kept whatever perms it had — these logs receive prompts and repository paths, so both are
+// re-tightened each time. O_NOFOLLOW makes a symlink planted at the log path an ELOOP instead of an
+// append-through into an arbitrary file (the same reason fix-pty-permissions opens before it chmods).
+// Shared by the claude/copilot run logs and the opencode server log; the chmods are best-effort for
+// the same reason saveServer's is — a dir we cannot chmod is no reason to lose the log write itself.
+export function openPrivateAppend(dir: string, file: string): number {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try {
+    chmodSync(dir, 0o700)
+  } catch {}
+  // O_NOFOLLOW is 0 on Windows (the constant does not exist there); those hosts keep plain append.
+  const fd = openSync(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600)
+  try {
+    fchmodSync(fd, 0o600)
+  } catch {}
+  return fd
+}
+
 
 // mkdir-chmod-tmp-rename-0600, the way every state file is written:
 // - mkdir's `mode` only applies when it creates the dir, so a pre-existing one keeps whatever perms

@@ -232,3 +232,11 @@ test('logs on a claude session points at attach instead of printing nothing', as
   expect(h.errs).toEqual([`claude sessions have no transcript fleetview can read; fleetview attach ${CLAUDE_ID} to read it`])
   expect(h.codes).toEqual([1])
 })
+
+// #182: the ids listed for an ambiguous prefix are server-supplied and printed to the terminal.
+test('an ambiguous-prefix listing strips control bytes from server-supplied ids', async () => {
+  const h = setup({ opencodeSessions: [{ id: 'c1a0de00-\x1b[2Jx', title: 'x', time: { created: 1, updated: 1 } }] })
+  await runStop({ command: 'stop', id: 'c1a0de00' }, h.deps)
+  expect(h.errs[0]).toContain('  c1a0de00-[2Jx  /x/alpha')
+  expect(h.errs[0]).not.toContain('\x1b')
+})

@@ -31,7 +31,11 @@ What it does touch:
   it adopts an already-running server on the port that does not enforce a
   password, since that server is not one it spawned. The server host in
   `server.json` is validated as loopback so a planted or legacy config can't
-  rebind it to the network. Details:
+  rebind it to the network. The password is kept out of the environment of
+  the agents fleetview dispatches (claude, copilot) and of the notify hook, but
+  that is not a boundary against your own user: `server.json` holds it in
+  plaintext, so any process running as you, including a dispatched agent, can
+  read the file and reach the server. Details:
   [the server fleetview spawns is password-protected](docs/reference.md#the-server-fleetview-spawns-is-password-protected).
 - **Process-backed backends spawn local CLIs** (`claude`, `copilot`) as headless
   runs, as your user. All spawns use argv arrays (no shell, no string

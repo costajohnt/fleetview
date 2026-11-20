@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, utimesSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, utimesSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import {
@@ -166,6 +166,12 @@ test('logNameCollision appends an NDJSON line with the prompt capped, and never 
     expect(entry.existing).toEqual(['/wt/x/fix-tests'])
     expect(entry.prompt).toHaveLength(200)
     expect(typeof entry.ts).toBe('string')
+    // #182: a symlink planted at the log path is not appended through.
+    rmSync(join(dir, 'dispatch-debug.ndjson'))
+    writeFileSync(join(dir, 'victim'), 'untouched\n')
+    symlinkSync(join(dir, 'victim'), join(dir, 'dispatch-debug.ndjson'))
+    logNameCollision({ prompt: 'x', name: 'y', existing: [] })
+    expect(readFileSync(join(dir, 'victim'), 'utf8')).toBe('untouched\n')
     // best-effort contract: an unwritable dir must not throw into the dispatch path
     process.env.FLEETVIEW_STATE_DIR = '/dev/null/nope'
     expect(() => logNameCollision({ prompt: 'x', name: 'y', existing: [] })).not.toThrow()
