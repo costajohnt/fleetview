@@ -143,7 +143,7 @@ export function chordFor(
 // human pressing Escape and then a digit takes far longer than the window, so their keys still
 // reach the session. Delaying a solitary Escape by a few milliseconds is the same trade readline
 // and every terminal app makes.
-export const ESC_WINDOW_MS = 40
+const ESC_WINDOW_MS = 40
 
 // Alt+N is best-effort and cannot be made exact. A true Alt+1 and an Escape followed by a 1 are
 // the same two bytes; the only thing telling them apart is arrival timing, and a laggy link that

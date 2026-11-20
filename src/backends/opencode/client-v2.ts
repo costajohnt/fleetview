@@ -29,7 +29,7 @@ export function v1Error(error: unknown) {
   return { name: asString(error.type) ?? 'Error', data: { message: asString(error.message) ?? '' } }
 }
 
-export function v1Session(s: Record<string, unknown>, directory?: string): ListedSession {
+function v1Session(s: Record<string, unknown>, directory?: string): ListedSession {
   const time = isRecord(s.time) ? s.time : {}
   const location = isRecord(s.location) ? s.location : {}
   return {

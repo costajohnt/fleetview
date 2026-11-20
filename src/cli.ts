@@ -81,7 +81,7 @@ import { gatedStdout } from './gated-stdout.ts'
 import { MOUSE_OFF } from './ui/mouse.ts'
 import { DEFAULT_SERVER, runBg, runAdd, runAnswer, runWatch, runStatus, listSessions, runAttach, runLogs, runStop, runRm } from './commands.ts'
 // Re-exported so existing importers (tests, scripts) keep resolving the shell commands from here.
-export { runBg, runAdd, runAnswer, runWatch, runStatus, listSessions, matchSessions, runAttach, runLogs, runStop, runRm } from './commands.ts'
+export { runBg, runAdd, runAnswer, runWatch, runStatus, listSessions, matchSessions, runRm } from './commands.ts'
 
 // A saved password that whatever holds the port has just rejected has also been SEEN by that
 // listener (probeServer presents it on the 401 retry), so it is burned: dropped from the env, where
@@ -97,7 +97,7 @@ function dropPassword(env: NodeJS.ProcessEnv) {
   delete env.OPENCODE_PASSWORD
 }
 
-export function burnSavedPassword(
+function burnSavedPassword(
   server: ServerRef,
   {
     serverFile,
@@ -124,7 +124,7 @@ export function burnSavedPassword(
 //   before anything does (`unenforced`). #202: when that check itself fails there is no evidence
 //   either way, so the password leaves env for this pass but stays in server.json (`unknown`): it
 //   was never shown, and the next pass adopts it and asks again.
-export async function adoptServerCredential(
+async function adoptServerCredential(
   saved: ServerRef,
   {
     probe,
@@ -847,7 +847,7 @@ async function rosterLoop(
 // worth making for a screen clear.
 const CLEAR_SCREEN = '\x1b[2J\x1b[3J\x1b[H'
 
-export function reclaimTerminal(out: TerminalGate, instance: RenderHandle) {
+function reclaimTerminal(out: TerminalGate, instance: RenderHandle) {
   out.open()
   instance?.clear()
   out.write(RESET_INPUT_MODES)

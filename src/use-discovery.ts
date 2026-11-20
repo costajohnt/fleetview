@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { hasSession } from './roster-store.ts'
-import { DEFAULT_BACKEND } from './backends/index.ts'
+import { DEFAULT_BACKEND, isProcessBackend } from './backends/index.ts'
 import { sandboxParents, allProjectDirectories } from './worktree.ts'
 import { byBranch } from './pull-requests.ts'
 import { asNumber, asString, isRecord } from './types.ts'
@@ -296,9 +296,9 @@ export function useDiscovery({
     // never seen exists", so the periodic listing is the only way one started outside fleetview —
     // or by a previous fleetview run — ever appears.
     const streamBackend = async (name: string, worktree: string) => {
-      if (name === DEFAULT_BACKEND) return // opencode has its own path above, unchanged
+      // opencode has its own path above: it lists over the client and streams through the shared mux.
       const backend = backendRegistry[name]
-      if (!backend) return
+      if (!isProcessBackend(backend)) return
       const key = `${name}:${worktree}`
       if (!backendConns.has(key)) {
         // One normaliser per subscription, because it folds per-session state across events and two

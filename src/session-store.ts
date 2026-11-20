@@ -603,11 +603,12 @@ export function createStore() {
       // After the upsert loop, so a payload that isn't a list throws above having deleted nothing.
       // An empty array is a real answer ("this project has no sessions"); `null` is not one.
       // A truncated listing (2.x stops paging at a cap) lacks older sessions that still exist, so it
-      // upserts but retires nothing.
+      // upserts but retires nothing. `!r.origin`: retiring listings are opencode's alone, so a
+      // claude/copilot row in the same directory is never theirs to sweep, armed or not (#187).
       if (retire && !list.truncated) {
         const listedIds = new Set(list.map((s) => s.id))
         for (const [k, r] of sessions) {
-          if (r.projectKey === projectKey && r.listed && !listedIds.has(r.id)) sessions.delete(k)
+          if (!r.origin && r.projectKey === projectKey && r.listed && !listedIds.has(r.id)) sessions.delete(k)
         }
       }
       notify()

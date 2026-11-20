@@ -1,6 +1,6 @@
 import { basename } from 'node:path'
 import { existsSync } from 'node:fs'
-import { DEFAULT_BACKEND } from './backends/index.ts'
+import { DEFAULT_BACKEND, isProcessBackend } from './backends/index.ts'
 import { shouldIsolate, worktreeName, logNameCollision, logDispatchDebug, createLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import { stripControl, truncateGraphemes } from './text-utils.ts'
 import type { AttachTarget, Backend, ListedSession, ModelPair, Project, StreamProject, Worktree } from './types.ts'
@@ -114,7 +114,7 @@ export function useDispatch({
   // (target resolution, the isolation rule, roster membership, the notice).
   const dispatchOnBackend = async (name: string, rawText: string, { thenAttach = false, agent, repo, shell = false }: DispatchOptions = {}) => {
     const backend = backendRegistry[name]
-    if (!backend) return flash(`no ${name} backend`)
+    if (!isProcessBackend(backend)) return flash(`no ${name} backend`)
     // `!` is opencode's shell-job route (POST /session/:id/shell); a process-backed CLI has no
     // equivalent, and quietly sending the command as a prompt would run something else entirely.
     if (shell) return flash(`! shell jobs run on opencode — ${name} has no shell surface`, 4000)

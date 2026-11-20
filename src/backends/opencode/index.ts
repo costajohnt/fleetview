@@ -1,39 +1,26 @@
-// opencode as a Backend (see types.ts). The wire code underneath is unchanged: this is the mapping
-// from fleetview's backend contract onto OpencodeClient, connectEvents and `opencode attach` argv,
-// and nothing more. Anything opencode can do that the contract doesn't name is still reached through
-// OpencodeClient directly.
-import type { Backend, OpencodeEvent, ServerRef } from '../../types.ts'
+// opencode as a Backend (see types.ts): the mapping from fleetview's backend contract onto
+// OpencodeClient and `opencode attach` argv, and nothing more. Listing, dispatch and live events are
+// not here (#187): the roster runs those over the client and the shared event stream directly
+// (use-discovery, use-dispatch), so adapter copies of them only ever ran in tests and drifted.
+import type { Backend, ServerRef } from '../../types.ts'
 import { authHeader, knownOpencodeApi, type RosterClient } from './client.ts'
 import { ownershipKnown } from './request.ts'
-import { connectEvents } from './event-mux.ts'
 import { assertSessionId } from '../session-id.ts'
 import { isAbsolute } from 'node:path'
 
 // opencode is the server-backed family, so every flag is true — which is exactly why the flags could
 // not be inferred from it. It is the parity baseline the process-backed backends are measured
 // against, not the default. Exported because it doubles as the fallback capability set where a
-// row's backend cannot be resolved (app.ts, use-peek.ts).
+// row's backend cannot be resolved (use-peek.ts's `capabilitiesOf` default).
 export const OPENCODE_CAPABILITIES = {
-  fork: true, // POST /session/:id/fork
   rename: true, // PATCH /session/:id
   delete: true, // DELETE /session/:id
   questions: true, // GET /question + /permission, answerable from the roster
-  messages: true, // GET /session/:id/message, what peek renders
 } as const
 
 // The client is passed in rather than built here: fleetview already holds one per server for the
 // opencode-only calls, and a second one would mean two auth headers and two timeouts to keep in step.
-// `fetchImpl` only reaches the event stream — the client carries its own — and exists for the same
-// reason connectEvents and isServerHealthy take one: nothing here should open a real socket in a test.
-export function createOpencodeBackend({
-  server,
-  client,
-  fetchImpl = globalThis.fetch,
-}: {
-  server: ServerRef
-  client: RosterClient
-  fetchImpl?: typeof fetch
-}): Backend {
+export function createOpencodeBackend({ server, client }: { server: ServerRef; client: RosterClient }): Backend {
   const url = `http://${server.host}:${server.port}`
   // A healthy probe or the client's first request has settled the server's API before anything on
   // it could be listed, so there is no guess to make here: an unknown one is refused, not handed
@@ -48,18 +35,10 @@ export function createOpencodeBackend({
   return {
     name: 'opencode',
     capabilities: OPENCODE_CAPABILITIES,
-    listSessions: (directory) => client.listSessions(directory),
-    async dispatch({ prompt, directory, agent, model }) {
-      const session = await client.createSession({ agent, model }, directory)
-      // Prompt after the session exists, and don't swallow a prompt failure: a created-but-unprompted
-      // session is visible in the roster, so the caller has to hear about it rather than get a ref
-      // that looks dispatched.
-      await client.promptAsync(session.id, prompt, directory)
-      return { id: session.id, directory }
-    },
     prompt: (id, text, directory) => client.promptAsync(id, text, directory),
-    events: ({ directory }, handlers) =>
-      connectEvents({ host: server.host, port: server.port, directory }, { ...handlers, fetchImpl }),
+    fork: (id, directory) => client.forkSession(id, directory),
+    listMessages: (id, directory) => client.listMessages(id, directory),
+    shell: (id, command, directory) => client.runShell(id, command, directory),
     // 2.x has no `attach`: its TUI takes the server as a flag and the directory as an argument, and
     // reads the password from the environment (OPENCODE_PASSWORD, else OPENCODE_SERVER_PASSWORD).
     attach: ({ id, directory }) => serverApi() === 2
@@ -81,11 +60,6 @@ export function createOpencodeBackend({
     abort: (id, directory) => client.abortSession(id, directory),
     rename: (id, title, directory) => client.renameSession(id, title, directory),
     delete: (id, directory) => client.deleteSession(id, directory),
-    // Identity, both of them: opencode's payloads are already the store's vocabulary — they ARE the
-    // vocabulary (backend-normalise.ts) — which is what keeps the opencode path free of any
-    // normalisation cost or behaviour change at all.
-    normaliseSessions: (rows) => rows ?? [],
-    createNormaliser: () => (event) => [event as OpencodeEvent],
   }
 }
 

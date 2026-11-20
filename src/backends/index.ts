@@ -1,10 +1,11 @@
 // The backend registry: the one place that knows which agent CLIs fleetview can drive and how to
 // build one. Everything else takes a `Record<string, Backend>` and a name — normalisation included,
-// since every adapter carries its own normaliseSessions/createNormaliser (#83) — so adding a fourth
-// CLI is a line here plus its own folder, not a branch in the roster or in backend-normalise.ts.
+// since every process-backed adapter carries its own normaliseSessions/createNormaliser (#83) — so
+// adding a fourth CLI is a line here plus its own folder, not a branch in the roster or in
+// backend-normalise.ts.
 import { accessSync, constants } from 'node:fs'
 import { delimiter, join } from 'node:path'
-import type { Backend, ServerRef } from '../types.ts'
+import type { Backend, ProcessBackend, ServerRef } from '../types.ts'
 import type { OpencodeClient } from './opencode/client.ts'
 import { createOpencodeBackend } from './opencode/index.ts'
 import { createClaudeBackend } from './claude/index.ts'
@@ -29,6 +30,11 @@ export const isBackendName = (name: unknown): name is BackendName =>
 // whichever adapter is there rather than undefined.
 export const resolveBackend = (backends: Record<string, Backend>, name: string | undefined): Backend =>
   backends[name ?? DEFAULT_BACKEND] ?? backends[DEFAULT_BACKEND] ?? Object.values(backends)[0]
+
+// Whether an adapter lists, dispatches and streams for itself (claude, copilot) rather than through
+// opencode's client and event stream (#187).
+export const isProcessBackend = (backend: Backend | undefined): backend is ProcessBackend =>
+  backend !== undefined && 'events' in backend
 
 // Whether `command` is an executable on PATH. A PATH walk rather than spawning `<cli> --version`:
 // claude and copilot are Node programs, so asking them costs a cold start each, and this runs
@@ -71,17 +77,9 @@ export function defaultBackendName(env: NodeJS.ProcessEnv = process.env): Backen
 // they find their own state directories — so the only wiring is opencode's server and client, which
 // the caller already holds. No server means opencode is not installed: the registry then has no
 // opencode entry, and that absence is how the roster knows to run without it.
-export function createBackends({
-  server,
-  client,
-  fetchImpl,
-}: {
-  server?: ServerRef
-  client?: OpencodeClient
-  fetchImpl?: typeof fetch
-} = {}): Partial<Record<BackendName, Backend>> {
+export function createBackends({ server, client }: { server?: ServerRef; client?: OpencodeClient } = {}): Partial<Record<BackendName, Backend>> {
   return {
-    ...(server && client ? { opencode: createOpencodeBackend({ server, client, ...(fetchImpl ? { fetchImpl } : {}) }) } : {}),
+    ...(server && client ? { opencode: createOpencodeBackend({ server, client }) } : {}),
     ...createProcessBackends(),
   }
 }

@@ -807,7 +807,7 @@ export function App({
     hasOpencode,
     needsOpencode,
     current,
-    capabilitiesOf,
+    backendFor,
     backendNameOf,
     providers,
     setDispatchModel,

@@ -1,5 +1,6 @@
 import { withMember, type Roster } from './roster-store.ts'
-import type { AppAction, AttachTarget, BackendCapabilities, ModelPair } from './types.ts'
+import { DEFAULT_BACKEND } from './backends/index.ts'
+import type { AppAction, AttachTarget, Backend, ModelPair } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
 import type { RosterClient, ProviderInfo } from './backends/opencode/client.ts'
@@ -15,7 +16,7 @@ export function useSlashCommands({
   hasOpencode,
   needsOpencode,
   current,
-  capabilitiesOf,
+  backendFor,
   backendNameOf,
   providers,
   setDispatchModel,
@@ -31,7 +32,7 @@ export function useSlashCommands({
   hasOpencode: boolean
   needsOpencode: (what: string) => void
   current: RosterSession | undefined
-  capabilitiesOf: (row: AttachTarget) => BackendCapabilities
+  backendFor: (row: AttachTarget) => Backend
   backendNameOf: (row: AttachTarget) => string
   providers: ProviderInfo[]
   setDispatchModel: (model: ModelPair | null) => void
@@ -54,10 +55,11 @@ export function useSlashCommands({
     }
     if (command === 'fork') {
       if (!current) return flash('select a session to fork')
-      // Capability gate, driven only by the backend's own flags: claude has --fork-session but the
-      // Backend contract has no fork(), and copilot has no fork at all — either way the honest
-      // answer is to say so rather than call a client method that would hit the wrong server.
-      if (!capabilitiesOf(current).fork) {
+      // Gated on the row's own adapter: claude's has no fork() yet (--fork-session exists), copilot
+      // has no fork at all.
+      const backend = backendFor(current)
+      const fork = backend.fork
+      if (!fork) {
         setInput('')
         return flash(`${backendNameOf(current)} can't fork a session`, 4000)
       }
@@ -66,17 +68,25 @@ export function useSlashCommands({
         let forkedId: string | null = null
         let done = false
         try {
-          const forked = await client.forkSession(row.id, row.projectKey)
+          const forked = await fork(row.id, row.projectKey)
           forkedId = forked.id
-          updateRoster((prev) => withMember(prev, row.projectKey, forked.id, args ? { prompt: args.slice(0, 2000) } : {}))
-          if (args) await client.promptAsync(forked.id, args, row.projectKey)
+          // The fork belongs to the backend that made it, tagged the way dispatchOnBackend tags a
+          // dispatch, so its later keys go to that adapter and not to opencode.
+          const external = backend.name !== DEFAULT_BACKEND
+          if (external) store.noteOrigin(row.projectKey, forked.id, backend.name)
+          updateRoster((prev) =>
+            withMember(prev, row.projectKey, forked.id, { ...(args ? { prompt: args.slice(0, 2000) } : {}), ...(external ? { backend: backend.name } : {}) }),
+          )
+          if (args) await backend.prompt(forked.id, args, row.projectKey)
           done = true
           flash(`forked → ${forked.id.slice(0, 12)}${args ? ' (prompt sent)' : ''}`)
-          store.setSessions(row.projectKey, await client.listSessions(row.projectKey), seen)
+          // opencode's listing is the only one that knows an opencode fork; another backend's row
+          // is picked up by its own periodic listing.
+          if (!external) store.setSessions(row.projectKey, await client.listSessions(row.projectKey), seen)
         } catch {
           // Only the refresh failed: the fork and its prompt landed, and the next poll relists.
           if (done) return
-          // The fork exists once forkSession answered: "couldn't fork" would invite a retry that
+          // The fork exists once fork() answered: "couldn't fork" would invite a retry that
           // makes a second one. Say which half failed.
           flash(forkedId ? `forked → ${forkedId.slice(0, 12)}, but the prompt was not sent` : "couldn't fork — server refused", 4000)
         }

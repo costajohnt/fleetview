@@ -5,6 +5,7 @@ import { connectEvents } from '../src/backends/opencode/event-mux.ts'
 import { createV2Translator } from '../src/backends/opencode/event-v2.ts'
 import { parseSseChunk } from '../src/backends/opencode/sse.ts'
 import { resetOpencodeApiMemo } from '../src/backends/opencode/client.ts'
+import { waitForExpect } from './helpers.ts'
 
 // Tests here reuse base URLs, and the API-version answer is memoised per URL module-wide.
 beforeEach(resetOpencodeApiMemo)
@@ -266,7 +267,7 @@ test('2.x: stop() while the seed is being listed delivers nothing more', async (
   }) as any
   const onEvent = vi.fn()
   const conn = connectEvents({ host: '127.0.0.1', port: 4804, directory: '/fv/repo' }, { fetchImpl, onEvent, reconnect: false })
-  await vi.waitFor(() => expect(listed).toBeDefined())
+  await waitForExpect(() => expect(listed).toBeDefined())
   conn.stop()
   listed({ ok: true, status: 200, text: () => Promise.resolve('{"data":[]}') })
   await conn.done
@@ -346,7 +347,7 @@ test('2.x: two directories on one server share one /api/event connection', async
   const conns = [...got.keys()].map((directory) =>
     connectEvents({ host: '127.0.0.1', port: 4806, directory }, { fetchImpl, onEvent: (d, e) => got.get(d)!.push(e), onOnline: (d) => online.push(d), reconnect: false }),
   )
-  await vi.waitFor(() => expect(online.sort()).toEqual(['/fv', '/fv/repo']))
+  await waitForExpect(() => expect(online.sort()).toEqual(['/fv', '/fv/repo']))
   release()
   await Promise.all(conns.map((c) => c.done))
   expect(order.filter((p) => p === '/api/event')).toHaveLength(1)
@@ -391,12 +392,12 @@ test('2.x: a directory whose listing fails goes offline alone and retries on the
     { host: '127.0.0.1', port: 4808, directory: '/fv/repo' },
     { fetchImpl, onEvent: (_d, e) => events.push(e), onOnline: () => seen.push('online'), onOffline: () => seen.push('offline'), reconnect: true },
   )
-  await vi.waitFor(() => expect(seen).toEqual(['online']))
-  await vi.waitFor(() => push({ type: 'server.connected', data: {} })) // first bytes: the seed is listed, and fails (waits for the body to be read)
-  await vi.waitFor(() => expect(seen).toEqual(['online', 'offline', 'online']), { timeout: 5000 })
-  await vi.waitFor(() => expect(calls).toBe(2))
-  await vi.waitFor(() => push({ type: 'session.renamed', created: 1, location: { directory: '/fv/repo' }, data: { sessionID: 'ses_x', title: 'after' } }))
-  await vi.waitFor(() => expect(events).toEqual([{ type: 'session.updated', properties: { info: { id: 'ses_x', title: 'after', time: { updated: 1 } } } }]))
+  await waitForExpect(() => expect(seen).toEqual(['online']))
+  await waitForExpect(() => push({ type: 'server.connected', data: {} })) // first bytes: the seed is listed, and fails (waits for the body to be read)
+  await waitForExpect(() => expect(seen).toEqual(['online', 'offline', 'online']))
+  await waitForExpect(() => expect(calls).toBe(2))
+  await waitForExpect(() => push({ type: 'session.renamed', created: 1, location: { directory: '/fv/repo' }, data: { sessionID: 'ses_x', title: 'after' } }))
+  await waitForExpect(() => expect(events).toEqual([{ type: 'session.updated', properties: { info: { id: 'ses_x', title: 'after', time: { updated: 1 } } } }]))
   expect(fetchImpl.mock.calls.filter(([u]: [string]) => u.includes('/api/event'))).toHaveLength(1) // the stream itself never dropped
   conn.stop()
   await conn.done
