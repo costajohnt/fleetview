@@ -3,14 +3,13 @@ import { existsSync } from 'node:fs'
 import { DEFAULT_BACKEND, isProcessBackend } from './backends/index.ts'
 import { shouldIsolate, worktreeName, logNameCollision, logDispatchDebug, createLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import { stripControl, truncateGraphemes } from './text-utils.ts'
-import type { AttachTarget, Backend, ListedSession, ModelPair, Project, StreamProject, Worktree } from './types.ts'
+import type { AttachTarget, Backend, ListedSession, ModelPair, ProcessBackend, Project, StreamProject, Worktree } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
 
-// The dispatch pair, lifted out of App the same way usePeek and useDiscovery were: the opencode
-// path (worktree isolation, shell jobs, provisional titles), the process-backed-CLI path, and the
-// post-dispatch tail they share. Everything App owns and this needs is passed in explicitly; the
+// Dispatch, lifted out of App the same way usePeek and useDiscovery were: one path, with the
+// opencode and process-backed-CLI differences as route hooks (#187). Everything App owns and this needs is passed in explicitly; the
 // hook is re-invoked per render, so each returned `dispatch` closes over that render's values
 // exactly as the inline functions did.
 //
@@ -94,7 +93,7 @@ export function useDispatch({
   // network call was in flight is not clobbered.
   const sameSelection = (a: { projectKey: string; id: string } | null, b: { projectKey: string; id: string } | null) =>
     a?.id === b?.id && a?.projectKey === b?.projectKey
-  // The post-dispatch tail both dispatch paths share (H2): the immediate relist that makes the new
+  // The post-dispatch tail every route shares (H2): the immediate relist that makes the new
   // row reflect the backend's own record now rather than on the next poll, and the offline-list
   // cleanup a successful dispatch has just proven right.
   const noteDispatchedProject = (worktree: string, list: ListedSession[]) => {
@@ -107,44 +106,101 @@ export function useDispatch({
     })
   }
 
-  // A dispatch onto a process-backed CLI. Deliberately a separate path rather than a generalisation
-  // of the opencode one below: that path carries shell jobs, a provisional title written between
-  // createSession and promptAsync, and opencode's own worktree endpoint — all of it covered by a
-  // test corpus that must keep passing unchanged. What is shared is what is genuinely shared
-  // (target resolution, the isolation rule, roster membership, the notice).
-  const dispatchOnBackend = async (name: string, rawText: string, { thenAttach = false, agent, repo, shell = false }: DispatchOptions = {}) => {
-    const backend = backendRegistry[name]
-    if (!isProcessBackend(backend)) return flash(`no ${name} backend`)
-    // `!` is opencode's shell-job route (POST /session/:id/shell); a process-backed CLI has no
-    // equivalent, and quietly sending the command as a prompt would run something else entirely.
-    if (shell) return flash(`! shell jobs run on opencode — ${name} has no shell surface`, 4000)
-    const text = expandPastes(rawText)
-    const target = dispatchTarget(repo)
-    if (!target) return flash(projects.length ? 'no valid projects available' : 'no projects discovered yet')
-    if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
-    const typed = input
-    let dispatched = false
-    setInput('')
-    // Snapshot what was selected when the dispatch left: the auto-select below must not clobber an
-    // arrow-key move the user made while the network call was in flight.
-    const selAtDispatch = selectedSessionRef.current
-    // Isolation, by the same rule and the same FLEETVIEW_NO_ISOLATE switch as the opencode path, but
-    // made locally with `git worktree add`: these CLIs have nothing like /experimental/worktree.
-    // It matters most here, because copilot runs with --allow-all-tools. A failure falls back to
-    // the checkout and the notice says so, exactly as the opencode path does.
-    const wantIsolation = shouldIsolate(target, projects, parents)
-    let directory = target
-    let isolated = false
-    let refused = ''
-    if (isolate && wantIsolation) {
+  // Where a dispatch's backend-specific steps differ, as hooks on the one dispatch below (#187). The
+  // opencode route carries shell jobs, a provisional title written between createSession and
+  // promptAsync, and opencode's own worktree endpoint; the process route (claude, copilot) makes its
+  // worktree locally and creates-and-prompts in one adapter call. Everything else — target
+  // resolution, the isolation rule, input restore, the auto-select and the notice — is shared.
+  type DispatchRoute = {
+    // `' on claude'` in the notice; opencode, the default, is not named.
+    on: string
+    // The empty-target notice when no project is known at all.
+    noProjects: string
+    // Whether ⇧⏎ attaches straight after. A process backend's headless run is still working, and an
+    // interactive --resume beside it is a second writer (audit 2026-11-07 H1), so it only says so.
+    attaches: boolean
+    // Whether a failure flags the project offline. A process backend's failure is its CLI, not
+    // reachability, so only opencode's does.
+    marksOffline: boolean
+    // Makes the isolated worktree and returns its directory; a throw falls back to the checkout.
+    makeWorktree: (target: string, text: string) => Promise<string>
+    // Best-effort removal of a worktree made for a session that never started; true when removed.
+    dropWorktree: (directory: string, target: string) => Promise<boolean>
+    // Creates the session and sends its first prompt; calls `created` as soon as a session exists
+    // that the roster shows, so a later failure is reported as such rather than as a lost dispatch.
+    start: (directory: string, text: string, isolated: boolean, target: string, created: () => void) => Promise<string>
+    // The post-dispatch listing, which noteDispatchedProject applies.
+    relist: (directory: string) => Promise<ListedSession[]>
+    failed: (worktreeRemoved: boolean) => string
+  }
+
+  const opencodeRoute = (shell: boolean, agent: string | undefined): DispatchRoute => ({
+    on: '',
+    noProjects: 'no opencode projects discovered yet',
+    attaches: true,
+    marksOffline: true,
+    async makeWorktree(target, text) {
+      // GET /experimental/worktree returns objects ({name, directory}), and worktreeName takes
+      // directory strings — passing the objects threw a TypeError into the silent catch below,
+      // so every dispatch after the repo's first worktree ran unisolated. `?? w.name` because a
+      // row without a directory still names a taken slot.
+      const existing = ((await client.listWorktrees(target)) ?? []).map((w: Worktree | string | null | undefined) =>
+        typeof w === 'string' ? w : w?.directory ?? w?.name ?? '',
+      )
+      const name = worktreeName(text, existing)
+      // #128: a suffixed name means this prompt slugged onto an existing worktree. Reported
+      // once as the new session inheriting another session's name with a different prompt —
+      // log what was actually received so the next occurrence carries its own evidence.
+      if (name !== worktreeName(text)) logNameCollision({ prompt: text, name, existing })
+      const made = await client.createWorktree(name, target)
+      if (!made?.directory) throw new Error('server returned no worktree')
+      // Stream it immediately rather than waiting for the poll to notice a new project — this is
+      // the row the user is about to watch start. A failure here is not an isolation failure: the
+      // worktree exists and the session goes into it.
+      await streamProjectRef.current?.(made.directory)?.catch(() => {})
+      return made.directory
+    },
+    dropWorktree: async (directory, target) => (await client.removeWorktree?.(directory, target).then(() => true, () => false)) ?? false,
+    async start(directory, text, _isolated, _target, created) {
+      // A `@agent` prefix on this dispatch wins; otherwise fall back to the launch --agent default.
+      // Coalesce to undefined (not null) when neither is set — createSession omits the field entirely.
+      const session = await client.createSession({ agent: agent ?? initialAgent ?? undefined, model: dispatchModel }, directory)
+      // opencode names the session itself once the first turn lands; until then the row would read
+      // "New session - <timestamp>", so show what was asked for.
+      store.setProvisionalTitle(directory, session.id, shell ? `! ${text}` : text)
+      // membership added immediately after createSession succeeds, before promptAsync —
+      // dispatch counts as "backgrounded" even if the prompt itself later fails.
+      // The prompt rides the membership (capped — a pasted wall of text is not a lookup key) so
+      // a pasted URL can find this session later, agent view's any-URL filter.
+      addMember(directory, session.id, { ...(shell ? { shell: true } : {}), prompt: text.slice(0, 2000) })
+      created()
+      // Same launch --agent fallback as createSession's — a `fleetview --agent foo` run must not
+      // silently send `!` jobs as 'build' (the CLI's runBg --exec honors it).
+      if (shell) await client.runShell(session.id, text, directory, agent ?? initialAgent ?? 'build')
+      else await client.promptAsync(session.id, text, directory)
+      return session.id
+    },
+    relist: (directory) => client.listSessions(directory),
+    failed: (worktreeRemoved) => (worktreeRemoved ? 'dispatch failed — worktree removed, project marked offline' : 'dispatch failed — project marked offline'),
+  })
+
+  const processRoute = (name: string, backend: ProcessBackend, agent: string | undefined): DispatchRoute => ({
+    on: ` on ${name}`,
+    noProjects: 'no projects discovered yet',
+    attaches: false,
+    marksOffline: false,
+    // Made locally with `git worktree add`: these CLIs have nothing like /experimental/worktree. It
+    // matters most here, because copilot runs with --allow-all-tools.
+    makeWorktree: async (target, text) => createLocalWorktree(target, text),
+    async dropWorktree(directory, target) {
       try {
-        directory = createLocalWorktree(target, text)
-        isolated = true
-      } catch (e) {
-        refused = isolationFailure(e, target)
+        removeLocalWorktree(directory, target)
+        return true
+      } catch {
+        return false
       }
-    }
-    try {
+    },
+    async start(directory, text, isolated, target, created) {
       // Streaming starts before the dispatch, not after: the run can finish inside the poll interval
       // and a subscription attached afterwards would miss the whole of it. A fresh worktree is in no
       // project record, so it is named explicitly.
@@ -158,65 +214,41 @@ export function useDispatch({
         // target CLI would be rejected argv rather than a useful default.
         model: dispatchModel?.id ?? undefined,
       })
-      // Past this point the session exists and is running: anything that fails from here is a
-      // refresh problem, not a dispatch problem — same rule as the opencode path below.
-      dispatched = true
-      if (name !== DEFAULT_BACKEND) store.noteOrigin(directory, ref.id, name)
+      created()
+      store.noteOrigin(directory, ref.id, name)
       store.setProvisionalTitle(directory, ref.id, text)
       // `backend` rides the membership so a restart knows which CLI this row belongs to before any
       // event has arrived — the same soft-migration shape as every other member field (absent means
       // opencode). `repo` does the same for a local worktree: opencode never lists it, so the
       // membership is what groups its rows under the repository and lets ^x^x find the parent.
       addMember(directory, ref.id, { prompt: text.slice(0, 2000), backend: name, ...(isolated ? { repo: target } : {}) })
-      // Relist parity with the opencode path (H2): the same per-row origin-tagging the periodic
-      // listing does (streamBackend), then the shared tail. A CLI that hasn't written its record
-      // yet just lists without the new row, and the next poll catches up.
+      return ref.id
+    },
+    // The same per-row origin-tagging the periodic listing does (streamBackend). A CLI that hasn't
+    // written its record yet just lists without the new row, and the next poll catches up.
+    async relist(directory) {
       const list = backend.normaliseSessions(await backend.listSessions(directory))
       for (const s of list) store.noteOrigin(directory, s.id, name)
-      noteDispatchedProject(directory, list)
-      // No attach here even for ⇧⏎ (audit 2026-11-07 H1): the headless run is still working, and
-      // an interactive --resume beside it is a second writer, so the backend refuses it anyway.
-      // Land the selection on the row this dispatch just created instead, so ^x and a later Enter
-      // act on it, unless the selection moved during the awaits above: the user's own navigation wins.
-      if (sameSelection(selectedSessionRef.current, selAtDispatch)) {
-        selectedSessionRef.current = { projectKey: directory, id: ref.id }
-        setSelectedKey(null)
-      }
-      // Same wording as the opencode path: the repository the user chose, plus a warning only
-      // when a worktree was wanted and the row edits the checkout instead.
-      const why = isolated || !wantIsolation ? '' : isolate ? ` — ${notIsolated(refused)}` : ' — isolation off, it edits the checkout'
-      const when = thenAttach ? '; attach when it finishes' : ''
-      flash(`dispatched into ${basename(target) || target} on ${name}${when}${why}`, why || when ? 5000 : undefined)
-    } catch {
-      if (dispatched) return flash('session started, but the project list is stale')
-      // Nothing ran in the worktree, so it is empty by construction and goes without worktreeSafety:
-      // with no session in it, nothing in the UI could ever reach it again. Best-effort, like the
-      // opencode path's orphan cleanup: the dispatch has already failed either way.
-      if (isolated) {
-        try {
-          removeLocalWorktree(directory, target)
-        } catch {}
-      }
-      setInput((current) => (current === '' ? typed : current))
-      flash(`${name} dispatch failed`)
-    }
-  }
+      return list
+    },
+    failed: () => `${name} dispatch failed`,
+  })
 
-  const dispatch = async (rawText: string, { thenAttach = false, agent, repo, shell = false, backend }: DispatchOptions = {}) => {
-    // Everything below this line is the opencode path, untouched. A dispatch is only diverted when
-    // something actually named another backend — `@claude`, or a launch default — so the opencode
-    // behaviour this whole phase must not change is reached by exactly the code that reached it
-    // before.
-    const backendName = backend ?? initialBackend
-    if (backendName !== DEFAULT_BACKEND) return dispatchOnBackend(backendName, rawText, { thenAttach, agent, repo, shell })
+  const dispatch = async (rawText: string, { thenAttach = false, agent, repo, shell = false, backend: wanted }: DispatchOptions = {}) => {
+    // A dispatch only leaves opencode when something actually named another backend — `@claude`, or
+    // a launch default.
+    const name = wanted ?? initialBackend
+    const backend = backendRegistry[name]
+    const route = name === DEFAULT_BACKEND ? opencodeRoute(shell, agent) : isProcessBackend(backend) ? processRoute(name, backend, agent) : null
+    if (!route) return flash(`no ${name} backend`)
+    // `!` is opencode's shell-job route (POST /session/:id/shell); a process-backed CLI has no
+    // equivalent, and quietly sending the command as a prompt would run something else entirely.
+    if (shell && name !== DEFAULT_BACKEND) return flash(`! shell jobs run on opencode — ${name} has no shell surface`, 4000)
     const text = expandPastes(rawText)
-    // A `@agent` prefix on this dispatch wins; otherwise fall back to the launch --agent default.
-    // Coalesce to undefined (not null) when neither is set — createSession omits the field entirely.
-    const effectiveAgent = agent ?? initialAgent ?? undefined
     const target = dispatchTarget(repo)
     // pickTarget already skipped every project whose worktree is gone (#102), so an empty target with
     // projects on the roster means all of them are stale — say that instead of naming a dead path.
-    if (!target) return flash(projects.length ? 'no valid projects available' : 'no opencode projects discovered yet')
+    if (!target) return flash(projects.length ? 'no valid projects available' : route.noProjects)
     // A target can outlive the directory (#22): a project record survives the listing that dropped
     // it, so a deleted session's worktree is still nameable, and dispatching into one is accepted
     // silently — the server creates a session against a path that is gone. Refuse before anything is
@@ -224,6 +256,7 @@ export function useDispatch({
     if (!dirExistsImpl(target)) return flash(`${basename(target) || target} no longer exists`)
     const typed = input // put it back if the dispatch fails; retyping a lost prompt is miserable
     let dispatched = false
+    let created = false
     setInput('')
     // Snapshot for the auto-select below — an arrow-key move made while this dispatch is in
     // flight must win over it.
@@ -231,35 +264,18 @@ export function useDispatch({
     // Where the session will actually run. Isolation happens before the session exists, so there is
     // no window in which it could edit the shared working copy: agent view moves a background
     // session into its own worktree "before editing files", and this is fleetview's version of that.
-    let worktree = target
+    // isolate=false (FLEETVIEW_NO_ISOLATE) skips the worktree entirely — the session edits the
+    // checkout directly, agent view's `bgIsolation: "none"`. Isolation stays the default.
+    const wantIsolation = shouldIsolate(target, projects, parents)
+    let directory = target
     let isolated = false
     let refused = ''
     let worktreeRemoved = false
-    let created = false
     try {
-      // isolate=false (FLEETVIEW_NO_ISOLATE) skips the worktree entirely — the session edits the
-      // checkout directly, agent view's `bgIsolation: "none"`. Isolation stays the default.
-      if (isolate && shouldIsolate(target, projects, parents)) {
+      if (isolate && wantIsolation) {
         try {
-          // GET /experimental/worktree returns objects ({name, directory}), and worktreeName takes
-          // directory strings — passing the objects threw a TypeError into the silent catch below,
-          // so every dispatch after the repo's first worktree ran unisolated. `?? w.name` because a
-          // row without a directory still names a taken slot.
-          const existing = ((await client.listWorktrees(target)) ?? []).map((w: Worktree | string | null | undefined) =>
-            typeof w === 'string' ? w : w?.directory ?? w?.name ?? '',
-          )
-          const name = worktreeName(text, existing)
-          // #128: a suffixed name means this prompt slugged onto an existing worktree. Reported
-          // once as the new session inheriting another session's name with a different prompt —
-          // log what was actually received so the next occurrence carries its own evidence.
-          if (name !== worktreeName(text)) logNameCollision({ prompt: text, name, existing })
-          const created = await client.createWorktree(name, target)
-          if (!created?.directory) throw new Error('server returned no worktree')
-          worktree = created.directory
+          directory = await route.makeWorktree(target, text)
           isolated = true
-          // Stream it immediately rather than waiting for the poll to notice a new project —
-          // this is the row the user is about to watch start.
-          await streamProjectRef.current?.(worktree)
         } catch (e) {
           // Isolation is a safety measure, not a precondition. A server too old for
           // /experimental/worktree, or one that refuses, must not cost the user their dispatch —
@@ -267,65 +283,46 @@ export function useDispatch({
           // the dispatch confirmation rather than as its own notice, which the confirmation would
           // overwrite a few milliseconds later — a warning nobody can read is not a warning.
           // #192: with its reason, so an old server reads differently from a refusal worth a look.
-          // A throw after `isolated` (the stream subscription) is not an isolation failure.
-          if (!isolated) refused = isolationFailure(e, target)
+          refused = isolationFailure(e, target)
         }
       }
-      const session = await client.createSession({ agent: effectiveAgent, model: dispatchModel }, worktree).catch(async (e) => {
-        // The worktree was made for this session and nothing else: with no session in it, nothing
-        // in the UI can reach it again (sandboxes are hidden from browse and `@repo`, and
-        // removeWorktreeFor runs only on session delete). It is empty by construction, so it goes
-        // without worktreeSafety. Best-effort: the dispatch has already failed either way.
-        if (isolated) {
-          worktreeRemoved = await client.removeWorktree?.(worktree, target).then(() => true, () => false) ?? false
-        }
-        throw e
+      const id = await route.start(directory, text, isolated, target, () => {
+        created = true
       })
-      // opencode names the session itself once the first turn lands; until then the row would read
-      // "New session - <timestamp>", so show what was asked for.
-      store.setProvisionalTitle(worktree, session.id, shell ? `! ${text}` : text)
-      // membership added immediately after createSession succeeds, before promptAsync —
-      // dispatch counts as "backgrounded" even if the prompt itself later fails.
-      // The prompt rides the membership (capped — a pasted wall of text is not a lookup key) so
-      // a pasted URL can find this session later, agent view's any-URL filter.
-      addMember(worktree, session.id, { ...(shell ? { shell: true } : {}), prompt: text.slice(0, 2000) })
-      created = true
-      // Same launch --agent fallback as the prompt branch's effectiveAgent — a `fleetview --agent
-      // foo` run must not silently send `!` jobs as 'build' (the CLI's runBg --exec honors it).
-      if (shell) await client.runShell(session.id, text, worktree, agent ?? initialAgent ?? 'build')
-      else await client.promptAsync(session.id, text, worktree)
       // Past this point the session exists and is running. Anything that fails from here is a
       // refresh problem, not a dispatch problem — handing the prompt back would invite the user
       // to dispatch a second identical session.
       dispatched = true
-      noteDispatchedProject(worktree, await client.listSessions(worktree))
-      // Say where it went. An `@name` that matches no repository stays in the prompt and the
-      // dispatch falls back to another project, which is otherwise invisible until you notice the
-      // row is in the wrong place.
+      noteDispatchedProject(directory, await route.relist(directory))
+      const attachNow = thenAttach && route.attaches
       // Select the row this dispatch just created — the next Enter attaches to it instead of
       // whatever happened to be under the cursor. By identity, not pendingSelect: the row may not
       // render for another poll, and pendingSelect drops a request it can't resolve. Skipped when
       // the selection moved during the awaits above: the user's own navigation wins.
-      if (!thenAttach && sameSelection(selectedSessionRef.current, selAtDispatch)) {
-        selectedSessionRef.current = { projectKey: worktree, id: session.id }
+      if (!attachNow && sameSelection(selectedSessionRef.current, selAtDispatch)) {
+        selectedSessionRef.current = { projectKey: directory, id }
         setSelectedKey(null)
       }
       // Names the repository: the worktree path is a hashed cache directory that means nothing to
-      // the user, and the repository is what they actually chose. When isolation was expected and
-      // did not happen, the row is editing the shared checkout — worth knowing before a second
-      // dispatch lands in the same place. A worktree was wanted but the row edits the checkout —
-      // either isolation is off (FLEETVIEW_NO_ISOLATE, a deliberate choice) or the server couldn't
-      // make one (a warning).
-      const why = isolated || !shouldIsolate(target, projects, parents) ? '' : isolate ? notIsolated(refused) : 'isolation off, it edits the checkout'
+      // the user, and the repository is what they actually chose. A worktree was wanted but the row
+      // edits the checkout — either isolation is off (FLEETVIEW_NO_ISOLATE, a deliberate choice) or
+      // it couldn't be made (a warning).
+      const why = isolated || !wantIsolation ? '' : isolate ? notIsolated(refused) : 'isolation off, it edits the checkout'
+      const when = thenAttach && !route.attaches ? '; attach when it finishes' : ''
+      const said = `dispatched into ${basename(target) || target}${route.on}${when}${why ? ` — ${why}` : ''}`
       // #204: an attach takes the screen, so the warning waits for the return to the roster rather
       // than flashing unseen behind it. A plain confirmation isn't worth one there.
-      const said = `dispatched into ${basename(target) || target}${why ? ` — ${why}` : ''}`
-      if (thenAttach) attach({ id: session.id, projectKey: worktree }, why ? said : undefined)
-      else flash(said, why ? 5000 : undefined)
+      if (attachNow) attach({ id, projectKey: directory }, why ? said : undefined)
+      else flash(said, why || when ? 5000 : undefined)
     } catch {
+      // The worktree was made for this session and nothing else: with no session in it, nothing
+      // in the UI can reach it again (sandboxes are hidden from browse and `@repo`, and
+      // removeWorktreeFor runs only on session delete). It is empty by construction, so it goes
+      // without worktreeSafety. Best-effort: the dispatch has already failed either way.
+      if (isolated && !created) worktreeRemoved = await route.dropWorktree(directory, target)
       // A removed worktree is a directory that no longer exists: the offline flag belongs on the
       // repository the user chose, which is the header they can see.
-      setOfflineProjects((s) => new Set(s).add(worktreeRemoved ? target : worktree))
+      if (route.marksOffline) setOfflineProjects((s) => new Set(s).add(worktreeRemoved ? target : directory))
       if (dispatched) return flash('session started, but the project list is stale')
       // The session exists and is on the roster; only its prompt failed. Handing the prompt back
       // would invite a retry that makes a second, duplicate session — the row is the place to
@@ -335,7 +332,7 @@ export function useDispatch({
       // for up to the client's 10s timeout, and overwriting a half-typed prompt with the failed
       // one is worse than losing it.
       setInput((current) => (current === '' ? typed : current))
-      flash(worktreeRemoved ? 'dispatch failed — worktree removed, project marked offline' : 'dispatch failed — project marked offline')
+      flash(route.failed(worktreeRemoved))
     }
   }
 
