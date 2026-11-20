@@ -69,7 +69,7 @@ test('after a lost connection the credential waits for a pid-matched probe, on r
     // A healthy answer that never asked for the credential proves nothing: still withheld. (On a
     // server recorded as 2.x that answer is a stranger outright.)
     expect(await probeServer({ ...server, api: undefined }, fetchImpl, () => null)).toBe('healthy')
-    expect(await probeServer(server, fetchImpl, () => null)).toBe('unauthorized')
+    expect(await probeServer(server, fetchImpl, () => null)).toBe('stranger')
     await request()
     expect(shown.squatter).toEqual([undefined, undefined, undefined])
     listener = 'ours'

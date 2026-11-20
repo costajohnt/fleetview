@@ -870,6 +870,50 @@ test('adopting an externally started passwordless server mints nothing', async (
   expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
 })
 
+// #216: every candidate saw and burned a password, so the walk rotated one per port. The last one
+// belongs to no server; left in env, the next pass would offer it as if the user had set it.
+test('a fallback walk that ends ok:false leaves no generated password in env', async () => {
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: () => Promise.resolve('unauthorized'),
+    spawnServer: () => 777,
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    env,
+    pollMs: 1,
+    processKill: () => true,
+    spawnSyncImpl: () => ({}),
+    warn: () => {},
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, port: 4950 })
+  expect(result.ok).toBe(false)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+})
+
+// #216 N1: a stranger on the port was never shown the password, and the warning says so.
+test('a stranger on the port gets its own warning, not the rejected-password one', async () => {
+  const spawned: any[] = []
+  const warn = vi.fn()
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'stranger' : spawned.length > 0 ? 'healthy' : 'unreachable'),
+    spawnServer: (s: any) => (spawned.push(s), 777),
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn,
+    env: { OPENCODE_SERVER_PASSWORD: 'minted' } as NodeJS.ProcessEnv,
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, password: 'minted', api: 2 })
+  expect(result.ok).toBe(true)
+  expect(spawned.map((s) => s.port)).toEqual([4901])
+  expect(spawned[0].password).not.toBe('minted') // burned all the same
+  expect(warn.mock.calls[0][0]).toMatch(/was not shown the password/)
+  expect(warn.mock.calls[0][0]).not.toMatch(/rejecting/)
+})
+
 test('spawn that never becomes healthy, no fallback candidate works → {ok:false, reason} after poll window exhausted', async () => {
   const deps = {
     isServerHealthy: () => Promise.resolve(false),

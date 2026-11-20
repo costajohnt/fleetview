@@ -67,7 +67,9 @@ export async function isServerHealthy(server: ServerRef, fetchImpl = globalThis.
 // properly (a non-2xx other than 401, or no answer at all). That is fleetview's own server booting or
 // overloaded, or a stranger that now holds the password; only the caller knows which pid it spawned,
 // so the caller decides, and anything it cannot prove is its own is treated as having seen it.
-export type ProbeState = 'healthy' | 'unauthorized' | 'unreachable' | 'unconfirmed'
+//
+// `stranger` (#216): the listener is not the server on record, and was never shown the credential.
+export type ProbeState = 'healthy' | 'unauthorized' | 'unreachable' | 'unconfirmed' | 'stranger'
 
 // #213: `server.pid`, when set, is the process the caller expects on that port (the child it just
 // spawned, or server.json's record). 2.x's /api/info body carries the answering server's pid on
@@ -85,14 +87,22 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl, async () => server.api !== 2)
   // A server recorded as 2.x that answers as 1.x is not that server: 1.x reports no pid, so taking
   // the answer would skip the pid check and hand the stranger the password. Treated as one that
-  // rejected it, which burns and rotates the password (cli.ts adoptServerCredential).
-  if (v1 === 'healthy' && server.api === 2) return 'unauthorized'
+  // rejected it, so the password is burned and rotated all the same (cli.ts adoptServerCredential).
+  if (v1 === 'healthy' && server.api === 2) return 'stranger'
   if (v1 === 'healthy') noteOpencodeApi(base, 1)
   if (v1 !== 'unreachable') return v1
   // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
   // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
   // the password (the reason opencodeApi in client.ts asks this route credential-free).
   const owner = server.pid ? (pid: number) => descendsFrom(pid, server.pid!, parentOf) : undefined
+  // #216: a 2.x record holding fleetview's own password but no pid (a crash between trySpawn's two
+  // saves) has nothing to match the answer against, so the password is not offered at all. A record
+  // without a password is a user-set one, which #213 leaves unmatched on purpose.
+  if (server.api === 2 && !owner && server.password) {
+    const bare = await askServer(server, '/api/info', isV2Info, fetchImpl, async () => false)
+    if (bare === 'healthy') noteOpencodeApi(base, 2)
+    return bare === 'unauthorized' ? 'stranger' : bare
+  }
   const v2 = await askServer(server, '/api/info', isV2Info, fetchImpl, isV2UnauthorizedResponse, owner)
   // What the probe found is the server's API for everything after it (client.ts opencodeApi).
   if (v2 === 'healthy') noteOpencodeApi(base, 2)
