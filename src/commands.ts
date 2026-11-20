@@ -460,8 +460,8 @@ export async function runAnswer(
     const decision = reply === 'y' ? 'once' : reply === 'a' ? 'always' : 'reject'
     try {
       await client.respondPermission(permission.id, decision, worktree)
-    } catch {
-      error(`couldn't answer permission on ${session.id}`)
+    } catch (e) {
+      error(`couldn't answer permission on ${session.id}: ${stripControl(e instanceof Error ? e.message : String(e))}`)
       setExitCode(1)
       return
     }
@@ -483,8 +483,8 @@ export async function runAnswer(
     try {
       // One answer array per question, each holding the chosen labels — a single choice is [[label]].
       await client.respondQuestion(question.id, [[option.label]], worktree)
-    } catch {
-      error(`couldn't answer question on ${session.id}`)
+    } catch (e) {
+      error(`couldn't answer question on ${session.id}: ${stripControl(e instanceof Error ? e.message : String(e))}`)
       setExitCode(1)
       return
     }
@@ -494,8 +494,8 @@ export async function runAnswer(
 
   try {
     await client.promptAsync(session.id, reply, worktree)
-  } catch {
-    error(`couldn't send to ${session.id}`)
+  } catch (e) {
+    error(`couldn't send to ${session.id}: ${stripControl(e instanceof Error ? e.message : String(e))}`)
     setExitCode(1)
     return
   }
@@ -528,15 +528,27 @@ export async function runWatch(
   const { session, worktree, server } = found
   const client = found.client as ReturnType<NonNullable<RunWatchDeps['createClient']>>
   const printed = new Map<string, number>()
+  // #179: opencode 1.x streams the user's own prompt as a text part too (the store's M7 check exists
+  // for the same reason). A deny-list of known user messages rather than an allow-list of assistant
+  // ones: a watch started mid-turn never saw the assistant's message.updated, and must still print.
+  const userMessages = new Set<string>()
+  // #179: a turn that failed, or a stream that ended before the session went idle, exits 1.
+  let turnFailed = false
   // Assigned synchronously inside the executor, so it is set by the time anything can resolve.
   let conn: ReturnType<typeof connect> | null = null
-  await new Promise<void>((done) => {
+  const outcome = await new Promise<'idle' | 'lost'>((done) => {
     conn = connect(
       { host: server.host, port: server.port, directory: worktree },
       {
         onEvent: (_directory, event) => {
+          if (event.type === 'message.updated' && event.properties.sessionID === session.id) {
+            const info = event.properties.info
+            if (info?.role === 'user' && typeof info.id === 'string') userMessages.add(info.id)
+            return
+          }
           if (event.type === 'message.part.updated' && event.properties.sessionID === session.id) {
             const part = event.properties.part
+            if (typeof part?.messageID === 'string' && userMessages.has(part.messageID)) return
             // #174: 'reasoning' parts carry `.text` too; only 'text' parts are the reply (as in logs/peek).
             const text = part?.type === 'text' && typeof part.text === 'string' ? stripControl(part.text) : ''
             if (!text) return
@@ -554,11 +566,12 @@ export async function runWatch(
           if (event.type === 'session.error' && event.properties.sessionID === session.id) {
             const failure = errorLabel(event.properties.error)
             if (failure) error(`error: ${failure}`)
+            turnFailed = true
             return
           }
           // Idle is how a turn ends.
-          if (event.type === 'session.status' && event.properties.sessionID === session.id && event.properties.status?.type === 'idle') done()
-          if (event.type === 'session.deleted' && event.properties.info?.id === session.id) done()
+          if (event.type === 'session.status' && event.properties.sessionID === session.id && event.properties.status?.type === 'idle') done('idle')
+          if (event.type === 'session.deleted' && event.properties.info?.id === session.id) done('idle')
         },
         // M16: a session already idle (or gone idle before the stream connected) never sends an
         // idle frame, so ask once the stream is up: absent from the status map or idle means there
@@ -568,7 +581,7 @@ export async function runWatch(
         onOnline: () => {
           void client.sessionStatus(worktree).then(
             (statuses) => {
-              if (statuses && typeof statuses === 'object' && (statuses[session.id] ?? { type: 'idle' }).type === 'idle') done()
+              if (statuses && typeof statuses === 'object' && (statuses[session.id] ?? { type: 'idle' }).type === 'idle') done('idle')
             },
             () => {},
           )
@@ -578,12 +591,15 @@ export async function runWatch(
         reconnect: false,
       },
     )
-    // The stream ending on its own (server stopped, session's project gone) ends the watch too.
-    void conn.done.then(() => done(), () => done())
+    // The stream ending on its own (never connected, dropped, server stopped) ends the watch too,
+    // but as a failure: the caller was waiting for an idle it never got.
+    void conn.done.then(() => done('lost'), () => done('lost'))
   })
   // Always: a watch that ended because the session went idle still holds an open SSE request, and
   // leaving it open keeps the process alive after the command is logically over.
   ;(conn as ReturnType<typeof connect> | null)?.stop()
+  if (outcome === 'lost') error(`lost the event stream before ${session.id} went idle`)
+  if (outcome === 'lost' || turnFailed) setExitCode(1)
 }
 
 // --- Every backend: ls/--json, status, attach, logs, stop, rm ---
@@ -935,7 +951,12 @@ export async function runAttach(args: ParsedArgs, deps: SessionCommandDeps) {
   if (result.error) {
     d.error(`couldn't launch ${found.backend}: ${result.error.message}`)
     d.setExitCode(1)
+    return
   }
+  // #179: the child's failure is the command's failure (opencode attach exits 1 on a bad --dir).
+  // It has already said why on the inherited stderr; a signal-killed child has no status, so 1.
+  if (result.signal) d.setExitCode(1)
+  else if (typeof result.status === 'number' && result.status !== 0) d.setExitCode(result.status)
 }
 
 // `fleetview logs <id> [--all]`: a session's recent output, printed once.
@@ -951,7 +972,15 @@ export async function runLogs(args: ParsedArgs, deps: SessionCommandDeps) {
     d.setExitCode(1)
     return
   }
-  const messages = await found.opencode.client.listMessages(found.id, found.worktree).catch(() => [])
+  let messages
+  try {
+    messages = await found.opencode.client.listMessages(found.id, found.worktree)
+  } catch (e) {
+    // #179: an unreadable transcript is not an empty one.
+    d.error(`couldn't read messages for ${found.id}: ${stripControl(e instanceof Error ? e.message : String(e))}`)
+    d.setExitCode(1)
+    return
+  }
   // "Print recent output" — the whole transcript of a long session is pages of text nobody asked
   // for, and the first thing in it is usually a prompt the user wrote themselves. --all overrides.
   const recent = args.all ? (messages ?? []) : (messages ?? []).slice(-RECENT_MESSAGES)

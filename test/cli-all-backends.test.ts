@@ -232,3 +232,31 @@ test('logs on a claude session points at attach instead of printing nothing', as
   expect(h.errs).toEqual([`claude sessions have no transcript fleetview can read; fleetview attach ${CLAUDE_ID} to read it`])
   expect(h.codes).toEqual([1])
 })
+
+// #179: opencode logs and attach report failure through the exit status.
+test('logs on an opencode session exits 1 when the transcript cannot be read', async () => {
+  const h = setup()
+  h.client.listMessages = vi.fn(() => Promise.reject(new Error('GET /session/ses_open1/message → 500')))
+  await runLogs({ command: 'logs', id: 'ses_open1' }, h.deps)
+  expect(h.errs).toEqual(['couldn\'t read messages for ses_open1: GET /session/ses_open1/message → 500'])
+  expect(h.codes).toEqual([1])
+  expect(h.out).toEqual([])
+})
+
+test('logs on an opencode session prints the transcript and exits 0', async () => {
+  const h = setup()
+  h.client.listMessages = vi.fn(() => Promise.resolve([{ info: { role: 'assistant' }, parts: [{ type: 'text', text: 'all green' }] }] as any))
+  await runLogs({ command: 'logs', id: 'ses_open1' }, h.deps)
+  expect(h.out).toEqual(['opencode: all green'])
+  expect(h.codes).toEqual([])
+})
+
+test('attach on an opencode session passes the child exit status through', async () => {
+  for (const [result, codes] of [[{ status: 0, signal: null }, []], [{ status: 1, signal: null }, [1]], [{ status: null, signal: 'SIGKILL' }, [1]]] as const) {
+    const h = setup()
+    const spawnSyncImpl = vi.fn(() => result as any)
+    await runAttach({ command: 'attach', id: 'ses_open1' }, { ...h.deps, spawnSyncImpl })
+    expect(spawnSyncImpl).toHaveBeenCalled()
+    expect(h.codes).toEqual(codes)
+  }
+})
