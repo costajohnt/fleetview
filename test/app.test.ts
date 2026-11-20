@@ -2760,10 +2760,13 @@ test('#192: an isolation failure names its reason in the confirmation and the di
 // #204: alt+enter attached before the warning branch, so a dispatch that fell back to the checkout
 // said nothing at all. The warning now waits for the return to the roster; a flash made while
 // attached would expire behind the session unseen.
+const detached = { detached: true, sessionId: 's9', worktree: '/x/alpha' }
 test.each([
-  ['a refused worktree', {}, 'not isolated (worktree failed: 404)'],
-  ['isolation off', { isolate: false }, 'isolation off, it edits the checkout'],
-])('#204: dispatch-then-attach with %s shows the warning after detach', async (_, props, warning) => {
+  ['a refused worktree', {}, detached, 'not isolated (worktree failed: 404)'],
+  ['isolation off', { isolate: false }, detached, 'isolation off, it edits the checkout'],
+  // An attach that fails still leaves the dispatched session running: both lines are said.
+  ['a failed attach', {}, { message: 'attach broke' }, 'attach broke; dispatched into alpha — not isolated'],
+])('#204: dispatch-then-attach with %s shows the warning on return', async (_, props, settled, warning) => {
   const { deps } = isolatingDeps()
   deps.client.createWorktree = vi.fn(() => Promise.reject(new Error('404')))
   let detach: any
@@ -2774,7 +2777,7 @@ test.each([
   await tick() // the input state must flush, or Enter sees an empty input and attaches instead
   stdin.write('\x1B\r') // alt+enter: dispatch and attach
   await waitFor(() => lastFrame() === '')
-  detach({ detached: true, sessionId: 's9', worktree: '/x/alpha' })
+  detach(settled)
   await waitFor(() => lastFrame().includes(warning))
   expect(lastFrame()).toContain('dispatched into alpha')
 })

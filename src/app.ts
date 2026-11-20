@@ -221,6 +221,9 @@ export function App({
   // during an attach/detach cycle, which re-renders via `attached` anyway. Not persisted across
   // restarts — a stale bold weeks later is worse than none.
   const lastAttached = useRef<{ id: string; projectKey: string } | null>(null)
+  // #204: notices held for the return to the roster, drained by the attach's `back()`. A list, so a
+  // dispatch-then-attach that arrives while another session is attached still gets its say.
+  const returnNotices = useRef<string[]>([])
   // A selection request by identity, resolved against the live rows by the effect below.
   const [pendingSelect, setPendingSelect] = useState<{ id: string; projectKey: string } | null>(null)
   const [helpPageIndex, setHelpPageIndex] = useState(0)
@@ -578,9 +581,10 @@ export function App({
   // only has to stop reading the keyboard while somebody else owns the terminal.
   //
   // `siblings` is what Alt+1..9 switches between: the rows as currently ordered on screen.
-  // `notice` is shown on return (#204): a dispatch-then-attach has its confirmation to give, and a
-  // flash made now would expire unseen behind the attached session.
-  const attach = (row: AttachTarget, notice?: string) => {
+  // `returnNotice` is shown on return (#204): a dispatch-then-attach has its confirmation to give,
+  // and a flash made now would expire unseen behind the attached session.
+  const attach = (row: AttachTarget, returnNotice?: string) => {
+    if (returnNotice) returnNotices.current.push(returnNotice)
     // Read through a ref, not the render closure. `dispatch` captures the `attach` of the render
     // where the keypress happened, and in that render `attached` is still false — so the state
     // value can never see an attachment that began while the dispatch was in flight, which is the
@@ -638,8 +642,10 @@ export function App({
         // A message without a detach is an attach that never happened (refused STILL_WORKING, a
         // launch failure, an instant silent death), so the row was never attached to.
         if (message && !result?.detached) lastAttached.current = previous
-        if (message) flash(message, 4000)
-        else if (notice) flash(notice, 5000)
+        // Joined, not either-or: an attach that failed still leaves the dispatched session running.
+        const queued = returnNotices.current.splice(0).join('; ')
+        const said = [message, queued].filter(Boolean).join('; ')
+        if (said) flash(said, queued ? 5000 : 4000)
       }
       done.then(back, () => back())
       return
