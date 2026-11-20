@@ -1623,15 +1623,23 @@ test('a number on a session waiting for a permission points at y/a/d', async () 
 
 // #175: an unreadable /question or /permission is not "nothing pending" — a pick or y/a/d refuses.
 test('a failed pending-request read refuses a number or y/a/d instead of prompting with it', async () => {
-  for (const [reply, failing] of [['2', 'listQuestions'], ['y', 'listPermissions']]) {
+  for (const [reply, failing, kind] of [['2', 'listQuestions', 'questions'], ['y', 'listPermissions', 'permissions']]) {
     const h = answerHarness({ questions: [pendingQuestion] })
-    h.client[failing as 'listQuestions'] = vi.fn(() => Promise.reject(new Error('503')))
+    h.client[failing as 'listQuestions'] = vi.fn(() => Promise.reject(new Error('GET → 503')))
     await runAnswer({ command: 'answer', id: 'ses_abc1', reply }, h.deps)
-    expect(h.errs).toEqual(["couldn't read pending requests on ses_abc123"])
+    expect(h.errs).toEqual([`couldn't read pending ${kind} on ses_abc123: GET → 503`])
     expect(h.codes).toEqual([1])
     expect(h.client.promptAsync).not.toHaveBeenCalled()
     expect(h.client.respondQuestion).not.toHaveBeenCalled()
   }
+})
+
+test('one failing list does not block a reply that only needs the other', async () => {
+  const h = answerHarness({ permissions: [pendingPermission] })
+  h.client.listQuestions = vi.fn(() => Promise.reject(new Error('404')))
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'y' }, h.deps)
+  expect(h.client.respondPermission).toHaveBeenCalledWith('per_1', 'once', '/x/repo')
+  expect(h.codes).toEqual([])
 })
 
 test('free text still sends when the pending-request read fails', async () => {
