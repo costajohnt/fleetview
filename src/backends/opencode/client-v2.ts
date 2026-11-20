@@ -9,11 +9,12 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, join, resolve } from 'node:path'
-import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
+import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, Part, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 import { opencodeRequest } from './request.ts'
 import { stateDir } from '../../paths.ts'
 import { GIT_SAFE_ARGS } from '../../git-safe.ts'
+import { deleteMergedBranch } from '../../worktree.ts'
 import type { AgentInfo, CommandInfo, ModelSelection, ProvidersResponse } from './client.ts'
 
 type Auth = () => string | undefined
@@ -104,17 +105,33 @@ export function v2Answer(form: Record<string, unknown>, answers: unknown) {
 
 // 2.x messages are a `type`-discriminated union; peek reads 1.x's {info: {role, error}, parts}.
 // User text is top level, assistant text is in `content`, and a failed turn can also end in an
-// `idle` record with the error. Everything else (shell, compaction, switches) has no 1.x row.
+// `idle` record with the error. Tool calls and `!` shell jobs (#223) become 1.x `tool` parts with
+// `state.output`, which messageBody shows for a turn with no text: a 2.x tool's result is a list of
+// content blocks, a shell job's is `output.output`. Everything else (compaction, switches) has no
+// 1.x row.
+const toolPart = (output: string, messageID: string | undefined): Part => ({ type: 'tool', state: { output }, messageID })
+const contentText = (value: unknown) => records(value).filter((c) => c.type === 'text').map((c) => asString(c.text) ?? '').join('\n')
 export function v1Messages(rows: Record<string, unknown>[]): OpencodeMessage[] {
   const out: OpencodeMessage[] = []
   for (const m of rows) {
     const id = asString(m.id)
     if (m.type === 'user') out.push({ info: { id, role: 'user' }, parts: [{ type: 'text', text: asString(m.text) ?? '', messageID: id }] })
     else if (m.type === 'assistant') {
-      const parts = records(m.content)
-        .filter((c) => c.type === 'text')
-        .map((c) => ({ type: 'text', text: asString(c.text) ?? '', messageID: id }))
+      const parts = records(m.content).flatMap((c): Part[] =>
+        c.type === 'text'
+          ? [{ type: 'text', text: asString(c.text) ?? '', messageID: id }]
+          : c.type === 'tool'
+            ? [toolPart(isRecord(c.state) ? contentText(c.state.content) : '', id)]
+            : [],
+      )
       out.push({ info: { id, role: 'assistant', ...(m.error ? { error: v1Error(m.error) } : {}) }, parts })
+    } else if (m.type === 'shell') {
+      // A running job with no output yet would render as an empty `opencode:` label; a finished one
+      // says so, or `! false` would leave no trace. Cut-off output says it was cut.
+      const output = isRecord(m.output) ? asString(m.output.output) : undefined
+      const cut = isRecord(m.output) && m.output.truncated === true ? '\n(output truncated)' : ''
+      if (output?.trim()) out.push({ info: { id, role: 'assistant' }, parts: [toolPart(output + cut, id)] })
+      else if (typeof m.status === 'string' && m.status !== 'running') out.push({ info: { id, role: 'assistant' }, parts: [toolPart(`(${m.status}, no output)`, id)] })
     } else if (m.type === 'idle' && m.outcome === 'failed' && m.error) out.push({ info: { id, role: 'assistant', error: v1Error(m.error) }, parts: [] })
   }
   return out
@@ -147,6 +164,28 @@ export const serverHome = () => {
 // stderr is kept so a failure says why.
 const git = (dir: string, args: string[]) =>
   execFileSync('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }).trim()
+
+// #224: the `opencode/` branch a worktree of `repo` is on, read from the repository's own worktree
+// list so a branch is only ever named for a worktree that belongs to it. None on any failure.
+const real = (p: string) => {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+function worktreeBranch(repo: string, dir: string) {
+  try {
+    const block = git(repo, ['worktree', 'list', '--porcelain'])
+      .split('\n\n')
+      .map((b) => b.split('\n'))
+      .find((lines) => lines[0]?.startsWith('worktree ') && real(lines[0].slice('worktree '.length)) === real(dir))
+    const ref = block?.find((l) => l.startsWith('branch refs/heads/opencode/'))
+    return ref?.slice('branch refs/heads/'.length)
+  } catch {
+    return undefined
+  }
+}
 
 export class OpencodeV2Client {
   baseUrl: string
@@ -377,9 +416,14 @@ export class OpencodeV2Client {
   }
 
   // `force` matches 1.x, which removed without checks of its own: callers run worktreeSafety first.
+  // 1.x's removal also deleted the worktree's branch and 2.x's does not (#224), so the `opencode/`
+  // branch is read before and deleted after a removal that succeeded, with `-d` only.
   async removeWorktree(worktreeDirectory: string, directory?: string) {
     const projectID = await this.#projectID(directory)
-    return this.req('DELETE', '/api/worktree', { projectID, directory: worktreeDirectory, force: true }, directory)
+    const branch = directory ? worktreeBranch(directory, worktreeDirectory) : undefined
+    const removed = await this.req('DELETE', '/api/worktree', { projectID, directory: worktreeDirectory, force: true }, directory)
+    if (directory && branch) deleteMergedBranch(directory, branch)
+    return removed
   }
 
   // 2.x's `name` is a display name ("Build"); the id is what a session runs as and what `@build`

@@ -7,6 +7,7 @@
 // `opencode/<name>`, under ~/.local/share/opencode/worktree/<repo-hash>/<name>. What it does NOT do
 // is protect anything on the way out — DELETE removes a worktree holding uncommitted changes, and
 // its branch, without complaint (verified by losing a file to it). So the refusal rules live here.
+// 2.x's DELETE keeps the branch; fleetview deletes it (#224, deleteMergedBranch).
 //
 // claude and copilot have no server to ask, so for them fleetview makes the worktree itself
 // (createLocalWorktree below), laid out the same way.
@@ -220,7 +221,12 @@ export function removeLocalWorktree(dir: string, repo: string, run = execFileSyn
   if (hasSubmodules(dir)) throw new Error(`${dir} contains submodules; fleetview leaves it for you to remove`)
   const branch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'], run)
   git(repo, ['worktree', 'remove', dir], run, [repo, dir])
-  if (!branch.startsWith(LOCAL_BRANCH_PREFIX)) return
+  if (branch.startsWith(LOCAL_BRANCH_PREFIX)) deleteMergedBranch(repo, branch, run)
+}
+
+// `branch -d`, never -D: a branch holding commits survives, and that refusal is not an error. Shared
+// with opencode 2.x's removal (#224), whose server leaves the `opencode/` branch fleetview made.
+export function deleteMergedBranch(repo: string, branch: string, run = execFileSync) {
   try {
     git(repo, ['branch', '-d', branch], run)
   } catch {}

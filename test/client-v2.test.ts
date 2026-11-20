@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OpencodeClient } from '../src/backends/opencode/client.ts'
 import { serverHome, v1Messages, v1Question, v2Answer } from '../src/backends/opencode/client-v2.ts'
+import { messageBody } from '../src/session-store.ts'
 import { createV2Translator } from '../src/backends/opencode/event-v2.ts'
 import { probeServer } from '../src/backends/opencode/server-manager.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
@@ -32,7 +33,8 @@ const fakeServer = (routes: Record<string, unknown>) => {
     if (path === '/api/info') return json({ version: '2.3.2', pid: 1, urls: [], paths: { tmp: '/tmp' } })
     const key = `${method} ${path}`
     if (!(key in routes)) return json({ _tag: 'NotFound' }, 404)
-    return json(routes[key])
+    const route = routes[key]
+    return typeof route === 'function' ? route() : json(route)
   })
   return { fetchImpl, calls }
 }
@@ -219,11 +221,31 @@ test('messages become {info, parts}, oldest first, with 2.x errors as NamedError
   const rows = [
     { id: 'msg_1', type: 'user', text: 'do it' },
     { id: 'msg_2', type: 'assistant', content: [{ type: 'reasoning', text: 'hmm' }, { type: 'text', text: 'done' }], error: { type: 'APIError', message: 'overloaded' } },
-    { id: 'msg_3', type: 'shell' },
+    { id: 'msg_3', type: 'compaction' },
   ]
   expect(v1Messages(rows)).toEqual([
     { info: { id: 'msg_1', role: 'user' }, parts: [{ type: 'text', text: 'do it', messageID: 'msg_1' }] },
     { info: { id: 'msg_2', role: 'assistant', error: { name: 'APIError', data: { message: 'overloaded' } } }, parts: [{ type: 'text', text: 'done', messageID: 'msg_2' }] },
+  ])
+})
+
+// #223: a `!` job's output and a tool-only turn's result reach peek and `logs` through messageBody.
+// Shapes as opencode 2.3.2 stores them.
+test('2.x shell jobs and tool-only turns render their output', () => {
+  const rows = [
+    { id: 'msg_1', type: 'shell', command: 'sleep 4; echo shellhi', status: 'exited', output: { output: 'shellhi\n', cursor: 8, size: 8, truncated: false } },
+    { id: 'msg_2', type: 'shell', command: 'sleep 9', status: 'running' },
+    { id: 'msg_2b', type: 'shell', command: 'echo; false', status: 'exited', output: { output: '\n' } },
+    { id: 'msg_2c', type: 'shell', command: 'yes', status: 'exited', output: { output: 'y\n', truncated: true } },
+    { id: 'msg_3', type: 'assistant', content: [{ type: 'reasoning', text: 'ask' }, { type: 'tool', name: 'question', state: { status: 'completed', content: [{ type: 'text', text: 'User has answered your questions: "Which color?"="blue".' }] } }] },
+    { id: 'msg_4', type: 'assistant', content: [{ type: 'text', text: 'blue it is' }, { type: 'tool', name: 'read', state: { status: 'completed', content: [{ type: 'text', text: 'file contents' }] } }] },
+  ]
+  expect(v1Messages(rows).map((m) => [m.info?.role, messageBody(m)])).toEqual([
+    ['assistant', 'shellhi\n'],
+    ['assistant', '(exited, no output)'],
+    ['assistant', 'y\n\n(output truncated)'],
+    ['assistant', 'User has answered your questions: "Which color?"="blue".'],
+    ['assistant', 'blue it is'],
   ])
 })
 
@@ -271,6 +293,40 @@ test('a created worktree is put on an opencode/ branch, stepping around a leftov
   second.git('branch', 'opencode/fix')
   await worktreeServer(second.wt).c.createWorktree('fix', second.repo)
   expect(second.git('-C', second.wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/fix-2')
+})
+
+// #224: 2.x's DELETE leaves the branch, where 1.x deleted it. Only an `opencode/` branch goes, only
+// with `-d`, and only after the server removed the worktree.
+test('removing a worktree deletes its opencode/ branch unless it holds commits', async () => {
+  const removing = (repo: string, wt: string, status = 200) => () => {
+    if (status === 200) execFileSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt])
+    return json(status === 200 ? undefined : { _tag: 'Boom' }, status)
+  }
+  const branches = (git: (...a: string[]) => string) => git('branch', '--list', '--format=%(refname:short)').split('\n').sort()
+  const created = async (name: string) => {
+    const w = detachedWorktree(name)
+    await worktreeServer(w.wt).c.createWorktree(name, w.repo)
+    return w
+  }
+
+  const clean = await created('clean')
+  await client({ 'GET /api/location': { project: { id: 'prj_1' } }, 'DELETE /api/worktree': removing(clean.repo, clean.wt) }).c.removeWorktree(clean.wt, clean.repo)
+  expect(branches(clean.git)).not.toContain('opencode/clean')
+
+  const kept = await created('kept')
+  kept.git('-C', kept.wt, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'work')
+  await client({ 'GET /api/location': { project: { id: 'prj_1' } }, 'DELETE /api/worktree': removing(kept.repo, kept.wt) }).c.removeWorktree(kept.wt, kept.repo)
+  expect(branches(kept.git)).toContain('opencode/kept')
+
+  const failed = await created('failed')
+  const refused = client({ 'GET /api/location': { project: { id: 'prj_1' } }, 'DELETE /api/worktree': removing(failed.repo, failed.wt, 500) }).c
+  await expect(refused.removeWorktree(failed.wt, failed.repo)).rejects.toThrow()
+  expect(branches(failed.git)).toContain('opencode/failed')
+
+  const own = detachedWorktree('own')
+  own.git('-C', own.wt, 'switch', '-q', '-c', 'mine')
+  await client({ 'GET /api/location': { project: { id: 'prj_1' } }, 'DELETE /api/worktree': removing(own.repo, own.wt) }).c.removeWorktree(own.wt, own.repo)
+  expect(branches(own.git)).toContain('mine')
 })
 
 test('a worktree the server already put on a branch is left on it', async () => {
