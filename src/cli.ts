@@ -434,10 +434,10 @@ export function makeEnsureServer({
       const spawned = await attempt(target)
       if (spawned) return { ok: true, server: spawned }
     } else {
-      const dropped = credential === 'rejected' ? ' That listener has now seen the password, so it will not be used again: the replacement gets a freshly generated one.' : ''
+      const dropped = credential === 'rejected' ? ' That listener may have seen the password, so it will not be used again: the replacement gets a freshly generated one.' : ''
       warn(
         credential === 'stranger'
-          ? `fleetview: something other than fleetview's opencode server is answering on ${server.host}:${server.port}. It was not shown the password, but fleetview stops using it anyway and tries the next port with a freshly generated one.`
+          ? `fleetview: the listener on ${server.host}:${server.port} is not verifiably fleetview's opencode server. It was not shown the password, but fleetview stops using it anyway and tries the next port with a freshly generated one. If it is an opencode server fleetview started, stop it by hand (see SECURITY.md).`
           : `fleetview: something on ${server.host}:${server.port} is answering but rejecting fleetview's password — leaving it alone and trying the next port.${dropped}`,
       )
     }
@@ -520,7 +520,7 @@ export async function runServer(
   })
   // A status check that rewrites server.json says so: the burn is also the only sign of a squatter.
   if (credential === 'rejected' && loaded.password) error(`the listener on :${server.port} rejected the saved password; removed it from ${serverFile}`)
-  if (credential === 'stranger' && loaded.password) error(`the listener on :${server.port} is not fleetview's server (it was not shown the saved password); removed it from ${serverFile}`)
+  if (credential === 'stranger' && loaded.password) error(`the listener on :${server.port} is not verifiably fleetview's server (it was not shown the saved password); removed it from ${serverFile}`)
   const healthy = state === 'healthy'
   if (args.serverAction === 'status') {
     log(`host     ${server.host}`)

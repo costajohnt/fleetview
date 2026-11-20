@@ -70,6 +70,11 @@ until that check passes again. Some gaps remain by design:
   neither can a server running under a password you set yourself.
 - An `opencode` TUI that is already attached reads the password from its own
   environment and reconnects with it, outside fleetview's control.
+- A 2.x server whose pid was never recorded (fleetview exited between spawning
+  it and saving its pid) is not offered the password, so fleetview moves to the
+  next port and leaves that server running. Stop it by hand: find it with
+  `lsof -nP -iTCP:4900 -sTCP:LISTEN` (use the port in the warning) or
+  `pgrep -fl 'opencode serve'`, then `kill <pid>`.
 - If the server dies and another process takes the port with no failed
   connection in between (no event stream open, no request in flight),
   fleetview does not notice before its next request.

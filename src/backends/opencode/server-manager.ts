@@ -95,10 +95,11 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
   // the password (the reason opencodeApi in client.ts asks this route credential-free).
   const owner = server.pid ? (pid: number) => descendsFrom(pid, server.pid!, parentOf) : undefined
-  // #216: a 2.x record holding fleetview's own password but no pid (a crash between trySpawn's two
-  // saves) has nothing to match the answer against, so the password is not offered at all. A record
-  // without a password is a user-set one, which #213 leaves unmatched on purpose.
-  if (server.api === 2 && !owner && server.password) {
+  // #216: a 2.x record whose own password is the one about to be presented, but which has no pid (a
+  // crash between trySpawn's two saves), has nothing to match the answer against, so that password
+  // is not offered at all. Keyed on what would be presented, not on the record: a user-set password
+  // in env is #213's deliberately unmatched case even when the record still holds an old one.
+  if (server.api === 2 && !owner && server.password && server.password === process.env.OPENCODE_SERVER_PASSWORD) {
     const bare = await askServer(server, '/api/info', isV2Info, fetchImpl, async () => false)
     if (bare === 'healthy') noteOpencodeApi(base, 2)
     return bare === 'unauthorized' ? 'stranger' : bare
