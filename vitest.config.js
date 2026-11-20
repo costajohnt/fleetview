@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { defineConfig, configDefaults } from 'vitest/config'
@@ -9,6 +9,9 @@ import { defineConfig, configDefaults } from 'vitest/config'
 // behind and a day of runs exhausted /tmp's inodes on the CI host (#230).
 const runTmp = mkdtempSync(join(tmpdir(), 'fleetview-test-run-'))
 process.env.FLEETVIEW_TEST_RUN_TMP = runTmp
+// Also on process exit: Ctrl-C, SIGTERM (a cancelled CI job) and an unhandled rejection make vitest
+// call process.exit() without running globalSetup teardowns. Only SIGKILL still leaks the root.
+process.on('exit', () => rmSync(runTmp, { recursive: true, force: true }))
 
 export default defineConfig({
   test: {
