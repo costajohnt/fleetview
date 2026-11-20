@@ -6,6 +6,7 @@ import type { ServerRef } from '../../types.ts'
 import { openPrivateAppend } from '../../registry.ts'
 import { authHeader, isV2Info, isV2Unauthorized, noteOpencodeApi } from './client.ts'
 import { serverHome } from './client-v2.ts'
+import { ownershipVerified } from './request.ts'
 
 // ensureServer's failure reason when `opencode` is not on PATH. Exported so the roster can tell this
 // case (install something, then run again) from a server that merely failed to come up.
@@ -82,7 +83,11 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const base = `http://${server.host}:${server.port}`
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl, async () => server.api !== 2)
-  if (v1 === 'healthy') noteOpencodeApi(base, 1)
+  // #216: either healthy answer is the check a lost connection waits on (request.ts).
+  if (v1 === 'healthy') {
+    noteOpencodeApi(base, 1)
+    ownershipVerified(base)
+  }
   if (v1 !== 'unreachable') return v1
   // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
   // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
@@ -90,7 +95,10 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   const owner = server.pid ? (pid: number) => descendsFrom(pid, server.pid!, parentOf) : undefined
   const v2 = await askServer(server, '/api/info', isV2Info, fetchImpl, isV2UnauthorizedResponse, owner)
   // What the probe found is the server's API for everything after it (client.ts opencodeApi).
-  if (v2 === 'healthy') noteOpencodeApi(base, 2)
+  if (v2 === 'healthy') {
+    noteOpencodeApi(base, 2)
+    ownershipVerified(base)
+  }
   return v2
 }
 

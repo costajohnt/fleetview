@@ -1,6 +1,7 @@
 // The version-neutral half of the opencode event stream: one connection's bytes to parsed frames.
 // Which URL, what the frames mean and who gets them is event-mux.ts (1.x) and event-v2.ts (2.x).
 import { authHeader } from './client.ts'
+import { credentialFor, ownershipLost } from './request.ts'
 
 export function parseSseChunk(buffer: string): { events: unknown[]; rest: string } {
   const events: unknown[] = []
@@ -43,7 +44,20 @@ export async function readEventStream(
 ): Promise<never> {
   // The event stream needs the same credential as every other request, or enabling auth
   // would leave fleetview rendering a permanently offline roster.
-  const auth = authHeader()
+  // #216: unless the owner is in doubt, and any end that is not our own stop puts it in doubt.
+  try {
+    return await readStream(url, { fetchImpl, signal, idleMs, onOpen, onChunk }, credentialFor(url, authHeader()))
+  } catch (err) {
+    if (!signal.aborted) ownershipLost(url)
+    throw err
+  }
+}
+
+async function readStream(
+  url: string,
+  { fetchImpl, signal, idleMs, onOpen, onChunk }: Parameters<typeof readEventStream>[1],
+  auth: string | undefined,
+): Promise<never> {
   const res = await fetchImpl(url, { signal, headers: auth ? { authorization: auth } : undefined })
   if (signal.aborted) throw new Error('event stream stopped')
   if (!res.ok || !res.body) throw new Error(`event stream ${res.status}`)
