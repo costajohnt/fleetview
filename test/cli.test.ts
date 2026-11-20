@@ -39,13 +39,12 @@ test('healthy server → {ok:true, same server}, no spawn', async () => {
 test('adopting a healthy server that does not enforce a set password warns once', async () => {
   const warn = vi.fn()
   const deps = {
-    env: { OPENCODE_SERVER_PASSWORD: 'set-by-user' } as NodeJS.ProcessEnv,
     isServerHealthy: () => Promise.resolve(true),
     isAuthEnforced: () => Promise.resolve(false),
     spawnServer: () => { throw new Error('should not spawn') },
     saveServer: () => {},
     serverFile: '/tmp/s.json',
-    env: {},
+    env: { OPENCODE_SERVER_PASSWORD: 'set-by-user' } as NodeJS.ProcessEnv,
     warn,
   }
   expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: true, server })
