@@ -5,13 +5,15 @@
 //
 // Shapes are from opencode v2.3.2's source (packages/schema, packages/protocol); see #166. Only
 // what fleetview reads is mapped, and reads stay defensive, as in types.ts.
-import { mkdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join, resolve } from 'node:path'
 import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 import { stripControl } from '../../text-utils.ts'
 import { stateDir } from '../../paths.ts'
+import { GIT_SAFE_ARGS } from '../../git-safe.ts'
 import type { AgentInfo, CommandInfo, ModelSelection, ProvidersResponse } from './client.ts'
 
 type Auth = () => string | undefined
@@ -128,6 +130,11 @@ export const serverHome = () => {
   } catch {}
   return dir
 }
+
+// The directory is one the server named, so its repository config is untrusted: see git-safe.ts.
+// stderr is kept so a failure says why.
+const git = (dir: string, args: string[]) =>
+  execFileSync('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }).trim()
 
 export class OpencodeV2Client {
   baseUrl: string
@@ -294,11 +301,61 @@ export class OpencodeV2Client {
     return rows.map((w) => ({ name: basename(String(w.directory)), directory: String(w.directory) }))
   }
 
+  // 2.x leaves the new worktree on a detached HEAD, and its `branch` field only checks out a ref that
+  // already exists (verified against 2.3.2), so the `opencode/<name>` branch 1.x made is made here:
+  // merge-back and PR badges key off it. A branch of that name left by an earlier worktree is stepped
+  // around, never reset. The branch is made with plumbing that touches neither the working tree nor
+  // the index, so no repository-controlled filter or submodule recursion runs. Errors propagate, so
+  // the dispatch reports it is not isolated instead of running in a tree nothing can follow.
   async createWorktree(name: string, directory?: string) {
     const projectID = await this.#projectID(directory)
     const created = unwrap(await this.req('POST', '/api/worktree', { projectID, name }, directory))
     const dir = isRecord(created) ? asString(created.directory) : undefined
-    return dir ? { name: basename(dir), directory: dir } : null
+    if (!dir) return null
+    // The server named `dir`, so it is checked before anything writes to it: a linked worktree root
+    // of the repository fleetview asked about, not that repository's own checkout. A refusal leaves
+    // the server's worktree alone, because removing a path that failed this check is the same risk.
+    if (!isAbsolute(dir) || !directory) throw new Error(`refusing worktree ${dir}: no repository to check it against`)
+    const top = (d: string) => realpathSync(git(d, ['rev-parse', '--show-toplevel']))
+    // Resolved here rather than with --path-format=absolute, which needs git 2.31.
+    const common = (d: string) => realpathSync(resolve(d, git(d, ['rev-parse', '--git-common-dir'])))
+    let linked: boolean
+    try {
+      linked = top(dir) === realpathSync(dir) && top(dir) !== top(directory) && common(dir) === common(directory)
+    } catch (e) {
+      throw new Error(`cannot validate worktree ${dir}: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
+    }
+    if (!linked) throw new Error(`refusing worktree ${dir}: not a new worktree of ${directory}`)
+    // Already on a branch (a server that makes it, as 1.x did): leave it there. Exit 1 is detached.
+    try {
+      git(dir, ['symbolic-ref', '-q', 'HEAD'])
+      return { name: basename(dir), directory: dir }
+    } catch {}
+    const base = `opencode/${basename(dir)}`
+    let branch = base
+    let made = false
+    try {
+      const taken = new Set(git(dir, ['branch', '--list', `${base}*`, '--format=%(refname:short)']).split('\n'))
+      for (let n = 2; taken.has(branch); n++) branch = `${base}-${n}`
+      // The empty old value makes update-ref fail rather than move a branch that appeared meanwhile.
+      git(dir, ['update-ref', `refs/heads/${branch}`, 'HEAD', ''])
+      made = true
+      git(dir, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`])
+    } catch (e) {
+      // Undo both halves; whatever can't be undone is named in the error rather than dropped.
+      const left: string[] = []
+      if (made) {
+        try {
+          git(dir, ['update-ref', '-d', `refs/heads/${branch}`])
+        } catch {
+          left.push(`branch ${branch}`)
+        }
+      }
+      await this.removeWorktree(dir, directory).catch(() => left.push(`worktree ${dir}`))
+      if (left.length && e instanceof Error) e.message += `; left behind: ${left.join(', ')}`
+      throw e
+    }
+    return { name: basename(dir), directory: dir }
   }
 
   // `force` matches 1.x, which removed without checks of its own: callers run worktreeSafety first.
