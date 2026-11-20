@@ -280,7 +280,7 @@ export function mergeBackCommand(worktree: string, repo: string | null | undefin
   } catch {} // count unknown: fall through to the command, as before #188
   if (ahead === 0) {
     try {
-      return git(worktree, ['status', '--porcelain'], run) ? 'nothing committed yet, only uncommitted changes' : null
+      return git(worktree, ['status', '--porcelain', '--ignore-submodules=all'], run) ? 'nothing committed yet, only uncommitted changes' : null
     } catch {
       return null // nothing to merge is known; an unreadable worktree is no reason to offer a no-op merge
     }

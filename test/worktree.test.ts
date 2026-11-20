@@ -455,6 +455,7 @@ test('mergeBackCommand offers the merge only when the branch has commits the par
 
 test('mergeBackCommand never offers a known no-op merge, and keeps the command when it cannot count', () => {
   const zeroThenFail = ((_cmd: string, args: string[]) => {
+    if (args.includes('config')) return '' // #181's filter-driver lookup: no drivers
     if (args.includes('rev-list')) return '0\n'
     throw new Error('worktree gone')
   }) as any
