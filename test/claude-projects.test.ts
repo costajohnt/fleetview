@@ -343,3 +343,77 @@ test('a typed slash command reads as typed, and a user interrupt reads as stoppe
     { info: { role: 'assistant', error: { name: 'aborted' } }, parts: [] },
   ])
 })
+
+// #235: the listing reads a transcript's head and tail, not the whole file. These pin what a row
+// says for transcripts far larger than any read window, with the records it needs at either end,
+// in the middle, split across window edges, and absent, so they hold for the old whole-file fold
+// and the new reads alike.
+const pad = (directory: string, id: string, bytes: number) => ({
+  type: 'assistant',
+  cwd: directory,
+  sessionId: id,
+  message: { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'Bash', input: { command: 'y'.repeat(bytes) } }] },
+})
+const pads = (directory: string, id: string, n: number, bytes = 40_000) => Array.from({ length: n }, () => pad(directory, id, bytes))
+
+test('#235 a large transcript is titled by its last real ai-title wherever it sits', () => {
+  const h = home()
+  const d = '/repo/alpha'
+  const file = transcript(h, d, 'aaaa-1111', [
+    record(d, 'aaaa-1111', { timestamp: '2026-01-02T03:04:05.000Z' }),
+    { type: 'ai-title', aiTitle: 'First guess', sessionId: 'aaaa-1111' },
+    ...pads(d, 'aaaa-1111', 20),
+    { type: 'ai-title', aiTitle: 'The real title', sessionId: 'aaaa-1111' },
+    ...pads(d, 'aaaa-1111', 20),
+    // Not title records, though the bytes "ai-title" are on the line: a value, and a record with no title.
+    { ...record(d, 'aaaa-1111'), note: 'ai-title' },
+    { type: 'ai-title', sessionId: 'aaaa-1111' },
+    // One line longer than several read windows.
+    pad(d, 'aaaa-1111', 600_000),
+  ])
+  // A trailing line with no newline yet is not a record yet.
+  appendFileSync(file, JSON.stringify({ type: 'ai-title', aiTitle: 'Half written', sessionId: 'aaaa-1111' }))
+  const [row] = listTranscripts(d, { home: h })
+  expect(row).toMatchObject({ id: 'aaaa-1111', directory: d, title: 'The real title', createdAt: Date.parse('2026-01-02T03:04:05.000Z') })
+})
+
+test('#235 with no ai-title in a large transcript, the last last-prompt and then the opening prompt title it', () => {
+  const h = home()
+  const d = '/repo/alpha'
+  transcript(h, d, 'aaaa-1111', [
+    record(d, 'aaaa-1111'),
+    { type: 'last-prompt', lastPrompt: 'older prompt', sessionId: 'aaaa-1111' },
+    { type: 'last-prompt', lastPrompt: 'newest prompt', sessionId: 'aaaa-1111' },
+    ...pads(d, 'aaaa-1111', 40),
+  ])
+  // The opening text sits behind a tool result bigger than a read window, and the cwd and
+  // timestamp only arrive with it.
+  transcript(h, d, 'bbbb-2222', [
+    { type: 'queue-operation', sessionId: 'bbbb-2222' },
+    { type: 'user', sessionId: 'bbbb-2222', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'z'.repeat(200_000) }] } },
+    { ...record(d, 'bbbb-2222', { timestamp: '2026-03-04T05:06:07.000Z' }), message: { role: 'user', content: 'the opening prompt' } },
+    ...pads(d, 'bbbb-2222', 20),
+  ])
+  const byId = Object.fromEntries(listTranscripts(d, { home: h }).map((s) => [s.id, { title: s.title, createdAt: s.createdAt }]))
+  expect(byId).toEqual({
+    'aaaa-1111': { title: 'newest prompt', createdAt: 0 },
+    'bbbb-2222': { title: 'the opening prompt', createdAt: Date.parse('2026-03-04T05:06:07.000Z') },
+  })
+})
+
+test('#235 a large transcript appended across polls reports what a cold read of the same bytes would', () => {
+  const h = home()
+  const d = '/repo/alpha'
+  const file = transcript(h, d, 'aaaa-1111', [record(d, 'aaaa-1111'), ...pads(d, 'aaaa-1111', 10)])
+  const rows = [listTranscripts(d, { home: h })[0].title]
+  const append = (...lines: unknown[]) => appendFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+  append({ type: 'last-prompt', lastPrompt: 'a prompt', sessionId: 'aaaa-1111' }, ...pads(d, 'aaaa-1111', 10))
+  rows.push(listTranscripts(d, { home: h })[0].title)
+  append({ type: 'ai-title', aiTitle: 'Named', sessionId: 'aaaa-1111' }, ...pads(d, 'aaaa-1111', 10))
+  rows.push(listTranscripts(d, { home: h })[0].title)
+  // A later last-prompt never outranks an ai-title, however much later.
+  append({ type: 'last-prompt', lastPrompt: 'a later prompt', sessionId: 'aaaa-1111' }, ...pads(d, 'aaaa-1111', 10))
+  rows.push(listTranscripts(d, { home: h })[0].title)
+  expect(rows).toEqual(['run the tests', 'a prompt', 'Named', 'Named'])
+  expect(listTranscripts(d, { home: mirror(h) })[0].title).toBe('Named')
+})

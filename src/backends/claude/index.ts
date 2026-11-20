@@ -5,14 +5,14 @@
 // verified against claude 2.1.220.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ProcessBackend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
 import { claudeNormaliser, normaliseClaudeSessions } from '../../backend-normalise.ts'
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
-import { encodeProjectDir, listTranscripts, projectsDir, readTranscriptMessages } from './projects.ts'
-import { parseStreamChunk } from './stream.ts'
+import { encodeProjectDir, listTranscripts, projectsDir, readTranscriptMessages, TAIL_WINDOW } from './projects.ts'
+import { emptyTranscriptState, parseStreamChunk, reduceRun } from './stream.ts'
 import { isLiveRun, psInfo, sameRun, STILL_WORKING, type PidInfo } from '../ps.ts'
 import { reapRunLogs } from '../run-logs.ts'
 import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
@@ -152,7 +152,7 @@ export function createClaudeBackend({
 
     // Claude Code's own transcripts, not fleetview's run dir: a session fleetview dispatched writes
     // one too, so reading both would mean deduplicating two views of the same session for no gain.
-    listSessions: async (directory) => listTranscripts(directory, { home }),
+    listSessions: async (directory, idPrefix) => listTranscripts(directory, { home, idPrefix }),
 
     // #233: peek and `fleetview logs` read the same transcript, mapped to opencode's message shape.
     listMessages: (id, directory) => readTranscriptMessages(id, directory, { home }),
@@ -206,13 +206,34 @@ export function createClaudeBackend({
       // onEvent. Keyed separately from the path so a run log and a transcript can never share a
       // cursor, though in practice only one of the two is ever tailed for a given session.
       function tail(key: string, file: string, source: 'run' | 'transcript') {
-        const cursor = cursors.get(key) ?? newTailCursor()
+        const first = !cursors.has(key)
+        let cursor = cursors.get(key) ?? newTailCursor()
+        // #235: a transcript seen for the first time is read from its last TAIL_WINDOW only. Its
+        // lines can only ever give the row its last output (a transcript has no init or result to
+        // move the status; see stream.ts), and parsing every line of every transcript whole was most
+        // of a 35s `ls`. The window opens mid-line; that cut line is not JSON and is skipped.
+        if (first && source === 'transcript') {
+          try {
+            cursor.offset = Math.max(0, statSync(file).size - TAIL_WINDOW)
+          } catch {
+            // gone or unreadable: tailFile below reports it the same way it always has
+          }
+        }
+        const windowed = first && cursor.offset > 0
         cursors.set(key, cursor)
-        const r = tailFile(cursor, file)
+        let r = tailFile(cursor, file)
         // null: meta written, log not yet — the next poll will find it. Empty text: nothing
         // appended (a bare reset already cleared the cursor; there is nothing to parse).
         if (!r?.text) return
-        const { events, rest } = parseStreamChunk(cursor.rest + r.text)
+        let { events, rest } = parseStreamChunk(cursor.rest + r.text)
+        // No assistant text in the window means the last output is further back: read it all.
+        if (windowed && !r.reset && !reduceRun(events, emptyTranscriptState()).lastOutput) {
+          cursor = newTailCursor()
+          cursors.set(key, cursor)
+          r = tailFile(cursor, file)
+          if (!r?.text) return
+          ;({ events, rest } = parseStreamChunk(cursor.rest + r.text))
+        }
         cursor.rest = rest
         // Raw objects, unnormalised, exactly as opencode hands over its raw SSE payloads — per
         // types.ts the shape is the backend's own and the roster reads it through per-backend

@@ -899,7 +899,7 @@ async function findSession<C extends Pick<RosterClient, 'listProjects' | 'listSe
     await Promise.all(
       Object.entries(backends).flatMap(([name, backend]) =>
         dirs.map(async (dir) => {
-          for (const s of await backend.listSessions(dir).catch(() => [])) {
+          for (const s of await backend.listSessions(dir, want).catch(() => [])) {
             if (s.id === want || s.id.startsWith(want)) matches.push({ backend: name, id: s.id, worktree: dir })
           }
         }),

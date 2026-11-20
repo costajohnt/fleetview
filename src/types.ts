@@ -304,7 +304,9 @@ export type Backend = {
 // stream, which is why these are not on Backend (#187): an adapter member nothing calls in
 // production is one that drifts.
 export type ProcessBackend = Backend & {
-  listSessions(directory: string): Promise<ListedSession[]>
+  // idPrefix: only sessions whose id starts with it. A hint for a backend that can skip reading the
+  // rest (#235); callers still match ids themselves, so a backend may ignore it.
+  listSessions(directory: string, idPrefix?: string): Promise<ListedSession[]>
   // create-then-prompt as one call: no backend exposes a session that exists but was never asked
   // anything, and splitting it would leave every caller repeating the two-step.
   dispatch(input: { prompt: string; directory: string; agent?: string; model?: string }): Promise<SessionRef>
