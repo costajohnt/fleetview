@@ -100,6 +100,7 @@ none of the three CLIs installed, fleetview says so and stops there.
 | live events | yes | polled, ~0.5s | polled, ~1.5s |
 | answer a question or permission from the roster | yes | no, attach to approve | no, denials are silent |
 | worktree isolation | yes | yes | yes |
+| peek transcript, `fleetview logs` | yes | yes, read from its transcript file | no, attach to read it |
 | rename (`^r`), `/fork`, delete (`^x^x`), `!` shell jobs | yes | no | no |
 
 Pick one for a dispatch with `@claude`/`@copilot`, or for the whole run with `--backend <name>` /
@@ -114,7 +115,7 @@ every row grows a dim backend name after its title.
 From the shell, `ls`, `--json`, `status`, `attach`, `logs`, `stop` and `rm` cover every backend,
 and each `--json` row says which one it belongs to. `add`, `answer`, `watch` and `bg` act on
 opencode sessions only. The [reference](reference.md#from-the-shell) has the details, including
-what `rm` and `logs` can't do for Claude Code and Copilot sessions.
+what `rm` can't do for Claude Code and Copilot sessions and `logs` can't do for Copilot ones.
 
 ![A roster with opencode, claude, and copilot sessions, each row carrying its dim backend name](images/backends.png)
 

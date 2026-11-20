@@ -2,7 +2,7 @@ import { test, expect } from 'vitest'
 import { appendFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, renameSync, writeFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { encodeProjectDir, listTranscripts } from '../src/backends/claude/projects.ts'
+import { encodeProjectDir, listTranscripts, readTranscriptMessages, transcriptMessages } from '../src/backends/claude/projects.ts'
 
 // A fake ~/.claude/projects. The records are the shapes claude 2.1.220 actually writes, trimmed to
 // the fields this module reads (see the wire notes).
@@ -230,4 +230,91 @@ test('a file whose name is not a well-formed session id is not listed', () => {
   transcript(h, directory, `evil${esc}]0;pwned`, [record(directory, 'evil')])
   transcript(h, directory, 'dot.dot', [record(directory, 'dot.dot')])
   expect(listTranscripts(directory, { home: h }).map((t) => t.id)).toEqual(['good-id'])
+})
+
+// #233: transcript → peek/logs messages. Synthetic records in the shapes claude 2.1.x writes: one
+// content block per assistant record (records of one response share message.id), tool results in
+// the following user record, and a long tail of bookkeeping record types that render nothing.
+const asst = (msgId: string, block: object, extra: object = {}) => ({ type: 'assistant', message: { id: msgId, role: 'assistant', content: [block] }, ...extra })
+const userText = (text: unknown, extra: object = {}) => ({ type: 'user', message: { role: 'user', content: text }, ...extra })
+const result = (toolUseId: string, content: unknown, extra: object = {}) => userText([{ type: 'tool_result', tool_use_id: toolUseId, content, ...extra }])
+const lines = (records: unknown[]) => records.map((r) => (typeof r === 'string' ? r : JSON.stringify(r)))
+
+test('user and assistant text come out in order, with one response folded into one message', () => {
+  const msgs = transcriptMessages(
+    lines([
+      userText('run the tests'),
+      asst('m1', { type: 'thinking', thinking: 'hmm' }),
+      asst('m1', { type: 'text', text: 'running them' }),
+      asst('m1', { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }),
+      result('t1', 'ok 12 passed\nmore'),
+      asst('m2', { type: 'text', text: 'all green' }),
+    ]),
+  )
+  expect(msgs).toEqual([
+    { info: { role: 'user' }, parts: [{ type: 'text', text: 'run the tests' }] },
+    {
+      info: { id: 'm1', role: 'assistant' },
+      parts: [{ type: 'text', text: 'running them' }, { type: 'tool', tool: 'Bash', state: { status: 'completed', output: 'Bash: ok 12 passed' } }],
+    },
+    { info: { id: 'm2', role: 'assistant' }, parts: [{ type: 'text', text: 'all green' }] },
+  ])
+})
+
+test('a tool-only turn is a one-line summary per call, failures say so, and long output is capped', () => {
+  const msgs = transcriptMessages(
+    lines([
+      asst('m1', { type: 'tool_use', id: 't1', name: 'Read', input: {} }),
+      asst('m1', { type: 'tool_use', id: 't2', name: 'Bash', input: {} }),
+      asst('m1', { type: 'tool_use', id: 't3', name: 'Grep', input: {} }),
+      result('t1', [{ type: 'text', text: '\n' + 'x'.repeat(500) }]),
+      result('t2', 'exit 1', { is_error: true }),
+    ]),
+  )
+  expect(msgs[0].parts?.map((p: any) => p.state.output)).toEqual([`Read: ${'x'.repeat(200)}`, 'Bash failed: exit 1', 'Grep'])
+})
+
+test('meta, sidechain, injected and non-human records, unknown types and malformed lines are skipped', () => {
+  const msgs = transcriptMessages(
+    lines([
+      '{"type":"user", not json',
+      '',
+      { type: 'ai-title', aiTitle: 't' },
+      { type: 'attachment', attachment: {} },
+      { type: 'system', content: 'note' },
+      { type: 'some-future-type', message: { content: 'x' } },
+      { type: 'user', message: 'not an object' },
+      userText('caveat', { isMeta: true }),
+      userText('subagent prompt', { isSidechain: true }),
+      asst('s1', { type: 'text', text: 'subagent reply' }, { isSidechain: true }),
+      userText('summary of the session so far', { isCompactSummary: true }),
+      userText('<command-name>/clear</command-name>'),
+      userText('<local-command-stdout>done</local-command-stdout>'),
+      userText('<task-notification>finished</task-notification>', { origin: { kind: 'task-notification' } }),
+      userText('a peer said hi', { origin: { kind: 'peer' } }),
+      userText([{ type: 'image', source: {} }]),
+      asst('m1', { type: 'text', text: '   ' }),
+      result('gone', 'result for a call outside the window'),
+      userText('typed by a person', { origin: { kind: 'human' } }),
+    ]),
+  )
+  expect(msgs).toEqual([{ info: { role: 'user' }, parts: [{ type: 'text', text: 'typed by a person' }] }])
+})
+
+test("a synthetic API-error turn becomes the message's error", () => {
+  const msgs = transcriptMessages(lines([asst('e1', { type: 'text', text: 'API Error: rate limited' }, { isApiErrorMessage: true })]))
+  expect(msgs).toEqual([{ info: { id: 'e1', role: 'assistant', error: 'API Error: rate limited' }, parts: [] }])
+})
+
+test('readTranscriptMessages reads from the tail, keeps the last `limit`, and treats a missing transcript as empty', async () => {
+  const h = home()
+  const id = 'c1a0de00-0000-4000-8000-0000000000aa'
+  const records = Array.from({ length: 50 }, (_, i) => userText(`prompt ${i} ${'pad'.repeat(20)}`))
+  transcript(h, '/x/r', id, records)
+  // A 512-byte window forces several cut-and-grow passes, each dropping a half record at its start.
+  const msgs = await readTranscriptMessages(id, '/x/r', { home: h, limit: 5, window: 512 })
+  expect(msgs.map((m) => m.parts?.[0]?.text?.split(' ').slice(0, 2).join(' '))).toEqual(['prompt 45', 'prompt 46', 'prompt 47', 'prompt 48', 'prompt 49'])
+  expect(await readTranscriptMessages(id, '/x/r', { home: h, window: 512 })).toHaveLength(50)
+  expect(await readTranscriptMessages('c1a0de00-0000-4000-8000-0000000000bb', '/x/r', { home: h })).toEqual([])
+  await expect(readTranscriptMessages('../escape', '/x/r', { home: h })).rejects.toThrow(/malformed session id/)
 })

@@ -1,5 +1,5 @@
 import { test, expect, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { listSessions, runAttach, runLogs, runRm, runStatus, runStop } from '../src/commands.ts'
@@ -63,7 +63,7 @@ function setup({ opencodeUp = true, opencodeSessions = [{ id: 'ses_open1', title
     error: deps.error,
     setExitCode: deps.setExitCode,
   }
-  return { client, claude, killImpl, runDir, rosterFile, out, errs, codes, deps, lsDeps, ensureServer }
+  return { client, claude, killImpl, runDir, rosterFile, out, errs, codes, deps, lsDeps, ensureServer, transcriptDir }
 }
 
 test('--json lists every backend, each row naming its backend', async () => {
@@ -307,9 +307,22 @@ test('attach on a claude session refuses while its headless run is still working
   expect(h.codes).toEqual([1])
 })
 
-test('logs on a claude session points at attach instead of printing nothing', async () => {
+// #233: the claude transcript is read through the adapter's listMessages, labelled as claude's.
+test('logs on a claude session prints its transcript', async () => {
   const h = setup()
+  appendFileSync(
+    join(h.transcriptDir, `${CLAUDE_ID}.jsonl`),
+    `${JSON.stringify({ type: 'assistant', cwd: '/x/beta', message: { id: 'msg_1', role: 'assistant', content: [{ type: 'text', text: 'fixed it' }] } })}\n`,
+  )
   await runLogs({ command: 'logs', id: CLAUDE_ID }, h.deps)
+  expect(h.out).toEqual(['you: fix the flaky test', 'claude: fixed it'])
+  expect(h.errs).toEqual([])
+  expect(h.codes).toEqual([])
+})
+
+test('logs on a session whose backend has no transcript reader points at attach', async () => {
+  const h = setup()
+  await runLogs({ command: 'logs', id: CLAUDE_ID }, { ...h.deps, backends: { claude: { ...h.claude, listMessages: undefined } } })
   expect(h.errs).toEqual([`claude sessions have no transcript fleetview can read; fleetview attach ${CLAUDE_ID} to read it`])
   expect(h.codes).toEqual([1])
 })
