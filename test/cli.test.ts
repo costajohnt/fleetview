@@ -1304,6 +1304,23 @@ test('rm of an id that matches nothing deletes nothing and leaves the roster alo
   expect(h.codes).toEqual([1])
 })
 
+// #225: opencode 1.x's `global` project names one of the directories filed under it, so a session in
+// any other was on the roster but unknown to `rm`. The roster's opencode worktrees are listed too;
+// a claude/copilot member's is not asked of opencode.
+test('#225: rm finds a roster session in a directory no opencode project names', async () => {
+  const h = rmHarness()
+  const orphan = '/x/unborn'
+  const roster = h.roster()
+  roster.sessions.push({ worktree: orphan, id: 'ses_glob1', addedAt: 3 }, { worktree: '/x/cc', id: 'cc-1', addedAt: 4, backend: 'claude' })
+  writeFileSync(h.deps.rosterFile, JSON.stringify(roster))
+  h.client.listSessions.mockImplementation((dir: string) => Promise.resolve(dir === orphan ? [{ id: 'ses_glob1', createdAt: 0 }] : []))
+  await runRm({ command: 'rm', id: 'ses_glob1' }, h.deps)
+  expect(h.errs).toEqual([])
+  expect(h.client.deleteSession).toHaveBeenCalledWith('ses_glob1', orphan)
+  expect(h.client.listSessions).not.toHaveBeenCalledWith('/x/cc')
+  expect(h.roster().sessions.map((m: any) => m.id)).toEqual(['ses_abc123', 'ses_other', 'cc-1'])
+})
+
 // --- `fleetview add`: adopt an existing session into the roster ---
 
 const addHarness = ({ sessions = [{ id: 'ses_abc123', createdAt: 0 }], projects = [{ id: '/x/repo', worktree: '/x/repo', repoPath: '/x/repo' }], existingRoster = { groupBy: 'state', sessions: [], collapsed: [] } }: any = {}) => {
@@ -2087,6 +2104,22 @@ test('#45: ls reports a previously-errored session as failed, not done', async (
   const rows = JSON.parse(printed.join('\n'))
   expect(rows).toHaveLength(1)
   expect(rows[0]).toMatchObject({ id: 's1', state: 'failed' })
+})
+
+// #225: the listing side of the same gap — `ls --all` lists a roster member's directory even when no
+// opencode project names it.
+test('#225: ls --all lists a roster session in a directory no opencode project names', async () => {
+  const { client, printed, opts, ensureServer } = lsDeps({
+    listSessions: vi.fn((dir: string) =>
+      Promise.resolve(dir === '/x/unborn' ? [{ id: 'ses_glob1', title: 'in global', directory: dir, time: { created: 1, updated: 3000 } }] : []),
+    ),
+    sessionStatus: vi.fn(() => Promise.resolve({})),
+    listPermissions: vi.fn(() => Promise.resolve([])),
+  })
+  opts.loadRosterImpl = () => ({ sessions: [{ worktree: '/x/unborn', id: 'ses_glob1' }] }) as any
+  await listSessions({ command: 'ls', json: true, all: true } as any, ensureServer, '/tmp/s.json', opts)
+  expect(client.listSessions).toHaveBeenCalledWith('/x/unborn')
+  expect(JSON.parse(printed.join('\n')).map((r: any) => r.id)).toEqual(['ses_glob1'])
 })
 
 // #107: `ls`/`--json` compared the raw `--cwd` against opencode's absolute project paths, while the
