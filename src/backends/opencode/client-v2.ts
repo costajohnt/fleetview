@@ -104,17 +104,30 @@ export function v2Answer(form: Record<string, unknown>, answers: unknown) {
 
 // 2.x messages are a `type`-discriminated union; peek reads 1.x's {info: {role, error}, parts}.
 // User text is top level, assistant text is in `content`, and a failed turn can also end in an
-// `idle` record with the error. Everything else (shell, compaction, switches) has no 1.x row.
+// `idle` record with the error. Tool calls and `!` shell jobs (#223) become 1.x `tool` parts with
+// `state.output`, which messageBody shows for a turn with no text: a 2.x tool's result is a list of
+// content blocks, a shell job's is `output.output`. Everything else (compaction, switches) has no
+// 1.x row.
+const toolPart = (output: string, messageID: string | undefined) => ({ type: 'tool', state: { output }, messageID })
+const contentText = (value: unknown) => records(value).filter((c) => c.type === 'text').map((c) => asString(c.text) ?? '').join('\n')
 export function v1Messages(rows: Record<string, unknown>[]): OpencodeMessage[] {
   const out: OpencodeMessage[] = []
   for (const m of rows) {
     const id = asString(m.id)
     if (m.type === 'user') out.push({ info: { id, role: 'user' }, parts: [{ type: 'text', text: asString(m.text) ?? '', messageID: id }] })
     else if (m.type === 'assistant') {
-      const parts = records(m.content)
-        .filter((c) => c.type === 'text')
-        .map((c) => ({ type: 'text', text: asString(c.text) ?? '', messageID: id }))
+      const parts = records(m.content).flatMap((c) =>
+        c.type === 'text'
+          ? [{ type: 'text', text: asString(c.text) ?? '', messageID: id }]
+          : c.type === 'tool'
+            ? [toolPart(isRecord(c.state) ? contentText(c.state.content) : '', id)]
+            : [],
+      )
       out.push({ info: { id, role: 'assistant', ...(m.error ? { error: v1Error(m.error) } : {}) }, parts })
+    } else if (m.type === 'shell') {
+      // A job with no output yet would render as an empty `opencode:` label.
+      const output = isRecord(m.output) ? asString(m.output.output) : undefined
+      if (output) out.push({ info: { id, role: 'assistant' }, parts: [toolPart(output, id)] })
     } else if (m.type === 'idle' && m.outcome === 'failed' && m.error) out.push({ info: { id, role: 'assistant', error: v1Error(m.error) }, parts: [] })
   }
   return out
