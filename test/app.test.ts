@@ -189,6 +189,7 @@ test('lists sessions on start; Enter emits enter action with worktree', async ()
   const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction }))
   await waitFor(() => lastFrame().includes('fix tests'))
   stdin.write('\r')
+  await waitFor(() => onAction.mock.calls.length > 0) // #222: the attach starts after the commit that hides the roster
   expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'enter', sessionId: 's1', worktree: '/x/alpha' }))
 })
 
@@ -1259,6 +1260,7 @@ test('enter while peeking attaches the peeked session', async () => {
   stdin.write(' ')
   await waitFor(() => lastFrame().includes('opencode:'))
   stdin.write('\r')
+  await waitFor(() => onAction.mock.calls.length > 0) // #222: the attach starts after the commit that hides the roster
   expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ type: 'enter', sessionId: 's1', worktree: '/x/alpha' }))
 })
 
@@ -2881,10 +2883,40 @@ test.each([
   stdin.write('fix the thing')
   await tick() // the input state must flush, or Enter sees an empty input and attaches instead
   stdin.write('\x1B\r') // alt+enter: dispatch and attach
-  await waitFor(() => lastFrame() === '')
+  await waitFor(() => lastFrame() === '' && detach)
   detach(settled)
   await waitFor(() => lastFrame().includes(warning))
   expect(lastFrame()).toContain('dispatched into alpha')
+})
+
+// #222: a dispatch awaits before it attaches, so the child used to start before Ink had released
+// the terminal, and Ink's late setRawMode(false) left the attached session cooked: ^z echoed
+// instead of detaching. The fake host does what pty-host does: raw now and again on the next tick.
+test.each([
+  ['alt+enter after a dispatch', 'fix the thing', '\x1B\r'],
+  ['enter on a row', '', '\r'],
+])('#222: %s leaves the attached terminal raw', async (_, typed, key) => {
+  const deps = makeDeps()
+  let raw: boolean | undefined
+  const setRaw = (on: boolean) => { raw = on }
+  const onAction = vi.fn((a: any) => {
+    if (a.type !== 'enter') return undefined
+    setRaw(true)
+    setImmediate(() => setRaw(true))
+    return new Promise(() => {})
+  })
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction }))
+  ;(stdin as any).setRawMode = setRaw
+  await waitFor(() => lastFrame().includes('fix tests'))
+  if (typed) {
+    stdin.write(typed)
+    await tick() // the input state must flush, or Enter sees an empty input and attaches instead
+  }
+  stdin.write(key)
+  await waitFor(() => onAction.mock.calls.some(([a]) => a.type === 'enter'))
+  await tick()
+  await tick()
+  expect(raw).toBe(true)
 })
 
 // "Ctrl+X twice removes the worktree and uncommitted changes."
