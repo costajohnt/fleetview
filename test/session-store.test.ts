@@ -863,6 +863,204 @@ test('I1: publicView on a 200KB-snippet record reads the cached snippet instead 
 })
 
 
+// Agent view's sixth state. The server can't report it — an aborted session looks idle over the
+// wire — so the store has to remember the stop, and forget it the moment the session runs again.
+test('markStopped derives the stopped state, and a later run retires it', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1000, updated: 1000 } }])
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('done')
+  store.markStopped('repoA', 's1')
+  expect(store.get('repoA', 's1').status).toBe('stopped')
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  expect(store.get('repoA', 's1').status).toBe('running')
+})
+
+test('a stop never hides a pending permission — the session still needs the user', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1000, updated: 1000 } }])
+  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1' } })
+  store.markStopped('repoA', 's1')
+  expect(store.get('repoA', 's1').status).toBe('waiting')
+})
+
+test('ranForMs measures the run fleetview watched, on one clock', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1000, updated: 1000 } }])
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  expect(store.get('repoA', 's1').ranForMs).toBe(null) // still running: the age is a live clock
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const span = store.get('repoA', 's1').ranForMs
+  expect(span).toBeGreaterThanOrEqual(0)
+  expect(span).toBeLessThan(5_000) // the run just happened; not the session's whole lifetime
+})
+
+// A session created an hour ago and stopped in seconds used to report a one-hour run, because the
+// span was creation-to-last-activity rather than the run itself.
+test('a session fleetview never saw start reports no duration rather than its lifetime', () => {
+  const store: any = createStore()
+  const hourAgo = Date.now() - 60 * 60_000
+  store.setSessions('repoA', [{ id: 's1', title: 'adopted', time: { created: hourAgo, updated: hourAgo } }])
+  store.markStopped('repoA', 's1')
+  const row = store.get('repoA', 's1')
+  expect(row.status).toBe('stopped')
+  expect(row.ranForMs).toBe(null) // honest unknown, not a fabricated 1h
+})
+
+// Only an observed `busy` used to clear an error, so a session that succeeded from opencode's own
+// TUI while fleetview's stream was down stayed red forever.
+test('activity after an error retires it', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'X' } } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('error')
+  // The first refresh only establishes the baseline — it carries the error's own bump, whichever
+  // order the frames arrived in, so it is not evidence the session did anything since.
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 500 } }])
+  expect(store.get('repoA', 's1').status).toBe('error')
+  // A bump beyond that baseline is.
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 900 } }])
+  expect(store.get('repoA', 's1').status).toBe('done')
+})
+
+// Measured against opencode 1.18.4: recording an error bumps the session's time.updated, and the
+// session.updated frame carrying it arrives before session.error. Anchoring on the last known
+// value therefore works — until that one frame is dropped, at which point the error's own bump
+// reads as activity after itself and a real failure disappears.
+test('a dropped session.updated cannot retire an error by its own timestamp', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 100 } }])
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  // the session.updated carrying the error's new timestamp (200) never arrives
+  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'X' } } })
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  expect(store.get('repoA', 's1').status).toBe('error')
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 200 } }]) // the error's own bump
+  expect(store.get('repoA', 's1').status).toBe('error') // still failed
+})
+
+// A shape fleetview doesn't recognise is not information: the sweep would otherwise mark every session
+// in the project idle, rendering the whole roster as completed.
+test('an unrecognised status payload shape applies nothing', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.seedStatuses('repoA', [{ s1: { type: 'idle' } }]) // an array, not the expected map
+  expect(store.get('repoA', 's1').status).toBe('running')
+})
+
+// The watermark's entire purpose: a stale seed must not overwrite a live status. Rebuilding the
+// record without statusSeq made both guards fail open.
+test('a listSessions refresh does not disarm the seed watermark', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
+  const mark = store.seedMark()
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }]) // reconnect refresh
+  store.seedStatuses('repoA', {}, mark) // the older in-flight seed finally lands, session absent
+  expect(store.get('repoA', 's1').status).toBe('running') // not "completed"
+})
+
+// A 200 with an empty body is "no information", not "nobody is running".
+test('an empty status payload applies nothing', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
+  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  store.seedStatuses('repoA', null)
+  expect(store.get('repoA', 's1').status).toBe('running')
+  store.seedStatuses('repoA', {}) // a real, genuinely empty map is still authoritative
+  expect(store.get('repoA', 's1').status).toBe('done')
+})
+
+// opencode names a session ~20s after its first prompt, and until then the title is a timestamp
+// placeholder. The dispatch prompt fills that gap without ever competing with the real name.
+test('the dispatch prompt shows until opencode names the session, then the real name wins', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'New session - 2026-07-22T19:51:37.625Z' }])
+  store.setProvisionalTitle('repoA', 's1', 'count the vowels in banana')
+  expect(store.get('repoA', 's1').title).toBe('count the vowels in banana')
+  store.apply('repoA', { type: 'session.updated', properties: { info: { id: 's1', title: 'Count vowels in banana' } } })
+  expect(store.get('repoA', 's1').title).toBe('Count vowels in banana')
+})
+
+test('a user-set name is never overridden by the dispatch prompt', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'my own name' }])
+  store.setProvisionalTitle('repoA', 's1', 'whatever was typed')
+  expect(store.get('repoA', 's1').title).toBe('my own name')
+})
+
+// "Subagents and teammates a session spawns aren't listed as separate rows."
+test('child sessions are not rows', () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [
+    { id: 's1', title: 'real' },
+    { id: 's2', title: 'a subagent', parentID: 's1' },
+  ])
+  expect(store.byProject()[0].sessions.map((s: any) => s.id)).toEqual(['s1'])
+})
+
+// The server reports an aborted session as plain idle, so if the stop isn't persisted a restart
+// renders it as "completed" — claiming a result the user never received.
+test('a stopped session is still stopped after a restart', () => {
+  const first: any = createStore()
+  first.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }])
+  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  first.markStopped('repoA', 's1')
+  expect(first.get('repoA', 's1').status).toBe('stopped')
+
+  const persisted = first.snapshot()
+  const restarted: any = createStore()
+  restarted.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }], persisted)
+  expect(restarted.get('repoA', 's1').status).toBe('stopped')
+})
+
+test('a session that merely ran comes back as completed, not stopped', () => {
+  const first: any = createStore()
+  first.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }])
+  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+  const restarted: any = createStore()
+  restarted.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }], first.snapshot())
+  expect(restarted.get('repoA', 's1').status).toBe('done')
+})
+
+// The heuristic must not fire on code. A reply ending in a fenced block used to be reduced to the
+// block's last line, so a trailing regex or ternary read as a question.
+test('a reply ending in code is not mistaken for a question', () => {
+  const run = (text: string) => {
+    const s: any = createStore()
+    s.setSessions('r', [{ id: 's1', title: 'x' }])
+    s.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+    s.apply('r', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm1', role: 'assistant' } } })
+    s.apply('r', { type: 'message.part.updated', properties: { sessionID: 's1', part: { type: 'text', messageID: 'm1', text } } })
+    s.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+    return s.get('r', 's1').status
+  }
+  expect(run('Here it is:\n```\nconst re = /^\\d+?$/\n```')).toBe('done')
+  expect(run('Use `x ? a : b`')).toBe('done')
+  expect(run('Which branch should I use?')).toBe('waiting') // a real question still counts
+})
+
+// A guess is fine for grouping a row and not for interrupting the user, so the two have to be
+// distinguishable downstream.
+test('publicView says whether waiting rests on a real request or the heuristic', () => {
+  const s: any = createStore()
+  s.setSessions('r', [{ id: 's1', title: 'x' }, { id: 's2', title: 'y' }])
+  s.apply('r', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1' } })
+  s.apply('r', { type: 'session.status', properties: { sessionID: 's2', status: { type: 'busy' } } })
+  s.apply('r', { type: 'message.updated', properties: { sessionID: 's2', info: { id: 'm1', role: 'assistant' } } })
+  s.apply('r', { type: 'message.part.updated', properties: { sessionID: 's2', part: { type: 'text', messageID: 'm1', text: 'shall I?' } } })
+  s.apply('r', { type: 'session.status', properties: { sessionID: 's2', status: { type: 'idle' } } })
+  expect(s.get('r', 's1')).toMatchObject({ status: 'waiting', pendingRequest: true })
+  expect(s.get('r', 's2')).toMatchObject({ status: 'waiting', pendingRequest: false })
+})
+
+
 // opencode emits several `busy` frames per turn, and restamping the run start on each one made the
 // duration measure from the last frame rather than the start of the run.
 test('repeated busy frames do not restart the run clock', () => {
