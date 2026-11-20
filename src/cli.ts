@@ -166,7 +166,7 @@ async function adoptServerCredential(
   const ask = async (): Promise<'healthy' | 'unauthorized' | 'unreachable'> => {
     const asked = await probe(saved.password && env.OPENCODE_SERVER_PASSWORD === saved.password ? saved : { ...saved, pid: null })
     stranger = asked === 'stranger'
-    if (stranger) return 'unauthorized'
+    if (asked === 'stranger') return 'unauthorized'
     if (asked === 'unauthorized' || asked === 'unconfirmed') shown = true
     return asked !== 'unconfirmed' ? asked : isOwnServer(saved) ? 'unreachable' : 'unauthorized'
   }
