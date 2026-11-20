@@ -56,13 +56,15 @@ diff. The previews are byte-deterministic (fixed clock, `FORCE_COLOR`,
 ## Adding a backend
 
 fleetview drives more than opencode through a `Backend` adapter
-(`src/backends/`). A backend implements `listSessions` / `dispatch` / `prompt` /
-`attach` (returns argv) / `events` / `abort` / `rename` / `delete`, plus a
-`capabilities` object so the UI degrades honestly where a backend can't do
-something (fork, rename, questions, delete, …). Server-backed (opencode: HTTP +
-SSE) and process-backed (claude/copilot: headless CLI runs whose state is
-inferred from a parsed stream) are the two families — copy the closest existing
-adapter under `src/backends/` and wire it into `src/backends/index.ts`.
+(`src/backends/`). A backend implements `prompt` / `attach` (returns argv) /
+`abort` / `rename` / `delete`, a `capabilities` object so the UI degrades
+honestly where a backend can't do something (rename, questions, delete), and
+optionally `fork` / `listMessages` / `shell`, whose absence the UI reports. A
+process-backed one (claude/copilot: headless CLI runs whose state is inferred
+from a parsed stream) also implements `listSessions` / `dispatch` / `events` and
+its normalisers; opencode, the server-backed one, does those over its own client
+and SSE stream instead. Copy the closest existing adapter under `src/backends/`
+and wire it into `src/backends/index.ts`.
 
 ## Reporting bugs and asking for features
 

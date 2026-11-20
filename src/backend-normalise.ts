@@ -17,11 +17,11 @@ import { isRecord, type ListedSession, type OpencodeEvent } from './types.ts'
 // The store's own wire vocabulary, since #99 typed it: everything a normaliser emits must be one
 // of the shapes session-store already accepts, and saying so here is what keeps a backend from
 // inventing a fourth vocabulary the store silently drops.
-export type StoreEvent = OpencodeEvent
+type StoreEvent = OpencodeEvent
 
 // Rows for `setSessions`, one function per backend, referenced from each adapter's
-// `normaliseSessions` (Backend contract, H3). opencode has no entry here: its own listings pass
-// through untouched (identity on the adapter), and this file must never become a place opencode's
+// `normaliseSessions` (ProcessBackend contract, H3). opencode has no entry here: its own listings pass
+// through untouched (no normaliser at all), and this file must never become a place opencode's
 // payloads get rewritten, because that is the one path where behaviour is fixed.
 
 // `created` is the transcript's first record timestamp (projects.ts reads it out during the

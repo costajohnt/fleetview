@@ -55,7 +55,7 @@ function snippetBudget(columns: number, fixedParts: string[]) {
 // Group headers are rows you can land on, which is what makes "Enter on a group header collapses
 // it" and "Ctrl+X on a group header deletes every session in it" possible at all. A collapsed group
 // keeps its header and hides its sessions, and its arrow says which it is.
-export const headerKey = (projectKey: string) => `header:${projectKey}`
+const headerKey = (projectKey: string) => `header:${projectKey}`
 
 export function buildLines(groups: RosterGroup[], offlineProjects: KeySet = new Set(), collapsed: KeySet = new Set()) {
   const lines: RosterLine[] = []
@@ -128,7 +128,7 @@ export function windowLines<T>(lines: readonly T[], selectedIdx: number, maxRows
 // The title takes at most half the row. A dispatch prompt is shown raw as the provisional title
 // until opencode names the session ~20s later, so an unbounded title is the common case, not the
 // pathological one — and a wrapped row breaks the viewport arithmetic, which counts it as one line.
-export function titleBudget(columns: number) {
+function titleBudget(columns: number) {
   return Math.max(8, Math.floor((columns || 80) / 2))
 }
 

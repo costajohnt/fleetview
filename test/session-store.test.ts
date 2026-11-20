@@ -1409,10 +1409,9 @@ test('a backend re-listing does not erase the origin tag the sweep reads', () =>
   expect(store.get('repoA', 'c1').status).toBe('running')
 })
 
-// #185: the retire sweep has no `!r.origin` guard of its own. A claude/copilot row survives an
-// opencode retiring listing only because process-backend listings never arm `listed`. This pins
-// the store side of that: a non-retiring listing leaves a row unarmed. That use-discovery's
-// streamBackend never passes `retire` is its own comment's promise, not something this checks.
+// #185: a claude/copilot row survives an opencode retiring listing because process-backend
+// listings never arm `listed`. This pins the store side of that: a non-retiring listing leaves a
+// row unarmed. The sweep's own `!r.origin` guard (#187) is pinned by the next test.
 test("opencode's retiring listing leaves claude and copilot rows in the same directory alone", () => {
   const store: any = createStore()
   store.setSessions('repoA', [{ id: 's1', title: 'opencode' }, { id: 's2', title: 'gone' }], undefined, { retire: true })
@@ -1424,6 +1423,16 @@ test("opencode's retiring listing leaves claude and copilot rows in the same dir
   expect(store.get('repoA', 's2')).toBe(undefined) // the sweep still runs for opencode's own rows
   expect(store.get('repoA', 'c1').origin).toBe('claude')
   expect(store.get('repoA', 'k1').origin).toBe('copilot')
+})
+
+// #187: even a claude row that a retiring listing did arm (one that ever reached opencode's listing)
+// is not opencode's to retire once its origin is known.
+test("opencode's retiring listing never retires a row with another backend's origin, even an armed one", () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 'c1', title: 'a claude run' }], undefined, { retire: true })
+  store.noteOrigin('repoA', 'c1', 'claude')
+  store.setSessions('repoA', [{ id: 's1', title: 'opencode' }], undefined, { retire: true })
+  expect(store.get('repoA', 'c1').origin).toBe('claude')
 })
 
 // M10: the store's origin tag is the single source of session→backend identity — App's

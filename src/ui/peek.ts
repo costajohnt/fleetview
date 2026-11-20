@@ -4,7 +4,7 @@ import { Box, Text } from 'ink'
 import { graphemes, truncateGraphemes, osc8, stripControl } from '../text-utils.ts'
 import { withCaret } from '../text-cursor.ts'
 import { prStatus, prColor } from '../pull-requests.ts'
-import { permissionLabel, questionLabel, messageBody, errorLabel } from '../session-store.ts'
+import { permissionLabel, questionLabel, messageBody, errorLabel, isAbortError } from '../session-store.ts'
 import { theme } from './theme.ts'
 import type { OpencodeMessage, PullRequest } from '../types.ts'
 import type { PeekPermission, PeekQuestion, PeekQuestionOption, PeekRow, RosterSession } from './view-types.ts'
@@ -19,11 +19,6 @@ import type { PeekPermission, PeekQuestion, PeekQuestionOption, PeekRow, RosterS
 const messageText = (m: OpencodeMessage) => messageBody(m)
 
 const ROLE_LABEL: Record<string, string> = { user: 'you:', assistant: 'opencode:' }
-
-const isAbort = (err: unknown) => {
-  const name = typeof err === 'object' && err !== null ? (err as { name?: unknown }).name : undefined
-  return name === 'MessageAbortedError' || name === 'aborted'
-}
 
 // Hard-wraps `text` to terminal rows: split on '\n', then chop each resulting line into
 // `columns`-wide chunks. Pure + exported so truncation math (F3) is unit-testable without ink.
@@ -162,7 +157,7 @@ export function Peek({
       // stripControls it, like every other model-provided string this panel renders (M12).
       // #188: a turn the user stopped carries an abort error (1.x MessageAbortedError, 2.x
       // `aborted` via v1Error) that the roster already reads as `stopped`; peek says the same.
-      const stopped = isAbort(m?.info?.error)
+      const stopped = isAbortError(m?.info?.error)
       const err = stopped ? null : errorLabel(m?.info?.error)
       const rows: PeekRow[] = [{ text: role ? ROLE_LABEL[role] ?? `${role}:` : 'message:', dim: true }]
       if (body || !(err || stopped)) rows.push({ text: body })
