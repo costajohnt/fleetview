@@ -124,9 +124,18 @@ const ERROR_ANCHOR_UNKNOWN = -1
 // #21: opencode reports an aborted run through the same session.error channel as a real failure,
 // carrying `{ name: 'MessageAbortedError', data: { message } }` (verified against the 1.18.5
 // binary, which builds that exact name for any aborted/interrupted message). The name is the only
-// thing that distinguishes a stop the user asked for from a failure they didn't.
-export const isAbortError = (error: unknown): boolean =>
-  typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'MessageAbortedError'
+// thing that distinguishes a stop the user asked for from a failure they didn't. 2.x names it
+// `aborted` (its error `type`, carried as the name by client-v2's v1Error).
+export const isAbortError = (error: unknown): boolean => {
+  const name = typeof error === 'object' && error !== null ? (error as { name?: unknown }).name : undefined
+  return name === 'MessageAbortedError' || name === 'aborted'
+}
+
+// #176: whether an abort is a stop worth remembering. Only one that interrupted a run (`wasRunning`,
+// read BEFORE the abort: the idle it causes can land before the abort call returns) — a ^x or
+// `fleetview stop` on a finished session would otherwise relabel its result `stopped` for good.
+// A process backend's {aborted:false} means nothing was signalled at all (M14).
+export const abortStopped = (wasRunning: boolean, result: unknown): boolean => wasRunning && !(isRecord(result) && result.aborted === false)
 
 const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.test(title)
 
@@ -137,7 +146,7 @@ const isPlaceholderTitle = (title: string) => !title || /^New session - \d{4}-/.
 // a stale `stopped`, or a stale `error` printing the PREVIOUS run's text as the row snippet. Hoisted
 // rather than fixed twice: the predicate is read at four sites and four copies is four chances for
 // one to drift back.
-const isRunningStatus = (s: string) => s === 'busy' || s === 'retry'
+export const isRunningStatus = (s: string) => s === 'busy' || s === 'retry'
 
 // M5: grapheme-safe — a raw slice(0, 80) can chop a surrogate pair in half at the boundary.
 // I1: pre-slice to 640 code units BEFORE the whitespace collapse + grapheme truncation — a 200KB
@@ -773,6 +782,12 @@ export function createStore() {
     // Called after a successful abort. The server reports the result as plain idle, which is
     // indistinguishable from "finished normally", so fleetview has to remember that the user stopped
     // it — otherwise a stopped session renders as completed and reads like a result.
+    // #176: read before an abort, for abortStopped.
+    isRunOpen(projectKey: string, id: string) {
+      const r = sessions.get(key(projectKey, id))
+      return r ? isRunOpen(r) : false
+    },
+
     markStopped(projectKey: string, id: string) {
       const r = sessions.get(key(projectKey, id))
       if (!r) return
