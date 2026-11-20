@@ -2847,6 +2847,21 @@ test('#192: an isolation failure names its reason in the confirmation and the di
   expect(logged.reason).toContain(`not a new]0;evil worktree of /x/alpha: /srv/${marker}/`) // control bytes and newline gone
 })
 
+// #225: a server refusal's 60 characters went on the method, path and JSON envelope; the notice
+// shows the status and the body's own message (request.ts `detail`); the log keeps the whole line.
+test('#225: an isolation refusal shows the server message, not the request line', async () => {
+  const { deps } = isolatingDeps()
+  deps.client.createWorktree = vi.fn(() =>
+    Promise.reject(Object.assign(new Error('POST /experimental/worktree → 400: fatal: no source branch'), { status: 400, detail: 'fatal: no source branch' })),
+  )
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('fix the thing')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => lastFrame().includes('not isolated (worktree failed: 400: fatal: no source branch)'))
+})
+
 // #204: alt+enter attached before the warning branch, so a dispatch that fell back to the checkout
 // said nothing at all. The warning now waits for the return to the roster; a flash made while
 // attached would expire behind the session unseen.
