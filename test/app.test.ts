@@ -2872,6 +2872,36 @@ test.each([
   expect(lastFrame()).toContain('dispatched into alpha')
 })
 
+// #222: a dispatch awaits before it attaches, so the child used to start before Ink had released
+// the terminal, and Ink's late setRawMode(false) left the attached session cooked: ^z echoed
+// instead of detaching. The fake host does what pty-host does: raw now and again on the next tick.
+test.each([
+  ['alt+enter after a dispatch', 'fix the thing', '\x1B\r'],
+  ['enter on a row', '', '\r'],
+])('#222: %s leaves the attached terminal raw', async (_, typed, key) => {
+  const deps = makeDeps()
+  let raw: boolean | undefined
+  const setRaw = (on: boolean) => { raw = on }
+  const onAction = vi.fn((a: any) => {
+    if (a.type !== 'enter') return undefined
+    setRaw(true)
+    setImmediate(() => setRaw(true))
+    return new Promise(() => {})
+  })
+  const { lastFrame, stdin } = render(React.createElement(App, { ...deps, onAction }))
+  ;(stdin as any).setRawMode = setRaw
+  await waitFor(() => lastFrame().includes('fix tests'))
+  if (typed) {
+    stdin.write(typed)
+    await tick() // the input state must flush, or Enter sees an empty input and attaches instead
+  }
+  stdin.write(key)
+  await waitFor(() => onAction.mock.calls.some(([a]) => a.type === 'enter'))
+  await tick()
+  await tick()
+  expect(raw).toBe(true)
+})
+
 // "Ctrl+X twice removes the worktree and uncommitted changes."
 test('deleting an isolated session removes its worktree when nothing would be lost', async () => {
   const { deps, wt } = isolatingDeps()
