@@ -49,10 +49,11 @@ a subagent, `@claude`/`@copilot` another backend, `! cmd` runs a shell job, `s:b
 
 ![The dispatch input with `@` typed, listing subagents, repositories, and the claude/copilot backends to complete to](docs/images/dispatch-suggestions.png)
 
-**Every dispatch is isolated.** A session dispatched into a git repository, on any backend, runs
-in its own git worktree on an ordinary branch, created before the session starts, so three agents
-in one repository never fight over one working copy. Merge back with `git merge` or a pull
-request. ([details](docs/guide.md#every-dispatch-gets-its-own-worktree))
+**Every roster dispatch is isolated.** A session dispatched from the roster into a git repository,
+on any backend, runs in its own git worktree on an ordinary branch, created before the session
+starts, so three agents in one repository never fight over one working copy. Merge back with
+`git merge` or a pull request. `fleetview bg` is the exception: it runs in the directory you point
+it at and edits that checkout directly. ([details](docs/guide.md#every-dispatch-gets-its-own-worktree))
 
 **Three backends, honestly compared.** opencode is the default and the most capable — it has a
 server behind it. Claude Code and Copilot sessions are detached headless runs fleetview reads;
