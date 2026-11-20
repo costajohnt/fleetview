@@ -33,7 +33,7 @@ export function streamProcessBackend(store: SessionStore, name: string, backend:
 // armed with it would delete the opencode rows in the same directory. Leaving these records unlisted
 // is also what keeps opencode's own retiring listing from deleting them — it only sweeps records its
 // own listings armed.
-export function applyProcessListing(store: SessionStore, name: string, directory: string, list: ListedSession[], seen: SeenMap | undefined) {
+export function applyProcessListing(store: SessionStore, name: string, directory: string, list: ListedSession[], seen: SeenMap | undefined): void {
   for (const s of list) store.noteOrigin(directory, s.id, name)
   store.setSessions(directory, list, seen)
 }

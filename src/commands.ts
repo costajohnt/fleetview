@@ -58,7 +58,6 @@ type RunBgDeps = {
 // connection. Empty means "opencode only", which is what every caller that passes nothing gets.
 export type Backends = Record<string, ProcessBackend>
 
-// Every command's default client: a real one for the server it found.
 const newClient = (url: string) => new OpencodeClient(url)
 
 type ListSessionsDeps = {

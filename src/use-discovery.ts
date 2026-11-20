@@ -167,11 +167,9 @@ export function useDiscovery({
         .then((s) => store.seedStatuses(worktree, s, mark, { closeRuns }))
         .catch(() => {})
       if (!pending) return { permissions: true, questions: true }
-      // M4: each GET fails independently. If sessionStatus above succeeds but one of these two
-      // fails, that half of the reseed silently no-ops — e.g. a session whose status seed just
-      // landed idle can still show "waiting" off a pendingPermissions/pendingQuestions entry that
-      // never got its authoritative reseed. Stale until the next reconnect's seedLiveState run;
-      // self-healing, accepted rather than adding retry/backoff for a best-effort catch-up path.
+      // M4: a half that fails here silently no-ops, so a session whose status just seeded idle can
+      // still show "waiting" off a stale pending entry until the next reconnect's seedLiveState run.
+      // Self-healing; accepted rather than adding retry/backoff to a best-effort catch-up path.
       return seedPending(store, client, worktree, mark, additive)
     }
 
