@@ -7,6 +7,7 @@ import { join, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
 import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
+import { loadServer as realLoadServer, saveServer as realSaveServer } from '../src/registry.ts'
 import { OPENCODE_MISSING } from '../src/backends/opencode/server-manager.ts'
 
 const execFileAsync = promisify(execFile)
@@ -414,6 +415,122 @@ test('an unconfirmed answer from fleetview\'s own live server keeps the saved pa
   }
   await makeEnsureServer(deps as any)({ ...server, pid: 4242, password: 'from-server-json' })
   expect(env.OPENCODE_SERVER_PASSWORD).toBe('from-server-json')
+})
+
+// #213 F1: the spawn poll hands probeServer the child's pid, so an answer from any other process
+// (a squatter that grabbed the port during the child's boot) reads as having seen the password.
+test('the spawn poll probes for the pid it just spawned', async () => {
+  const probed: unknown[] = []
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) => (probed.push(s.pid), Promise.resolve(probed.length > 1 ? 'healthy' : 'unreachable')),
+    spawnServer: () => 777,
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    env: {},
+  }
+  await makeEnsureServer(deps as any)(server)
+  expect(probed).toEqual([null, 777])
+})
+
+// #213: the binary's major version is recorded with the server, so probes of a 2.x one (this run's
+// and later runs') offer the password only on the pid-checked route.
+test('a server spawned from an opencode 2.x binary is recorded as api 2', async () => {
+  const saved: any[] = []
+  const probed: any[] = []
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) => (probed.push(s), Promise.resolve(probed.length > 1 ? 'healthy' : 'unreachable')),
+    spawnServer: () => 777,
+    saveServer: (_file: any, s: any) => saved.push(s),
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({ stdout: 'opencode v2.3.2\n' }),
+    env: {},
+  }
+  expect((await makeEnsureServer(deps as any)(server)).server.api).toBe(2)
+  expect(saved.at(-1).api).toBe(2)
+  expect(probed[1].api).toBe(2)
+})
+
+// #213 F3: server.json's pid vouches for the server minted with server.json's password, not for a
+// server the user may have started there since under a password of their own.
+test('server.json\'s pid is checked only while its own password is the one presented', async () => {
+  const cases: [any, NodeJS.ProcessEnv, unknown][] = [
+    [{ ...server, pid: 4242, password: 'generated-earlier' }, {}, 4242],
+    [{ ...server, pid: 4242 }, { OPENCODE_SERVER_PASSWORD: 'set-by-user' }, null],
+  ]
+  for (const [saved, env, expected] of cases) {
+    const probed: unknown[] = []
+    const deps = {
+      isServerHealthy: () => Promise.resolve(true),
+      probeServer: (s: any) => (probed.push(s.pid), Promise.resolve('healthy')),
+      identifyServer: () => ({ ok: true, command: 'opencode serve' }),
+      spawnServer: () => { throw new Error('should not spawn') },
+      saveServer: () => {},
+      serverFile: '/tmp/s.json',
+      env,
+    }
+    await makeEnsureServer(deps as any)(saved)
+    expect(probed).toEqual([expected])
+  }
+})
+
+// #213 F5: a user-set password the spawn poll gives up on is replaced by a generated one, which
+// changes which password the user's server is protected by, so it is said out loud.
+test('a user-set password replaced after a failed spawn window is warned about', async () => {
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  let first = true
+  const warn = vi.fn()
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) => Promise.resolve(s.port !== server.port ? 'healthy' : first ? ((first = false), 'unreachable') : 'unauthorized'),
+    spawnServer: () => 777,
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn,
+    env,
+  }
+  expect((await makeEnsureServer(deps as any)(server)).ok).toBe(true)
+  expect(env.OPENCODE_SERVER_PASSWORD).not.toBe('set-by-user')
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('OPENCODE_SERVER_PASSWORD may have reached something other than fleetview'))
+})
+
+// #213 F4: two processes that both find no server used to spawn one each on the same port, the
+// loser's record overwriting the winner's. The one that waits for the lock adopts what was recorded.
+test('two fleetview processes that both find no server spawn only one between them', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fv-213-'))
+  const serverFile = join(dir, 'server.json')
+  let up: string | undefined // the password the one spawned server enforces
+  const spawnServer = vi.fn((candidate: any) => ((up = candidate.password), 777))
+  const fleetview = (env: NodeJS.ProcessEnv) =>
+    makeEnsureServer({
+      isServerHealthy: () => Promise.resolve(false),
+      probeServer: () => Promise.resolve(up === undefined ? 'unreachable' : env.OPENCODE_SERVER_PASSWORD === up ? 'healthy' : 'unauthorized'),
+      identifyServer: () => ({ ok: true, command: 'opencode serve' }),
+      spawnServer,
+      saveServer: realSaveServer,
+      serverFile,
+      pollMs: 1,
+      spawnSyncImpl: () => ({}),
+      warn: vi.fn(),
+      env,
+    } as any)
+  try {
+    const [envA, envB]: NodeJS.ProcessEnv[] = [{}, {}]
+    const [a, b] = await Promise.all([fleetview(envA)(server), fleetview(envB)(server)])
+    expect(spawnServer).toHaveBeenCalledTimes(1)
+    expect([a.ok, b.ok]).toEqual([true, true])
+    expect(b.server.port).toBe(a.server.port)
+    expect(envB.OPENCODE_SERVER_PASSWORD).toBe(up)
+    expect(realLoadServer(serverFile)).toMatchObject({ port: a.server.port, pid: 777, password: up })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // The child fleetview just spawned may answer `unconfirmed` while it boots, but if its window ends

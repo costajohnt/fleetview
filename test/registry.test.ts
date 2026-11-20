@@ -1,8 +1,8 @@
 import { test, expect } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, readdirSync, statSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, readdirSync, statSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadServer, saveServer, childEnv } from '../src/registry.ts'
+import { loadServer, saveServer, childEnv, withServerLock } from '../src/registry.ts'
 
 const tmpFile = () => join(mkdtempSync(join(tmpdir(), 'fleetview-')), 'server.json')
 
@@ -154,4 +154,16 @@ test('childEnv does not mutate the environment it was given', () => {
   const env = { CLAUDECODE: '1', OPENCODE_SERVER_PASSWORD: 'secret' }
   childEnv(env)
   expect(env).toEqual({ CLAUDECODE: '1', OPENCODE_SERVER_PASSWORD: 'secret' })
+})
+
+// #213 F4: a lock nobody has touched for a while belongs to a holder that died (crash, SIGKILL,
+// reboot); it is broken rather than waited on, whatever pid may since have been handed out.
+test('withServerLock breaks a lock its holder stopped touching, and releases its own', async () => {
+  const file = tmpFile()
+  writeFileSync(`${file}.lock`, '')
+  const old = new Date(Date.now() - 60_000)
+  utimesSync(`${file}.lock`, old, old)
+  const waited = await withServerLock(file, async (w) => (expect(existsSync(`${file}.lock`)).toBe(true), w))
+  expect(waited).toBe(true)
+  expect(existsSync(`${file}.lock`)).toBe(false)
 })
