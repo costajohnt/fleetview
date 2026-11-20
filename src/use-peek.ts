@@ -81,12 +81,24 @@ export function usePeek({
   const peekReply = peekEdit.text
   const setPeekReply = (text: string) => setPeekEdit(atEnd(text))
 
+  // #188: the transcript is a one-shot fetch, so an answer or reply sent from an open peek never
+  // showed the model's response until peek was reopened. Refetching on every status change
+  // (waiting → running → done) picks it up without a fetch per streamed token.
+  const peekStatus = mode === 'peek' && peekTarget ? store.get(peekTarget.projectKey, peekTarget.id)?.status : undefined
+  // What the last fetch was for: a refetch for the same session keeps the old transcript on screen
+  // instead of flashing `loading…` over it.
+  const fetchedFor = useRef<RosterSession | null>(null)
+
   // Fetch on open/selection-change; the cleanup's `cancelled` flag is the latest-wins guard —
   // a superseded effect instance's resolution can never write over a newer target's state.
   useEffect(() => {
-    if (mode !== 'peek' || !peekTarget) return
+    if (mode !== 'peek' || !peekTarget) {
+      fetchedFor.current = null
+      return
+    }
     let cancelled = false
-    setPeekMessages(null)
+    if (fetchedFor.current !== peekTarget) setPeekMessages(null)
+    fetchedFor.current = peekTarget
     // `listMessages` is opencode's GET /session/:id/message. A backend without `messages` keeps its
     // transcript in a file on disk in the CLI's own format, so asking the opencode server about an
     // id it has never heard of would render a fetch failure for a session that is perfectly
@@ -101,7 +113,7 @@ export function usePeek({
       .then((msgs) => { if (!cancelled) setPeekMessages(msgs) })
       .catch(() => { if (!cancelled) setPeekMessages('error') })
     return () => { cancelled = true }
-  }, [mode, peekTarget])
+  }, [mode, peekTarget, peekStatus])
 
   // Space on a roster row opens the panel on it.
   const openPeek = (row: RosterSession) => {

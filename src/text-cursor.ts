@@ -79,6 +79,18 @@ export const deleteForwardAt = (s: TextCursor): TextCursor => {
   return { text: s.text.slice(0, cursor) + s.text.slice(cursor + n), cursor }
 }
 
+// The readline kills: ^u deletes from the start of the line to the caret, ^w the word before it.
+export const killToStart = (s: TextCursor): TextCursor => {
+  const cursor = clamp(s.text, s.cursor)
+  return { text: s.text.slice(cursor), cursor: 0 }
+}
+
+export const killWordBack = (s: TextCursor): TextCursor => {
+  const cursor = clamp(s.text, s.cursor)
+  const start = wordLeft(s.text, cursor)
+  return { text: s.text.slice(0, start) + s.text.slice(cursor), cursor: start }
+}
+
 // A solid block caret, no blink (John's polish pass — the animation earned nothing).
 export const CARET = '█'
 

@@ -243,10 +243,21 @@ export function worktreeSafety(dir: string, parentDir: string | null | undefined
 // in full instead of leaving the user to reconstruct it.
 //
 // Shown, never run: a merge can conflict, the parent checkout may have work in it, and neither is
-// something a keystroke in a roster should decide. Pure so the wording is testable without a
-// repository; the caller supplies the branch lookup.
-export function mergeBackCommand(worktree: string, repo: string | null | undefined, branch: string | null | undefined) {
+// something a keystroke in a roster should decide. The caller supplies the branch lookup.
+//
+// #188: only offered when `git merge` would bring something: commits on the branch that the parent
+// checkout's HEAD lacks. opencode never commits, so a finished session usually has only
+// uncommitted edits (or nothing), and a merge of that branch is a no-op. Uncommitted edits are said
+// as such; no changes at all says nothing. A count git can't produce keeps the command, which is
+// what this showed before the check existed.
+export function mergeBackCommand(worktree: string, repo: string | null | undefined, branch: string | null | undefined, run = execFileSync) {
   if (!repo || !branch || repo === worktree) return null
+  try {
+    // Counted in the parent: HEAD there is what `git merge` merges into. --end-of-options keeps a
+    // branch the session named from ever reading as a flag.
+    const ahead = Number(git(repo, ['rev-list', '--count', '--end-of-options', `HEAD..${branch}`], run))
+    if (ahead === 0) return git(worktree, ['status', '--porcelain'], run) ? 'nothing committed yet, only uncommitted changes' : null
+  } catch {}
   // Both halves are quoted: paths carry spaces, and branch names may legally carry `$`, backticks,
   // `;`, `&`, `|` and quotes (check-ref-format bans only space, ~^:?*[\ and control characters) —
   // and the branch is whatever the session checked out, so this copy-paste line must not trust it.
