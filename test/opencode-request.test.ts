@@ -42,7 +42,7 @@ test.each([
   ['a bare tag', '{"_tag":"NotFound"}', 'NotFound'],
   ['not JSON', 'Bad Gateway', 'Bad Gateway'],
   ['JSON without a message', '{"ok":false}', '{"ok":false}'],
-])('#225: a %s error body yields its message as the error detail', async (_, body, said) => {
+])('#225: an error body (%s) yields its message as the error detail', async (_, body, said) => {
   const fetchImpl = vi.fn(() => reply(400, body))
   const err: any = await opencodeRequest(fetchImpl as any, 'http://h', 'POST', '/w').catch((e: any) => e)
   expect(err.detail.trim()).toBe(said)
