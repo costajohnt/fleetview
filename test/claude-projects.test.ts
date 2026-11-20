@@ -417,3 +417,22 @@ test('#235 a large transcript appended across polls reports what a cold read of 
   expect(rows).toEqual(['run the tests', 'a prompt', 'Named', 'Named'])
   expect(listTranscripts(d, { home: mirror(h) })[0].title).toBe('Named')
 })
+
+// The common case on real transcripts: the title sits a few KB from the end, so the first window
+// finds it without reaching the start, and the next scan has to pick up exactly where that one ended.
+test('#235 a title near the end of a large transcript, appended to, matches a cold read', () => {
+  const h = home()
+  const d = '/repo/alpha'
+  const file = transcript(h, d, 'aaaa-1111', [
+    record(d, 'aaaa-1111', { timestamp: '2026-01-02T03:04:05.000Z' }),
+    ...pads(d, 'aaaa-1111', 7),
+    { type: 'ai-title', aiTitle: 'Near the end', sessionId: 'aaaa-1111' },
+    pad(d, 'aaaa-1111', 10_000),
+  ])
+  expect(listTranscripts(d, { home: h })[0]).toMatchObject({ title: 'Near the end', createdAt: Date.parse('2026-01-02T03:04:05.000Z') })
+  appendFileSync(file, [...pads(d, 'aaaa-1111', 7), { type: 'ai-title', aiTitle: 'Renamed', sessionId: 'aaaa-1111' }, pad(d, 'aaaa-1111', 10_000)].map((l) => JSON.stringify(l)).join('\n') + '\n')
+  const warm = listTranscripts(d, { home: h })[0]
+  const cold = listTranscripts(d, { home: mirror(h) })[0]
+  expect(warm).toMatchObject({ title: 'Renamed', createdAt: Date.parse('2026-01-02T03:04:05.000Z'), directory: d })
+  expect({ title: warm.title, createdAt: warm.createdAt }).toEqual({ title: cold.title, createdAt: cold.createdAt })
+})

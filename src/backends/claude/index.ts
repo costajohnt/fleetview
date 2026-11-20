@@ -224,7 +224,12 @@ export function createClaudeBackend({
         let r = tailFile(cursor, file)
         // null: meta written, log not yet — the next poll will find it. Empty text: nothing
         // appended (a bare reset already cleared the cursor; there is nothing to parse).
-        if (!r?.text) return
+        // A window that read nothing is forgotten, so the next poll windows again and still gets
+        // the whole-read fallback below.
+        if (!r?.text) {
+          if (windowed) cursors.delete(key)
+          return
+        }
         let { events, rest } = parseStreamChunk(cursor.rest + r.text)
         // No assistant text in the window means the last output is further back: read it all.
         if (windowed && !r.reset && !reduceRun(events, emptyTranscriptState()).lastOutput) {

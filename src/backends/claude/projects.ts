@@ -212,7 +212,11 @@ function scan(file: string, prev: CacheEntry | undefined, size: number, ino: num
   } catch {
     // unreadable between open and here; size is left behind so the next poll tries again
   } finally {
-    closeSync(fd)
+    try {
+      closeSync(fd)
+    } catch {
+      // a listing never throws over one file (tailFile's rule); the fd is gone either way
+    }
   }
   return entry
 }
