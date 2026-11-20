@@ -1673,7 +1673,7 @@ test('anything else is sent as a follow-up prompt', async () => {
 test('a refused respond exits 1 rather than reporting an answer that never landed', async () => {
   const h = answerHarness({ permissions: [pendingPermission], respondPermission: vi.fn(() => Promise.reject(new Error('nope'))) })
   await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'y' }, h.deps)
-  expect(h.errs).toEqual(["couldn't answer permission on ses_abc123"])
+  expect(h.errs).toEqual(["couldn't answer permission on ses_abc123: nope"]) // #179: with the reason
   expect(h.codes).toEqual([1])
   expect(h.out).toEqual([])
 })
@@ -1769,6 +1769,72 @@ test('watch reports a failed turn and ends when the stream itself ends', async (
   h.endStream()
   await done
   expect(h.errs[0]).toContain('overloaded')
+  expect(h.codes).toEqual([1])
+})
+
+// #179: exit status is the contract a script waiting on `watch` reads.
+test('watch exits 0 when the turn ends idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit(part('done'))
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.codes).toEqual([])
+  expect(h.errs).toEqual([])
+})
+
+test('watch exits 1 when the stream ends (or never connects) before the session goes idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.endStream()
+  await done
+  expect(h.errs).toEqual(['lost the event stream before ses_abc123 went idle'])
+  expect(h.codes).toEqual([1])
+})
+
+test('watch exits 1 for a failed turn even though it then goes idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.error', properties: { sessionID: 'ses_abc123', error: { name: 'APIError', data: { message: 'overloaded' } } } })
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.codes).toEqual([1])
+})
+
+test('watch exits 0 when the turn was stopped on purpose (#21)', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.error', properties: { sessionID: 'ses_abc123', error: { name: 'MessageAbortedError', data: { message: 'aborted' } } } })
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.codes).toEqual([])
+})
+
+test('watch exits 1 when the session is deleted before it goes idle', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'session.deleted', properties: { info: { id: 'ses_abc123' } } })
+  await done
+  expect(h.errs).toEqual(['ses_abc123 was deleted before it went idle'])
+  expect(h.codes).toEqual([1])
+})
+
+// #179: opencode 1.x streams the user's prompt as a text part of a user message.
+test('watch does not echo the user prompt back as output', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'message.updated', properties: { sessionID: 'ses_abc123', info: { id: 'msg_u', role: 'user' } } })
+  h.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_abc123', part: { type: 'text', id: 'prt_u', messageID: 'msg_u', text: 'count to 3' } } })
+  h.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_abc123', part: { type: 'text', id: 'prt_a', messageID: 'msg_a', text: '1 2 3' } } })
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.out).toEqual(['1 2 3'])
 })
 
 // --- `fleetview status`: the header counts line for a prompt or tmux (#113.3) ---
