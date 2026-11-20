@@ -24,7 +24,7 @@ test('no body and no credential send neither header; an empty 2xx is null', asyn
 
 test('a refusal throws with its status, the path without the query, and a cleaned body', async () => {
   const fetchImpl = vi.fn(() => reply(403, `no${String.fromCharCode(27)}[2J`))
-  const err = await opencodeRequest(fetchImpl as any, 'http://h', 'GET', '/p', { query: '?directory=secret' }).catch((e) => e)
+  const err = await opencodeRequest(fetchImpl as any, 'http://h', 'GET', '/p', { query: '?directory=secret' }).catch((e: any) => e)
   expect(err.status).toBe(403)
   expect(err.message).toMatch(/^GET \/p → 403: no/)
   expect(err.message).not.toContain('secret')
