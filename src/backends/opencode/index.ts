@@ -61,9 +61,10 @@ export function createOpencodeBackend({
       // argv, same as the process backends (session-id.ts).
       assertSessionId(id),
       // --dir is the worktree, not the repository: attach exits 1 immediately and silently if it
-      // points at a directory that no longer exists (see describeExit in cli.ts).
+      // points at a directory that no longer exists (see describeExit in cli.ts). Server-supplied, so
+      // held to the same absolute-path check as 2.x's bare argument.
       '--dir',
-      directory,
+      absoluteDirectory(directory),
     ],
     abort: (id, directory) => client.abortSession(id, directory),
     rename: (id, title, directory) => client.renameSession(id, title, directory),

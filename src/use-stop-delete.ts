@@ -4,6 +4,7 @@ import { isSandbox, isLocalWorktree, removeLocalWorktree } from './worktree.ts'
 import { STATE_GROUPS } from './state-groups.ts'
 import { isRecord } from './types.ts'
 import type { AttachTarget, Backend, BackendCapabilities } from './types.ts'
+import { abortStopped } from './session-store.ts'
 import type { SessionStore } from './session-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
 import type { RosterSession } from './ui/view-types.ts'
@@ -215,6 +216,7 @@ export function useStopDelete({
       const left = stopArmMs - (Date.now() - armedAt)
       return left > 0 ? flash(`${message} · ^x again to delete`, left) : flash(message)
     }
+    const wasRunning = store.isRunning(row.projectKey, row.id)
     try {
       const result = await abortRow(row)
       // M14: a process backend answers {aborted:false} when there was nothing of this run left to
@@ -226,8 +228,9 @@ export function useStopDelete({
       // nothing else would ever clear the heuristic, so the row would stay stuck showing waiting.
       store.clearHeuristicWaiting(row.projectKey, row.id)
       // The server reports the aborted session as plain idle, which would render as "completed" —
-      // a result the user never got. Remember the stop so the row says so.
-      store.markStopped(row.projectKey, row.id)
+      // a result the user never got. Remember the stop so the row says so — but only a stop that
+      // interrupted a run (#176): a finished row keeps its result.
+      if (abortStopped(wasRunning, result)) store.markStopped(row.projectKey, row.id)
       setOfflineProjects((s) => {
         const next = new Set(s)
         next.delete(row.projectKey)

@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, chmodSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { atomicWrite, fleetviewDir, noteExit } from '../src/paths.ts'
@@ -58,4 +58,19 @@ test('noteExit swallows an unwritable path', () => {
   const dir = mkdtempSync(join(tmpdir(), 'fleetview-paths-'))
   writeFileSync(join(dir, 'blocker'), '')
   expect(() => noteExit('exited on SIGTERM', join(dir, 'blocker', 'exit.log'))).not.toThrow()
+})
+
+// #182: a symlink planted at the log path is not followed, and a loose pre-existing log is re-tightened.
+test('noteExit does not append through a planted symlink, and re-tightens an existing log', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleetview-paths-'))
+  const target = join(dir, 'victim')
+  writeFileSync(target, 'untouched\n')
+  symlinkSync(target, join(dir, 'exit.log'))
+  noteExit('exited on SIGHUP', join(dir, 'exit.log'))
+  expect(readFileSync(target, 'utf8')).toBe('untouched\n')
+
+  const loose = join(dir, 'loose.log')
+  writeFileSync(loose, '', { mode: 0o644 })
+  noteExit('exited on SIGHUP', loose)
+  expect(statSync(loose).mode & 0o777).toBe(0o600)
 })
