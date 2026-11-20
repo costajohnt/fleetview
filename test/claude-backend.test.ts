@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createClaudeBackend } from '../src/backends/claude/index.ts'
 import { createStore } from '../src/session-store.ts'
+import { emptyTranscriptState, reduceRun } from '../src/backends/claude/stream.ts'
 
 const tmp = (prefix: string) => mkdtempSync(join(tmpdir(), `fleetview-claude-${prefix}-`))
 
@@ -615,4 +616,32 @@ test('a cursor whose session vanished is pruned, so the log is re-read from the 
     sub.stop()
     await sub.done
   }
+})
+
+// #235: a transcript seen for the first time is read from its tail, not whole. Pinned on both
+// sides of the window: the last assistant text near the end, and one so far back that only a
+// whole read finds it.
+test('#235 a large transcript’s last output is its last assistant text, however far back it is', async () => {
+  const { b, home } = backend({ pollMs: 20 })
+  const d = '/repo/alpha'
+  const say = (text: string) => ({ type: 'assistant', cwd: d, sessionId: 'aaaa-1111', message: { content: [{ type: 'text', text }] } })
+  const toolOnly = (id: string) => ({ type: 'assistant', cwd: d, sessionId: id, message: { content: [{ type: 'tool_use', id: 't', name: 'Bash', input: { command: 'y'.repeat(100_000) } }] } })
+  transcript(home, d, 'aaaa-1111', [say('early'), ...Array.from({ length: 30 }, () => toolOnly('aaaa-1111')), say('the latest reply'), toolOnly('aaaa-1111')])
+  transcript(home, d, 'bbbb-2222', [
+    { ...say('the only reply'), sessionId: 'bbbb-2222' },
+    ...Array.from({ length: 30 }, () => toolOnly('bbbb-2222')),
+  ])
+  const onEvent = vi.fn()
+  const sub = b.events({ directory: d }, { onEvent })
+  try {
+    await waitForExpect(() => expect(new Set(onEvent.mock.calls.map(([, e]) => e.sessionId))).toEqual(new Set(['aaaa-1111', 'bbbb-2222'])))
+  } finally {
+    sub.stop()
+    await sub.done
+  }
+  const last = (id: string) => reduceRun(onEvent.mock.calls.map(([, e]) => e).filter((e) => e.sessionId === id), emptyTranscriptState())
+  expect([last('aaaa-1111'), last('bbbb-2222')].map((s) => [s.status, s.lastOutput])).toEqual([
+    ['idle', 'the latest reply'],
+    ['idle', 'the only reply'],
+  ])
 })

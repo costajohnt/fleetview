@@ -320,6 +320,17 @@ test('logs on a claude session prints its transcript', async () => {
   expect(h.codes).toEqual([])
 })
 
+// #235: the id is handed to the backend's listing, so claude can read the one transcript it names
+// rather than every transcript in every directory it looks in.
+test('resolving an id hands it to each backend listing as a prefix', async () => {
+  const h = setup()
+  const listSessions = vi.fn(h.claude.listSessions)
+  await runLogs({ command: 'logs', id: CLAUDE_ID.slice(0, 8) }, { ...h.deps, backends: { claude: { ...h.claude, listSessions } } })
+  expect(listSessions.mock.calls.length).toBeGreaterThan(0)
+  expect(listSessions.mock.calls.every((c) => c[1] === CLAUDE_ID.slice(0, 8))).toBe(true)
+  expect(h.out).toEqual(['you: fix the flaky test'])
+})
+
 test('logs on a session whose backend has no transcript reader points at attach', async () => {
   const h = setup()
   await runLogs({ command: 'logs', id: CLAUDE_ID }, { ...h.deps, backends: { claude: { ...h.claude, listMessages: undefined } } })
