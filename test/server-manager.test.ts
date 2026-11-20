@@ -221,6 +221,20 @@ test('probeServer does not offer a 2.x server\'s password on 1.x\'s route', asyn
   expect(fetchImpl.mock.calls.every((call: any) => !call[1].headers)).toBe(true)
 })
 
+// #216 follow-up: nor does a 1.x answer stand in for it. A stranger on a recorded 2.x server's port
+// that answers /project with a project list would otherwise pass with no credential and no pid.
+test('probeServer treats a 1.x answer for a server recorded as 2.x as a stranger', async () => {
+  const fetchImpl = vi.fn((url: string) =>
+    Promise.resolve(url.endsWith('/project') ? { ok: true, status: 200, json: () => Promise.resolve(PROJECTS) } : { ok: false, status: 404, json: () => Promise.resolve({}) }),
+  )
+  await withPassword('hunter2', async () => {
+    expect(await probeServer({ host: '127.0.0.1', port: 4900, pid: 4242, api: 2 }, fetchImpl as any)).toBe('unauthorized')
+    // Unrecorded, the same answer is a 1.x server as before.
+    expect(await probeServer({ host: '127.0.0.1', port: 4900, pid: 4242 }, fetchImpl as any)).toBe('healthy')
+  })
+  expect(fetchImpl.mock.calls.every((call: any) => !call[1]?.headers)).toBe(true)
+})
+
 test('probeServer reports unauthorized when the retried password is rejected too', async () => {
   const server = { host: '127.0.0.1', port: 4900 }
   const fetchImpl = vi.fn(() => Promise.resolve({ ok: false, status: 401 }))

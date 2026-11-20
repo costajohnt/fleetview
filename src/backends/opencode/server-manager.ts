@@ -83,6 +83,10 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const base = `http://${server.host}:${server.port}`
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl, async () => server.api !== 2)
+  // A server recorded as 2.x that answers as 1.x is not that server: 1.x reports no pid, so taking
+  // the answer would skip the pid check and hand the stranger the password. Treated as one that
+  // rejected it, which burns and rotates the password (cli.ts adoptServerCredential).
+  if (v1 === 'healthy' && server.api === 2) return 'unauthorized'
   if (v1 === 'healthy') noteOpencodeApi(base, 1)
   if (v1 !== 'unreachable') return v1
   // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
