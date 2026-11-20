@@ -5,10 +5,10 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { promisify } from 'node:util'
-import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
+import { makePersistSeen, editPrompt, listSessions, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
 import { loadServer as realLoadServer, saveServer as realSaveServer } from '../src/registry.ts'
-import { OPENCODE_MISSING, probeServer, isAuthEnforced } from '../src/backends/opencode/server-manager.ts'
+import { OPENCODE_MISSING, probeServer, isAuthEnforced, makeEnsureServer, looksLikeOpencodeServer } from '../src/backends/opencode/server-manager.ts'
 
 const execFileAsync = promisify(execFile)
 

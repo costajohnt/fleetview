@@ -27,7 +27,7 @@ import type { Backend, ListedSession, ProcessBackend, Project, ServerRef } from 
 import type { SeenMap } from './seen-store.ts'
 import type { RosterSession as RosterMember } from './roster-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
-import type { EnsureServer } from './cli.ts'
+import type { EnsureServer } from './backends/opencode/server-manager.ts'
 
 export const DEFAULT_SERVER: ServerRef = { host: '127.0.0.1', port: 4900, pid: null }
 const RECENT_MESSAGES = 10
