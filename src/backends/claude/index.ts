@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { Backend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
+import type { ProcessBackend, BackendEventHandlers, EventSubscription, SessionRef } from '../../types.ts'
 import { claudeNormaliser, normaliseClaudeSessions } from '../../backend-normalise.ts'
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { encodeProjectDir, listTranscripts, projectsDir } from './projects.ts'
@@ -18,15 +18,14 @@ import { reapRunLogs } from '../run-logs.ts'
 import { newTailCursor, tailFile, type TailCursor } from '../tail.ts'
 import { assertSessionId } from '../session-id.ts'
 
-// Every flag is a "fleetview can't", stated rather than inherited. `fork` is the one worth naming:
-// `claude --resume --fork-session` does exactly what the flag means, but the Backend contract has no
-// fork() to invoke it from, so advertising true would put a key in the UI with nothing behind it.
+// Every flag is a "fleetview can't", stated rather than inherited. No fork(), listMessages() or
+// shell() either: `claude --resume --fork-session` exists but nothing here drives it yet, the
+// transcript is a file in ~/.claude/projects rather than a wire API peek can fetch, and there is no
+// shell surface.
 const CAPABILITIES = {
-  fork: false, // --fork-session exists; the contract has no fork() yet
   rename: false, // no CLI surface for renaming a stored session (-n only names one at start)
   delete: false, // would mean unlinking a transcript out of ~/.claude/projects, which is Claude Code state
   questions: false, // a headless run can't be answered mid-flight; denials are reported after the fact
-  messages: false, // the transcript is a file in ~/.claude/projects, not a wire API peek can fetch
 } as const
 
 // How long between reads of a run log. There is no stream to block on, so this is the whole of the
@@ -56,7 +55,7 @@ export function createClaudeBackend({
   psImpl?: (pid: number) => PidInfo
   now?: () => number
   pollMs?: number
-} = {}): Backend {
+} = {}): ProcessBackend {
   const logPath = (id: string) => join(runDir, `${id}.jsonl`)
   const metaPath = (id: string) => join(runDir, `${id}.json`)
 

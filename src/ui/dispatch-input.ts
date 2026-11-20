@@ -29,7 +29,7 @@ export function hints({ empty, view, kind, attachable = true }: { empty: boolean
 // How many physical rows the prompt itself occupies. `^j` puts real newlines in the input, and App
 // reserves screen space by counting rows — so this is the one place that decides, and both the
 // reservation and the render read it rather than agreeing by coincidence.
-export const MAX_INPUT_ROWS = 5
+const MAX_INPUT_ROWS = 5
 export const inputRows = (value: string) => Math.min(MAX_INPUT_ROWS, Math.max(1, value.split('\n').length))
 
 // The bordered box adds its top and bottom rows on top of inputRows(). App's row reservation
@@ -146,7 +146,7 @@ export function tailOf(text: string, width: number) {
 // `width` graphemes of `line` with the caret drawn at code-unit offset `col`, scrolled so the
 // caret is always on screen: the head while the caret fits, otherwise the window ending at the
 // caret plus whatever follows it fits. With the caret at the end this is exactly tailOf.
-export function aroundCaret(line: string, col: number, caret: string, width: number) {
+function aroundCaret(line: string, col: number, caret: string, width: number) {
   const before = graphemes(line.slice(0, col))
   const after = graphemes(line.slice(col))
   const all = caret ? [...before, caret, ...after] : [...before, ...after]

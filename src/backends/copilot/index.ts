@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Backend } from '../../types.ts'
+import type { ProcessBackend } from '../../types.ts'
 import { copilotNormaliser, normaliseCopilotSessions } from '../../backend-normalise.ts'
 import { configDir, childEnv, openPrivateAppend } from '../../registry.ts'
 import { foldEvents, initialRun, parseJsonlChunk, type CopilotStatus, type RunState } from './events.ts'
@@ -19,13 +19,13 @@ import { assertSessionId } from '../session-id.ts'
 // Measured, not aspirational — each `false` is a thing the CLI cannot do, not a thing left unbuilt.
 // `questions` is the load-bearing one: a headless run that lacks a permission fails the tool with
 // `code: "denied"`, tells nobody, and still exits 0. There is no request to surface and no channel
-// to answer it on, so a roster offering to approve something would be lying.
+// to answer it on, so a roster offering to approve something would be lying. No fork() (no
+// fork/branch/clone anywhere in `copilot --help`), listMessages() (the transcript is a file in
+// copilot's state dir, not a wire API peek can fetch) or shell() either.
 const CAPABILITIES = {
-  fork: false, // no fork/branch/clone anywhere in `copilot --help`
   rename: false, // -n/--name titles a session at creation; nothing renames one after
   delete: false, // the CLI has no surface for removing a stored session
   questions: false, // headless denial is silent and unanswerable
-  messages: false, // the transcript is a file in copilot's state dir, not a wire API peek can fetch
 } as const
 
 // How often events() re-reads the sessions in a directory. Every tick is a directory listing and a
@@ -60,7 +60,7 @@ export function createCopilotBackend({
   logDir?: string
   now?: () => number
   pollMs?: number
-} = {}): Backend {
+} = {}): ProcessBackend {
   // Runs this fleetview started: the process group abort signals, and the directory events() needs
   // to place a session copilot has not written to disk yet. One entry per dispatch, not persisted —
   // after a restart the lock file under session-state is the better answer anyway, because it is the

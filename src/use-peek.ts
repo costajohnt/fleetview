@@ -100,16 +100,17 @@ export function usePeek({
     const refetch = fetchedFor.current === peekTarget
     if (!refetch) setPeekMessages(null)
     fetchedFor.current = peekTarget
-    // `listMessages` is opencode's GET /session/:id/message. A backend without `messages` keeps its
-    // transcript in a file on disk in the CLI's own format, so asking the opencode server about an
-    // id it has never heard of would render a fetch failure for a session that is perfectly
-    // healthy. Say what is actually true instead. A capability, not `backendFor(...) !== null`
-    // (M13): the contract exists so nothing identity-tests adapters.
-    if (!capabilitiesOf(peekTarget).messages) {
+    // A backend without `listMessages` keeps its transcript in a file on disk in the CLI's own
+    // format, so asking the opencode server about an id it has never heard of would render a fetch
+    // failure for a session that is perfectly healthy. Say what is actually true instead. The
+    // row's own adapter, not `backendFor(...) !== null` (M13) or a raw client (#187): the contract
+    // exists so nothing identity-tests adapters.
+    const backend = backendFor(peekTarget)
+    if (!backend.listMessages) {
       setPeekMessages('unsupported')
       return
     }
-    client
+    backend
       .listMessages(peekTarget.id, peekTarget.projectKey)
       .then((msgs) => { if (!cancelled) setPeekMessages(msgs) })
       // A failed background refetch keeps the transcript already on screen rather than replacing it.
@@ -142,14 +143,14 @@ export function usePeek({
     const key = `${row.projectKey}:${row.id}`
     const backend = backendFor(row)
     // opencode-vs-everything-else, by the adapter's own name now that backendFor returns one for
-    // opencode rows too (H2): the two branches below are about surface opencode alone has (the
-    // shell route, the saved-reply queue), not about whether an adapter exists.
+    // opencode rows too (H2): the saved-reply queue below is surface opencode alone has, not a
+    // question of whether an adapter exists.
     const external = backend.name !== DEFAULT_BACKEND
-    // A `!` reply is opencode's shell route; the process-backed CLIs have no equivalent, and sending
-    // the command as a prompt would run something else entirely.
-    if (bang && external) return setPeekError({ id: row.id, message: "! shell replies run on opencode only" })
+    // A `!` reply is the backend's shell route; the process-backed CLIs have no equivalent, and
+    // sending the command as a prompt would run something else entirely.
+    if (bang && !backend.shell) return setPeekError({ id: row.id, message: "! shell replies run on opencode only" })
     try {
-      if (bang) await client.runShell(row.id, body, row.projectKey)
+      if (bang) await backend.shell!(row.id, body, row.projectKey)
       // A follow-up IS in the Backend contract (prompt()) — on opencode it is the same promptAsync
       // call this always made, and on both process backends it is a resume of the same session.
       else await backend.prompt(row.id, body, row.projectKey)

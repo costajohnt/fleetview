@@ -232,14 +232,13 @@ export type ServerRef = {
 
 // What a backend can actually do, so the UI can degrade honestly instead of offering a key that
 // silently does nothing. Every flag is required — a new backend has to state its answer rather than
-// inherit opencode's by omission, which is how a "supported" fork button would end up on a CLI that
-// has no fork.
+// inherit opencode's by omission. Fork and a readable transcript are not flags: they are the
+// optional `fork`/`listMessages` methods on Backend, whose presence is the capability (#187), so a
+// "supported" fork can never route to a server that does not own the session.
 export type BackendCapabilities = {
-  fork: boolean
   rename: boolean
   delete: boolean // the CLI can remove a stored session; false means ^x^x can only stop, not delete
   questions: boolean // server-side questions/permissions fleetview can answer from the roster
-  messages: boolean // a transcript readable over the wire; false means peek says "attach to read it"
 }
 
 // Where a session lives. `directory` is the project/worktree every opencode call is scoped by
@@ -273,37 +272,50 @@ export type EventSubscription = {
 // (src/backends/opencode, src/backends/claude, src/backends/copilot); each lands as a file rather
 // than as branches through the roster.
 //
-// Deliberately narrow: only what every backend family can plausibly do. opencode's extra surface
-// (worktrees, permissions, shell, providers, agent/command lists) stays on OpencodeClient, because
-// promoting it here would mean inventing a no-op for it on three CLIs that have no equivalent.
+// Deliberately narrow: only what every backend family can plausibly do, plus optional methods for
+// what only some can. opencode's server-only surface (worktrees, permissions, providers,
+// agent/command lists) stays on OpencodeClient, because promoting it here would mean inventing a
+// no-op for it on CLIs that have no equivalent.
 // Return types stay deliberately weak, for the same reason the wire types above stay permissive —
 // each backend's payloads are its own shape, and the roster reads them through per-backend
-// normalisation, not through this type. The four verbs whose result nothing reads say exactly that
-// by returning `unknown`. The one result that IS read is a listing, and it returns `ListedSession[]`
-// rather than `unknown`: every adapter already knows its own rows, `normaliseSessions` is the seam
-// where they become the store's vocabulary, and opencode's normaliser is identity — it hands back
-// the very array it was given, which a laundering pass through `unknown` could not do.
+// normalisation, not through this type. The verbs whose result nothing reads say exactly that by
+// returning `unknown`. The one result that IS read is a listing (ProcessBackend), and it returns
+// `ListedSession[]` rather than `unknown`: every adapter already knows its own rows, and
+// `normaliseSessions` is the seam where they become the store's vocabulary.
 export type Backend = {
   readonly name: string
   readonly capabilities: BackendCapabilities
-  listSessions(directory: string): Promise<ListedSession[]>
-  // create-then-prompt as one call: no backend exposes a session that exists but was never asked
-  // anything, and splitting it would leave every caller repeating the two-step.
-  dispatch(input: { prompt: string; directory: string; agent?: string; model?: string }): Promise<SessionRef>
   prompt(id: string, text: string, directory: string): Promise<unknown>
-  // Long-lived subscription, not a one-shot read: `stop` is what unmounting has to call, and `done`
-  // is how a caller waits for the reader to actually finish. Backends without a real event stream
-  // satisfy this by polling and calling onEvent themselves.
-  events(target: { directory: string }, handlers: BackendEventHandlers): EventSubscription
   // argv, command included — `opencode attach …` and `claude --resume …` don't share a program, so
   // handing back only the arguments would leave the caller deciding what to run.
   attach(session: SessionRef): string[]
   abort(id: string, directory: string): Promise<unknown>
   rename(id: string, title: string, directory: string): Promise<unknown>
   delete(id: string, directory: string): Promise<unknown>
+  // Optional surface: absent means the backend can't, and the UI says so (#187). Reached through the
+  // row's own adapter (backendFor), never a raw opencode client, so a session id only ever goes to
+  // the backend that owns it.
+  fork?(id: string, directory: string): Promise<{ id: string }>
+  listMessages?(id: string, directory: string): Promise<OpencodeMessage[]>
+  shell?(id: string, command: string, directory: string): Promise<unknown>
+}
+
+// The process-backed family (claude, copilot): no server, so the roster lists, dispatches and
+// streams through the adapter itself. opencode does all of that over its own client and event
+// stream, which is why these are not on Backend (#187): an adapter member nothing calls in
+// production is one that drifts.
+export type ProcessBackend = Backend & {
+  listSessions(directory: string): Promise<ListedSession[]>
+  // create-then-prompt as one call: no backend exposes a session that exists but was never asked
+  // anything, and splitting it would leave every caller repeating the two-step.
+  dispatch(input: { prompt: string; directory: string; agent?: string; model?: string }): Promise<SessionRef>
+  // Long-lived subscription, not a one-shot read: `stop` is what unmounting has to call, and `done`
+  // is how a caller waits for the reader to actually finish. Backends without a real event stream
+  // satisfy this by polling and calling onEvent themselves.
+  events(target: { directory: string }, handlers: BackendEventHandlers): EventSubscription
   // Normalisation is part of the contract (H3), not a string-keyed chain beside it: each adapter
   // states how its listings and events become the store's vocabulary (backend-normalise.ts is the
-  // vocabulary's home and documents the rules). opencode's are identity — its payloads ARE the
+  // vocabulary's home and documents the rules). opencode needs none — its payloads ARE the
   // vocabulary — and a new backend cannot silently pass its wire format through unnormalised.
   normaliseSessions(rows: ListedSession[] | null | undefined): ListedSession[]
   // A fresh normaliser per events() subscription: it folds per-session state across events, and two

@@ -22,7 +22,7 @@ import { stripControl } from './text-utils.ts'
 import type { ParsedArgs } from './cli-args.ts'
 import { isListedSession, isRecord } from './types.ts'
 import { SESSION_ID_RE } from './backends/session-id.ts'
-import type { Backend, ListedSession, Project, ServerRef } from './types.ts'
+import type { Backend, ListedSession, ProcessBackend, Project, ServerRef } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { RosterSession as RosterMember } from './roster-store.ts'
 import type { RosterClient } from './backends/opencode/client.ts'
@@ -55,7 +55,7 @@ type RunBgDeps = {
 // The process-backed adapters (claude, copilot), keyed by backend name. opencode is never in here:
 // it is reached through the server each command resolves, and its adapter is built from that
 // connection. Empty means "opencode only", which is what every caller that passes nothing gets.
-export type Backends = Record<string, Backend>
+export type Backends = Record<string, ProcessBackend>
 
 type ListSessionsDeps = {
   createClient?(url: string): RosterClient
@@ -1010,7 +1010,7 @@ export async function runLogs(args: ParsedArgs, deps: SessionCommandDeps) {
   const found = await findSession(args.id, { ...d, cwd: args.cwd })
   if (!found) return
   if (!found.opencode) {
-    // capabilities.messages is false for both process backends: the transcript is a file in the
+    // Neither process backend has listMessages: the transcript is a file in the
     // CLI's own state directory, not something fleetview can fetch, which is also why peek says
     // "attach to read it" for these rows.
     d.error(`${found.backend} sessions have no transcript fleetview can read; fleetview attach ${found.id} to read it`)

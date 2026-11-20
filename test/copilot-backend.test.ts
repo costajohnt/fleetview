@@ -56,7 +56,8 @@ function writeSession(stateDir: string, id: string, cwd: string, { pid, events }
 test("copilot declares what it cannot do rather than inheriting opencode's answers", () => {
   const { backend } = harness()
   expect(backend.name).toBe('copilot')
-  expect(backend.capabilities).toEqual({ fork: false, rename: false, delete: false, questions: false, messages: false })
+  expect(backend.capabilities).toEqual({ rename: false, delete: false, questions: false })
+  expect([backend.fork, backend.listMessages, backend.shell]).toEqual([undefined, undefined, undefined])
 })
 
 // The id is minted, not read back: in JSON mode copilot only announces it on the final `result`

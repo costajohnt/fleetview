@@ -44,7 +44,7 @@ const deadClient = () => {
 
 const fakeClaude = (sessions: any[] = []) => ({
   name: 'claude',
-  capabilities: { fork: false, rename: false, delete: false, questions: false, messages: false },
+  capabilities: { rename: false, delete: false, questions: false },
   listSessions: vi.fn(async () => sessions),
   dispatch: vi.fn(async ({ directory }: any) => ({ id: 'claude-9', directory })),
   prompt: vi.fn(async () => ({})),

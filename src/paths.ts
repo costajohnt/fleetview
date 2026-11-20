@@ -18,7 +18,7 @@ export const fleetviewDir = (parent: string) => {
 export const stateDir = () =>
   (process.env.FLEETVIEW_STATE_DIR ?? process.env.ROOST_STATE_DIR) ?? fleetviewDir(join(homedir(), '.local', 'state'))
 
-export const defaultExitLogFile = () => join(stateDir(), 'exit.log')
+const defaultExitLogFile = () => join(stateDir(), 'exit.log')
 
 // Why fleetview went away, for the times stderr cannot say so: a dropped SSH session HUPs the
 // process with the tty already gone, so the only place the reason can survive is disk. Best effort

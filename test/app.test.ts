@@ -3262,7 +3262,7 @@ function fakeBackend(name: string, capabilities: any = {}, sessions: any[] = [])
   const captured: any = { handlers: null, stop: vi.fn() }
   return {
     name,
-    capabilities: { fork: false, rename: false, delete: false, questions: false, messages: false, ...capabilities },
+    capabilities: { rename: false, delete: false, questions: false, ...capabilities },
     captured,
     listSessions: vi.fn(async () => sessions),
     dispatch: vi.fn(async ({ directory }: any) => ({ id: `${name}-9`, directory })),
@@ -3476,7 +3476,7 @@ test('an opencode-only roster renders no backend tag at all', async () => {
   expect(lastFrame().split('\n').find((l) => l.includes('fix tests'))).not.toContain('opencode')
 })
 
-// M13: the peek gate is capabilities.messages, not "is there an adapter" — what it renders for a
+// M13/#187: the peek gate is the adapter's own listMessages, not "is there an adapter" — what it renders for a
 // backend without a wire transcript, and that it never asks the opencode server about a foreign id.
 test('peeking a row whose backend has no message API says so instead of fetching', async () => {
   const deps = makeDeps()
@@ -3533,6 +3533,38 @@ test('/fork on a row whose backend cannot fork says so instead of calling forkSe
   stdin.write('\r')
   await waitFor(() => lastFrame().includes("claude can't fork a session"))
   expect(deps.client.forkSession).not.toHaveBeenCalled()
+})
+
+// #187: fork, the reply prompt after it, and the peek transcript go through the row's own adapter.
+// An adapter that has them must never have its session ids sent to the opencode server.
+test("/fork and peek on a non-opencode row that can fork and read messages use that row's adapter", async () => {
+  const deps = makeDeps()
+  const claude = {
+    ...fakeBackend('claude', {}, [claudeRow('c1', 'claude work')]),
+    fork: vi.fn(async () => ({ id: 'c2' })),
+    listMessages: vi.fn(async () => [{ info: { role: 'assistant' }, parts: [{ type: 'text', text: 'from the claude adapter' }] }]),
+  }
+  const { stdin, lastFrame } = render(
+    React.createElement(App, {
+      ...deps,
+      onAction: vi.fn(),
+      backends: { opencode: opencodeStub(deps), claude },
+      initialBackend: 'claude',
+      roster: { groupBy: 'state', sessions: [{ worktree: '/x/alpha', id: 'c1', addedAt: 1, backend: 'claude' }] },
+    }),
+  )
+  await waitFor(() => lastFrame().includes('claude work'))
+  stdin.write('/fork go on')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => claude.prompt.mock.calls.length > 0)
+  expect(claude.fork).toHaveBeenCalledWith('c1', '/x/alpha')
+  expect(claude.prompt).toHaveBeenCalledWith('c2', 'go on', '/x/alpha')
+  expect(deps.client.forkSession).not.toHaveBeenCalled()
+  expect(deps.client.promptAsync).not.toHaveBeenCalled()
+  stdin.write(' ') // peek the selected claude row
+  await waitFor(() => lastFrame().includes('from the claude adapter'))
+  expect(deps.client.listMessages).not.toHaveBeenCalled()
 })
 
 test('^x stops a claude row through its own adapter, not the opencode client', async () => {

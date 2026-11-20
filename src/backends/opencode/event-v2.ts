@@ -8,7 +8,7 @@ import { backoff, readEventStream } from './sse.ts'
 import type { OpencodeEvent } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 
-export type V2Handlers = {
+type V2Handlers = {
   onEvent: (directory: string, event: OpencodeEvent) => void
   onOffline?: (directory: string) => void
   onOnline?: (directory: string) => void

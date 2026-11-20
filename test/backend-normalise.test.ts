@@ -3,15 +3,13 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createStore } from '../src/session-store.ts'
 import { BACKEND_NAMES, DEFAULT_BACKEND, defaultBackendName, isBackendName } from '../src/backends/index.ts'
-import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
 import { createClaudeBackend } from '../src/backends/claude/index.ts'
 import { createCopilotBackend } from '../src/backends/copilot/index.ts'
 
-// The normalisers live on each adapter now (Backend contract, #83), so the fixtures reach them the
-// way the roster does: through the adapter. Neither the server nor the client is ever touched by a
-// normaliser, so stubs are enough to build opencode's.
+// The normalisers live on each process-backed adapter (Backend contract, #83), so the fixtures reach
+// them the way the roster does: through the adapter. opencode has none: its payloads are the
+// store's vocabulary already (#187).
 const adapters: Record<string, any> = {
-  opencode: createOpencodeBackend({ server: { host: '127.0.0.1', port: 0 } as any, client: {} as any }),
   claude: createClaudeBackend(),
   copilot: createCopilotBackend(),
 }
@@ -46,14 +44,6 @@ test('FLEETVIEW_BACKEND sets the default and an unknown value falls back quietly
   expect(defaultBackendName({ ROOST_BACKEND: 'claude' } as any)).toBe('claude') // pre-rename spelling still read
   // A typo in a shell profile must not make the roster unopenable — `--backend` is the loud form.
   expect(defaultBackendName({ FLEETVIEW_BACKEND: 'nonsense' } as any)).toBe('opencode')
-})
-
-test('opencode events pass through untouched', () => {
-  const normalise = createNormaliser('opencode')
-  const event = { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } }
-  expect(normalise(event)).toEqual([event])
-  const list = [{ id: 's1', title: 'x', time: { updated: 5 } }]
-  expect(normaliseSessions('opencode', list)).toBe(list)
 })
 
 test('a successful claude run reads as running and then done, with its reply as the snippet', () => {

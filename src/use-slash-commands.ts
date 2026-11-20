@@ -1,5 +1,5 @@
 import { withMember, type Roster } from './roster-store.ts'
-import type { AppAction, AttachTarget, BackendCapabilities, ModelPair } from './types.ts'
+import type { AppAction, AttachTarget, Backend, ModelPair } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
 import type { RosterClient, ProviderInfo } from './backends/opencode/client.ts'
@@ -15,7 +15,7 @@ export function useSlashCommands({
   hasOpencode,
   needsOpencode,
   current,
-  capabilitiesOf,
+  backendFor,
   backendNameOf,
   providers,
   setDispatchModel,
@@ -31,7 +31,7 @@ export function useSlashCommands({
   hasOpencode: boolean
   needsOpencode: (what: string) => void
   current: RosterSession | undefined
-  capabilitiesOf: (row: AttachTarget) => BackendCapabilities
+  backendFor: (row: AttachTarget) => Backend
   backendNameOf: (row: AttachTarget) => string
   providers: ProviderInfo[]
   setDispatchModel: (model: ModelPair | null) => void
@@ -54,10 +54,13 @@ export function useSlashCommands({
     }
     if (command === 'fork') {
       if (!current) return flash('select a session to fork')
-      // Capability gate, driven only by the backend's own flags: claude has --fork-session but the
-      // Backend contract has no fork(), and copilot has no fork at all — either way the honest
-      // answer is to say so rather than call a client method that would hit the wrong server.
-      if (!capabilitiesOf(current).fork) {
+      // Capability gate, driven only by the row's own adapter: claude has --fork-session but its
+      // adapter has no fork(), and copilot has no fork at all — either way the honest answer is to
+      // say so. The fork and its prompt go through that adapter too (#187), so a session id never
+      // reaches a server that doesn't own it.
+      const backend = backendFor(current)
+      const fork = backend.fork
+      if (!fork) {
         setInput('')
         return flash(`${backendNameOf(current)} can't fork a session`, 4000)
       }
@@ -66,10 +69,10 @@ export function useSlashCommands({
         let forkedId: string | null = null
         let done = false
         try {
-          const forked = await client.forkSession(row.id, row.projectKey)
+          const forked = await fork(row.id, row.projectKey)
           forkedId = forked.id
           updateRoster((prev) => withMember(prev, row.projectKey, forked.id, args ? { prompt: args.slice(0, 2000) } : {}))
-          if (args) await client.promptAsync(forked.id, args, row.projectKey)
+          if (args) await backend.prompt(forked.id, args, row.projectKey)
           done = true
           flash(`forked → ${forked.id.slice(0, 12)}${args ? ' (prompt sent)' : ''}`)
           store.setSessions(row.projectKey, await client.listSessions(row.projectKey), seen)
