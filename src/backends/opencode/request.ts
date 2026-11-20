@@ -16,6 +16,18 @@ export const ownershipVerified = (url: string) => void unverified.delete(originO
 export const ownershipKnown = (url: string) => !unverified.has(originOf(url))
 export const credentialFor = (url: string, auth: string | undefined) => (ownershipKnown(url) ? auth : undefined)
 
+// #225: opencode's error bodies are JSON envelopes, 1.x `{"name":…,"data":{"message":…}}` and 2.x a
+// tagged error (`_tag`, `name`, `message`), so the raw text puts the readable message last and any
+// cut lands in the envelope. Their message, else their tag; anything else is passed through as sent.
+const errorText = (text: string) => {
+  let body: { data?: { message?: unknown } | null; message?: unknown; _tag?: unknown; name?: unknown } | null = null
+  try {
+    body = JSON.parse(text)
+  } catch {}
+  const said = [body?.data?.message, body?.message, body?._tag, body?.name].find((m): m is string => typeof m === 'string' && m.trim() !== '')
+  return said ?? text
+}
+
 // One request to an opencode server, for both API versions: they differ in paths, in how the
 // directory travels (1.x `?directory=`, 2.x a header) and in payload shapes, not in this.
 // `query` is appended to the URL but left out of the error message; `headers` ride after the
@@ -51,7 +63,12 @@ export async function opencodeRequest<T = unknown>(
   // verbs print this message straight to the terminal, so it gets the same stripControl as every
   // other foreign string, and a cap so an error page cannot flood it.
   // `status` rides the error so a caller can tell "the server answered no" from "unreachable".
-  if (!res.ok) throw Object.assign(new Error(`${method} ${path} → ${res.status}: ${stripControl(await res.text()).slice(0, 500)}`), { status: res.status })
+  // #225: `detail` is the body's own message, so a caller with room for one short line (the dispatch
+  // notice) shows the readable part rather than the method, path and JSON envelope around it.
+  if (!res.ok) {
+    const detail = stripControl(errorText(await res.text())).slice(0, 500)
+    throw Object.assign(new Error(`${method} ${path} → ${res.status}: ${detail}`), { status: res.status, detail })
+  }
   const text = await res.text()
   return (text.trim() ? JSON.parse(text) : null) as T
 }

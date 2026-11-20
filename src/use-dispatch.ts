@@ -24,8 +24,12 @@ export type DispatchOptions = { thenAttach?: boolean; agent?: string; repo?: str
 const isolationFailure = (e: unknown, target: string) => {
   const reason = stripControl(e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').trim() || 'unknown error'
   logDispatchDebug({ event: 'isolation-failed', target, reason: reason.slice(0, 500) })
-  const short = truncateGraphemes(reason, 60)
-  return short === reason ? reason : `${short}…`
+  // #225: a server refusal carries its own message as `detail` (request.ts); 60 characters of the
+  // whole line were the method, path and status, and the message never showed.
+  const detail = (e as { detail?: unknown } | null)?.detail
+  const said = (typeof detail === 'string' && detail.replace(/\s+/g, ' ').trim()) || reason
+  const short = truncateGraphemes(said, 60)
+  return short === said ? said : `${short}…`
 }
 const notIsolated = (refused: string) => `not isolated${refused ? ` (worktree failed: ${refused})` : ''}, it edits the checkout`
 

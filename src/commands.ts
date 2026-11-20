@@ -252,6 +252,7 @@ async function resolveSession(
   createClient: (url: string) => Pick<RosterClient, 'listProjects' | 'listSessions'>,
   error: (message: string) => void,
   setExitCode: (code: number) => void,
+  rosterFile = defaultRosterFile(),
 ) {
   const problem = sessionIdProblem(id)
   if (problem) {
@@ -266,7 +267,7 @@ async function resolveSession(
     return null
   }
   const client = createClient(`http://${r.server.host}:${r.server.port}`)
-  const projects = allProjectDirectories(await client.listProjects())
+  const projects = await opencodeDirectories(client, rosterMembers(() => loadRoster(rosterFile)))
   const matches = await matchSessions(client, projects, id!)
   if (matches.length === 0) {
     error(`no session matching ${id}`)
@@ -408,7 +409,7 @@ export async function runAdd(
     },
   }: RunAddDeps,
 ) {
-  const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode)
+  const found = await resolveSession(args.id, ensureServer, serverFile, createClient, error, setExitCode, rosterFile)
   if (!found) return
   const { session, worktree } = found
   // #106: the already-on-the-roster check and the append are one read-modify-write, so they hold
@@ -648,6 +649,7 @@ async function connectOpencode<C extends Pick<RosterClient, 'listProjects'>>({
   serverFile,
   createClient,
   backends,
+  members,
   error,
   setExitCode,
 }: {
@@ -655,13 +657,14 @@ async function connectOpencode<C extends Pick<RosterClient, 'listProjects'>>({
   serverFile: string
   createClient: (url: string) => C
   backends: Backends
+  members: RosterMember[]
   error: Say
   setExitCode: (code: number) => void
 }): Promise<{ opencode: { client: C; server: ServerRef; projects: Project[] } | null } | null> {
   const r = await ensureServer(loadServer(serverFile) ?? DEFAULT_SERVER)
   if (r.ok) {
     const client = createClient(`http://${r.server.host}:${r.server.port}`)
-    return { opencode: { client, server: r.server, projects: allProjectDirectories(await client.listProjects()) } }
+    return { opencode: { client, server: r.server, projects: await opencodeDirectories(client, members) } }
   }
   const reason = r.reason ?? 'opencode server unreachable'
   const others = Object.keys(backends)
@@ -675,6 +678,20 @@ async function connectOpencode<C extends Pick<RosterClient, 'listProjects'>>({
   return { opencode: null }
 }
 
+// Every directory the opencode side of a command lists: opencode's projects and their sandboxes, plus
+// the worktree of each opencode roster member. #225: opencode 1.x files a directory with no
+// repository identity yet (a `git init` with no commits) under its one `global` project, whose
+// single `worktree` names only one such directory, so a session in any other was on the roster yet
+// absent from `ls --all` and unknown to `rm`. GET /session?directory= answers for the directory
+// itself, so listing the member's worktree finds it. claude/copilot members are left out: their
+// worktrees hold no opencode session, and asking opencode about a directory makes it set one up.
+async function opencodeDirectories(client: Pick<RosterClient, 'listProjects'>, members: RosterMember[]) {
+  const rows: Project[] = members
+    .filter((m) => typeof m.backend !== 'string' || m.backend === DEFAULT_BACKEND)
+    .map((m) => ({ id: `roster:${m.worktree}`, worktree: m.worktree }))
+  return allProjectDirectories([...((await client.listProjects()) ?? []), ...rows])
+}
+
 // Where claude and copilot are asked for sessions. Both adapters list per directory (Claude Code
 // files transcripts by cwd, copilot records the cwd of each session), so this is the set fleetview
 // already knows: opencode's project directories, the roster's worktrees, and the directory the
@@ -685,9 +702,9 @@ const processDirs = (projects: Project[], rosterWorktrees: string[], cwd: string
   ...new Set([...projects.map((p) => p.worktree), ...rosterWorktrees, cwd ?? process.cwd()]),
 ]
 
-const rosterWorktrees = (load: () => { sessions: RosterMember[] }) => {
+const rosterMembers = (load: () => { sessions: RosterMember[] }) => {
   try {
-    return load().sessions.map((m) => m.worktree)
+    return load().sessions
   } catch {
     return [] // a corrupt roster narrows discovery; it is not a reason to fail the command
   }
@@ -767,7 +784,17 @@ export async function listSessions(
     },
   }: ListSessionsDeps = {},
 ) {
-  const conn = await connectOpencode({ ensureServer, serverFile, createClient, backends, error, setExitCode })
+  // #32: read-only, and once — the roster is what remembers the dispatch
+  // prompt behind a session the server never named (a `! cmd` job never takes a model turn, so
+  // opencode's rename never fires and the row reads "New session - <timestamp>"). Keyed the same
+  // `worktree:id` way the roster store keys members. A corrupt roster is not a reason to fail a
+  // listing — `ls` only wants nicer titles out of it. Read before connecting: its worktrees are also
+  // directories to list (#225).
+  let members = new Map<string, RosterMember>()
+  try {
+    members = new Map(loadRosterImpl(rosterFile()).sessions.map((m) => [`${m.worktree}:${m.id}`, m]))
+  } catch {}
+  const conn = await connectOpencode({ ensureServer, serverFile, createClient, backends, members: [...members.values()], error, setExitCode })
   if (!conn) return
   // #107: resolve `--cwd` the same way the roster (resolve at cli.ts) and `bg` (realpathSync) do,
   // so `ls`/`--json` scope against the absolute project paths the roster stores rather than a raw
@@ -779,15 +806,6 @@ export async function listSessions(
   // Read once, not once per project: the file is the same on every iteration, so re-reading and
   // re-parsing it per project bought nothing and cost a stat + parse per project.
   const seen = loadSeenImpl(seenFile())
-  // #32: read-only, and once, for the same reason — the roster is what remembers the dispatch
-  // prompt behind a session the server never named (a `! cmd` job never takes a model turn, so
-  // opencode's rename never fires and the row reads "New session - <timestamp>"). Keyed the same
-  // `worktree:id` way the roster store keys members. A corrupt roster is not a reason to fail a
-  // listing — `ls` only wants nicer titles out of it.
-  let members = new Map<string, RosterMember>()
-  try {
-    members = new Map(loadRosterImpl(rosterFile()).sessions.map((m) => [`${m.worktree}:${m.id}`, m]))
-  } catch {}
   if (conn.opencode) await seedOpencode(store, conn.opencode.client, projects, seen)
   await seedProcessBackends(store, backends, processDirs(projects, [...members.values()].map((m) => m.worktree), cwd), seen)
   const rows = []
@@ -829,7 +847,8 @@ export async function runStatus(
     },
   }: RunStatusDeps,
 ) {
-  const conn = await connectOpencode({ ensureServer, serverFile, createClient, backends, error, setExitCode })
+  const members = rosterMembers(() => loadRoster(rosterFile))
+  const conn = await connectOpencode({ ensureServer, serverFile, createClient, backends, members, error, setExitCode })
   if (!conn) return
   const projects = conn.opencode?.projects ?? []
   const parents = sandboxParents(projects)
@@ -838,7 +857,7 @@ export async function runStatus(
   // The same seeding `ls` runs, and for the same reason: sessions alone have no status, and
   // statuses alone have no pending permission/question — summarise counts both.
   if (conn.opencode) await seedOpencode(store, conn.opencode.client, projects, seen)
-  if (Object.keys(backends).length) await seedProcessBackends(store, backends, processDirs(projects, rosterWorktrees(() => loadRoster(rosterFile)), args.cwd), seen)
+  if (Object.keys(backends).length) await seedProcessBackends(store, backends, processDirs(projects, members.map((m) => m.worktree), args.cwd), seen)
   const sessions = []
   for (const group of store.byProject()) {
     const repo = displayProject(parents, group.projectKey)
@@ -867,7 +886,8 @@ async function findSession<C extends Pick<RosterClient, 'listProjects' | 'listSe
     return null
   }
   const want = id!
-  const conn = await connectOpencode(deps)
+  const members = rosterMembers(() => loadRoster(deps.rosterFile))
+  const conn = await connectOpencode({ ...deps, members })
   if (!conn) return null
   const projects = conn.opencode?.projects ?? []
   const matches: { backend: string; id: string; worktree: string }[] = []
@@ -875,7 +895,7 @@ async function findSession<C extends Pick<RosterClient, 'listProjects' | 'listSe
     for (const m of await matchSessions(conn.opencode.client, projects, want)) matches.push({ backend: DEFAULT_BACKEND, id: m.session.id, worktree: m.worktree })
   }
   if (Object.keys(backends).length) {
-    const dirs = processDirs(projects, rosterWorktrees(() => loadRoster(deps.rosterFile)), deps.cwd)
+    const dirs = processDirs(projects, members.map((m) => m.worktree), deps.cwd)
     await Promise.all(
       Object.entries(backends).flatMap(([name, backend]) =>
         dirs.map(async (dir) => {

@@ -34,6 +34,22 @@ test('a refusal throws with its status, the path without the query, and a cleane
   expect(err.message).not.toContain(String.fromCharCode(27))
 })
 
+// #225: opencode's error bodies are JSON envelopes; the readable message is pulled out of them
+// (1.x `data.message`, 2.x `message`, else the tag) rather than shown as raw JSON.
+test.each([
+  ['1.x', '{"name":"WorktreeCreateFailedError","data":{"message":"fatal: no source branch\\n"}}', 'fatal: no source branch'],
+  ['2.x', '{"_tag":"WorktreeError","name":"WorktreeError","message":"not a repository"}', 'not a repository'],
+  ['a bare tag', '{"_tag":"NotFound"}', 'NotFound'],
+  ['not JSON', 'Bad Gateway', 'Bad Gateway'],
+  ['JSON without a message', '{"ok":false}', '{"ok":false}'],
+])('#225: a %s error body yields its message as the error detail', async (_, body, said) => {
+  const fetchImpl = vi.fn(() => reply(400, body))
+  const err: any = await opencodeRequest(fetchImpl as any, 'http://h', 'POST', '/w').catch((e: any) => e)
+  expect(err.detail.trim()).toBe(said)
+  expect(err.message).toBe(`POST /w → 400: ${err.detail}`)
+  expect(err.status).toBe(400)
+})
+
 // #216: fleetview's server dies, something else takes the port, and fleetview keeps talking to it.
 test('after a lost connection the credential waits for a pid-matched probe, on requests and the event stream', async () => {
   vi.stubEnv('OPENCODE_SERVER_PASSWORD', 'hunter2')
