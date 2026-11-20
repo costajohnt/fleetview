@@ -232,3 +232,8 @@ test('#33: a usable prefix and a whole id both pass', () => {
   expect(sessionIdProblem('ses_abc1')).toBe(null)
   expect(sessionIdProblem('  ses_abc1  ')).toBe(null) // trimmed before measuring, not after
 })
+
+// #182: ids and titles come from the server or the session and go to raw stdout.
+test('formatRow strips control bytes and keeps the row on one line', () => {
+  expect(formatRow({ id: 'ses_1\x1b]0;pwned\x07', state: 'idle', name: 'a\nb', summary: 'c\x9bd' })).toBe('ses_1]0;pwned  idle      a b  — cd')
+})

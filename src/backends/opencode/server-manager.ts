@@ -65,10 +65,19 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // opencode 1.x answers GET /project with its project list. 2.x serves its web app there (200
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl)
-  return v1 === 'unreachable' ? askServer(server, '/api/info', isV2Info, fetchImpl) : v1
+  // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
+  // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
+  // the password (the reason opencodeApi in client.ts asks this route credential-free).
+  return v1 === 'unreachable' ? askServer(server, '/api/info', isV2Info, fetchImpl, isV2Unauthorized) : v1
 }
 
-async function askServer(server: ServerRef, path: string, looksRight: (body: unknown) => boolean, fetchImpl: typeof fetch) {
+async function askServer(
+  server: ServerRef,
+  path: string,
+  looksRight: (body: unknown) => boolean,
+  fetchImpl: typeof fetch,
+  wantsCredential: (res: Response) => Promise<boolean> = async () => true,
+) {
   const url = `http://${server.host}:${server.port}${path}`
   try {
     // The first request carries NO credential, on purpose. fleetview adopts the password from
@@ -80,7 +89,7 @@ async function askServer(server: ServerRef, path: string, looksRight: (body: unk
     let res = await fetchImpl(url, { signal: AbortSignal.timeout(2000) })
     if (res.status === 401) {
       const auth = authHeader()
-      if (!auth) return 'unauthorized'
+      if (!auth || !(await wantsCredential(res))) return 'unauthorized'
       res = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
       if (res.status === 401) return 'unauthorized'
     }
@@ -95,6 +104,16 @@ async function askServer(server: ServerRef, path: string, looksRight: (body: unk
     return looksRight(body) ? 'healthy' : 'unreachable'
   } catch {
     return 'unreachable'
+  }
+}
+
+// 2.x's own 401 body on /api/info (the same test opencodeApi in client.ts uses).
+async function isV2Unauthorized(res: Response): Promise<boolean> {
+  try {
+    const body = await res.json()
+    return typeof body === 'object' && body !== null && (body as Record<string, unknown>)._tag === 'UnauthorizedError'
+  } catch {
+    return false
   }
 }
 
