@@ -596,11 +596,12 @@ test('a tail whose session vanished is pruned, so a returning session re-folds a
   // #185: the poll interval is faked, so "ticks with the session invisible" is a count of polls
   // that definitely ran rather than a 50ms window a loaded runner can fit zero polls into.
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
-  const { backend, stateDir } = harness()
-  const dir = writeSession(stateDir, 'wanderer', '/repo/alpha', { pid: 12, events: SAID('halfway there') })
-  const onEvent = vi.fn()
-  const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
+  let sub: any
   try {
+    const { backend, stateDir } = harness()
+    const dir = writeSession(stateDir, 'wanderer', '/repo/alpha', { pid: 12, events: SAID('halfway there') })
+    const onEvent = vi.fn()
+    sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
     await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     // Hide the workspace.yaml, as deletion of the session would: a dir without one is skipped as
     // mid-creation, so the session drops out of visible() and its tail must be dropped with it.
@@ -612,8 +613,8 @@ test('a tail whose session vanished is pruned, so a returning session re-folds a
     await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(2))
     expect(onEvent.mock.calls[1][1]).toMatchObject({ sessionId: 'wanderer', status: 'working', lastOutput: 'halfway there' })
   } finally {
-    sub.stop()
-    await sub.done
+    sub?.stop()
+    await sub?.done
     vi.useRealTimers()
   }
 })

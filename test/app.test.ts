@@ -75,8 +75,9 @@ function makeDeps(): any {
     runShell: vi.fn(() => Promise.resolve({})),
     respondQuestion: vi.fn(() => Promise.resolve({})),
     // #185: the project is `vcs: 'git'`, so every dispatch tries to isolate. Without these the
-    // missing method threw a TypeError into use-dispatch's silent isolation catch; null is the
-    // server's own "no worktree" answer, so dispatch runs in the repository on purpose.
+    // missing method threw a TypeError into use-dispatch's isolation catch. A null worktree is now
+    // a deliberate refusal: default-fixture dispatches take the "not isolated (worktree failed)"
+    // path and run in the repository. Tests about isolation itself use isolatingDeps below.
     listWorktrees: vi.fn(() => Promise.resolve([])),
     createWorktree: vi.fn(() => Promise.resolve(null)),
   } satisfies RosterClient

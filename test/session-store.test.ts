@@ -855,7 +855,12 @@ test('I1: publicView on a 200KB-snippet record reads the cached snippet instead 
   store.apply('repoA', { type: 'message.part.updated', properties: { sessionID: 's1', part: { type: 'text', messageID: 'm1', text: long } } })
   const segment = vi.spyOn(Intl.Segmenter.prototype, 'segment')
   try {
-    for (let i = 0; i < 1000; i++) expect(store.get('repoA', 's1').snippet).toBe('a'.repeat(80))
+    // Positive control: deriving a snippet is visible to this spy, so an empty result below means
+    // get() didn't derive one, not that the spy is blind.
+    store.apply('repoA', { type: 'message.part.updated', properties: { sessionID: 's1', part: { type: 'text', messageID: 'm1', text: long + 'b' } } })
+    expect(segment.mock.calls.some(([text]) => text.length > 100)).toBe(true)
+    segment.mockClear()
+    for (let i = 0; i < 1000; i++) store.get('repoA', 's1')
     expect(segment.mock.calls.filter(([text]) => text.length > 100)).toEqual([])
   } finally {
     segment.mockRestore()
@@ -1396,9 +1401,9 @@ test('a backend re-listing does not erase the origin tag the sweep reads', () =>
 })
 
 // #185: the retire sweep has no `!r.origin` guard of its own. A claude/copilot row survives an
-// opencode retiring listing only because process-backend listings never arm `listed`
-// (use-discovery's streamBackend); this pins that, so a change on either side can't silently start
-// deleting another backend's rows.
+// opencode retiring listing only because process-backend listings never arm `listed`. This pins
+// the store side of that: a non-retiring listing leaves a row unarmed. That use-discovery's
+// streamBackend never passes `retire` is its own comment's promise, not something this checks.
 test("opencode's retiring listing leaves claude and copilot rows in the same directory alone", () => {
   const store: any = createStore()
   store.setSessions('repoA', [{ id: 's1', title: 'opencode' }, { id: 's2', title: 'gone' }], undefined, { retire: true })

@@ -222,18 +222,25 @@ const roster = loadRoster(file)
 const persist = makePersistRoster({ roster, file })
 writeFileSync(ready, '')
 const cell = new Int32Array(new SharedArrayBuffer(4))
-while (go && !existsSync(go)) Atomics.wait(cell, 0, 0, 1)
+const deadline = Date.now() + 30000 // a test that died before opening the barrier must not orphan us
+while (go && !existsSync(go)) {
+  if (Date.now() > deadline) process.exit(2)
+  Atomics.wait(cell, 0, 0, 1)
+}
 persist({ ...roster, sessions: [...roster.sessions, { worktree: '/x', id, addedAt: 1 }] })
 `,
   )
   return worker
 }
 const runWorker = (worker: string, args: string[]) => {
-  const c = spawn(process.execPath, [worker, ...args], { stdio: 'ignore' })
+  const c = spawn(process.execPath, [worker, ...args], { stdio: ['ignore', 'ignore', 'pipe'] })
+  let stderr = ''
+  c.stderr.on('data', (d) => (stderr += d))
   const exited = new Promise<void>((res, rej) => {
-    c.on('exit', (code) => (code === 0 ? res() : rej(new Error(`worker ${args[1]} exited ${code}`))))
+    c.on('exit', (code) => (code === 0 ? res() : rej(new Error(`worker ${args[1]} exited ${code}: ${stderr}`))))
     c.on('error', rej)
   })
+  exited.catch(() => {}) // observed by the test; this only keeps an early crash from going unhandled
   return { child: c, exited }
 }
 
@@ -245,9 +252,16 @@ test('#106: concurrent persists from separate processes all survive the merge', 
   const go = join(dir, 'go')
   const ids = Array.from({ length: 8 }, (_, i) => `p${i}`)
   const runs = ids.map((id) => runWorker(worker, [file, id, join(dir, `ready-${id}`), go]))
-  await waitFor(() => ids.every((id) => existsSync(join(dir, `ready-${id}`))))
-  writeFileSync(go, '')
-  await Promise.all(runs.map((r) => r.exited))
+  const all = Promise.all(runs.map((r) => r.exited))
+  try {
+    let crashed: unknown
+    all.catch((e) => (crashed = e))
+    await waitFor(() => crashed || ids.every((id) => existsSync(join(dir, `ready-${id}`))))
+    if (crashed) throw crashed
+  } finally {
+    writeFileSync(go, '') // never leave a worker spinning on a barrier that won't open
+  }
+  await all
   const got = loadRoster(file).sessions.map((s) => s.id).sort()
   expect(got).toEqual(['seed', ...ids].sort())
 })
@@ -262,12 +276,22 @@ test('#106: a persist waits out a live lock holder, then writes', async () => {
   const ready = join(dir, 'ready')
   const run = runWorker(appendWorker(dir), [file, 'late', ready, ''])
   let exited = false
-  run.exited.then(() => (exited = true), () => (exited = true))
-  await waitFor(() => existsSync(ready))
-  const now = Date.now() / 1000
-  utimesSync(`${file}.lock`, now, now) // however slow the worker was to start, the holder is still fresh
-  await new Promise((r) => setTimeout(r, 300)) // a window for an unlocked write to show itself
-  expect(exited).toBe(false)
+  let failure: unknown
+  run.exited.then(() => (exited = true), (e) => ((exited = true), (failure = e)))
+  try {
+    // Refreshed on every poll, so however slow the worker is to start, the holder it meets is fresh.
+    await waitFor(() => {
+      const now = Date.now() / 1000
+      utimesSync(`${file}.lock`, now, now)
+      return exited || existsSync(ready)
+    })
+    await new Promise((r) => setTimeout(r, 300)) // a window for an unlocked write to show itself
+    expect(failure).toBeUndefined()
+    expect(exited).toBe(false)
+  } catch (e) {
+    run.child.kill()
+    throw e
+  }
   expect(loadRoster(file).sessions.map((s) => s.id)).toEqual(['seed'])
   rmSync(`${file}.lock`)
   await run.exited

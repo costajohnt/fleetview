@@ -145,13 +145,16 @@ test('a prompt longer than the terminal scrolls rather than wrapping', () => {
 })
 
 // The whole point: App reserves rows by counting the components it draws, so the total has to fit.
+// More sessions than any real terminal is tall, so the bound below can't hold by accident on a big
+// dev terminal (#185): ink falls back to the real terminal's size when the test stdout has none.
+const SESSIONS = 200
 const appFrameFits = async (rows?: any, drive?: { press: (stdin: any) => void; until: (frame: string) => boolean }) => {
   const project = { id: 'a-1', worktree: '/x/alpha', time: { created: 1, updated: 1000 } }
   const client = {
     listProjects: vi.fn(() => Promise.resolve([project])),
     listSessions: vi.fn(() =>
       Promise.resolve(
-        Array.from({ length: 25 }, (_, i) => ({ id: `s${i}`, title: `a fairly long session title ${i}`, time: { updated: i } })),
+        Array.from({ length: SESSIONS }, (_, i) => ({ id: `s${i}`, title: `a fairly long session title ${i}`, time: { updated: i } })),
       ),
     ),
     listMessages: vi.fn(() => Promise.resolve([])),
@@ -169,7 +172,7 @@ const appFrameFits = async (rows?: any, drive?: { press: (stdin: any) => void; u
       connectEventsImpl: vi.fn(() => ({ done: Promise.resolve(), stop: vi.fn() })),
       ensureServerImpl: vi.fn(),
       serverReady: true,
-      roster: { groupBy: 'state', sessions: Array.from({ length: 25 }, (_, i) => ({ worktree: '/x/alpha', id: `s${i}`, addedAt: i })) },
+      roster: { groupBy: 'state', sessions: Array.from({ length: SESSIONS }, (_, i) => ({ worktree: '/x/alpha', id: `s${i}`, addedAt: i })) },
       persistRoster: vi.fn(),
       onAction: vi.fn(),
     }),
