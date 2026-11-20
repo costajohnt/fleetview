@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { closeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -67,20 +67,43 @@ export async function isServerHealthy(server: ServerRef, fetchImpl = globalThis.
 // overloaded, or a stranger that now holds the password; only the caller knows which pid it spawned,
 // so the caller decides, and anything it cannot prove is its own is treated as having seen it.
 export type ProbeState = 'healthy' | 'unauthorized' | 'unreachable' | 'unconfirmed'
-export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetch): Promise<ProbeState> {
+
+// #213: `server.pid`, when set, is the process the caller expects on that port (the child it just
+// spawned, or server.json's record). 2.x's /api/info body carries the answering server's pid on
+// 200, 503 (booting) and 500 alike, and opencode's own client matches it against the pid it
+// recorded; so does this. An answer from any other pid has seen the password: `unauthorized`.
+// ponytail: the pid is self-reported, so a squatter that reads `ps` can copy it; asking the OS who
+// holds the port (lsof/ss) is the upgrade if that matters. 1.x reports no server pid on any route
+// (checked against 1.18.5's /doc), so a 1.x answer is not pid-checked; that is why a server known to
+// be 2.x (`api: 2`) is not offered the credential on 1.x's route at all; a listener could otherwise
+// pass as 1.x to dodge the check.
+export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetch, parentOf = parentPid): Promise<ProbeState> {
   // opencode 1.x answers GET /project with its project list. 2.x serves its web app there (200
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const base = `http://${server.host}:${server.port}`
-  const v1 = await askServer(server, '/project', isProjectList, fetchImpl)
+  const v1 = await askServer(server, '/project', isProjectList, fetchImpl, async () => server.api !== 2)
   if (v1 === 'healthy') noteOpencodeApi(base, 1)
   if (v1 !== 'unreachable') return v1
   // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
   // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
   // the password (the reason opencodeApi in client.ts asks this route credential-free).
-  const v2 = await askServer(server, '/api/info', isV2Info, fetchImpl, isV2UnauthorizedResponse)
+  const owner = server.pid ? (pid: number) => descendsFrom(pid, server.pid!, parentOf) : undefined
+  const v2 = await askServer(server, '/api/info', isV2Info, fetchImpl, isV2UnauthorizedResponse, owner)
   // What the probe found is the server's API for everything after it (client.ts opencodeApi).
   if (v2 === 'healthy') noteOpencodeApi(base, 2)
   return v2
+}
+
+// A launcher (npm's, or a version-manager shim in front of it) may be the process fleetview spawned,
+// with the server a child or grandchild of it.
+function descendsFrom(pid: number, ancestor: number, parentOf: (pid: number) => number | null) {
+  for (let p: number | null = pid, i = 0; p && p > 1 && i < 4; p = parentOf(p), i++) if (p === ancestor) return true
+  return false
+}
+
+function parentPid(pid: number): number | null {
+  const ps = spawnSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' })
+  return ps.status === 0 ? Number(String(ps.stdout).trim()) || null : null
 }
 
 async function askServer(
@@ -89,6 +112,7 @@ async function askServer(
   looksRight: (body: unknown) => boolean,
   fetchImpl: typeof fetch,
   wantsCredential: (res: Response) => Promise<boolean> = async () => true,
+  isOwner?: (pid: number) => boolean,
 ): Promise<ProbeState> {
   const url = `http://${server.host}:${server.port}${path}`
   let presented = false
@@ -108,11 +132,24 @@ async function askServer(
     // #202: the credential has now been shown. A 401 or a 2xx that isn't opencode is a rejection;
     // any other non-2xx is `unconfirmed` (see ProbeState), never plain `unreachable`, since any
     // listener can answer 503 with a copied boot body to keep the password from being burned.
+    if (authed.status === 401) return 'unauthorized'
+    if (isOwner) {
+      // #213: whatever the status, a body that doesn't name the expected server is not it.
+      let body: unknown
+      try {
+        body = await authed.json()
+      } catch {}
+      const pid = (body as { pid?: unknown } | undefined)?.pid
+      if (typeof pid !== 'number' || !isOwner(pid)) return 'unauthorized'
+      return authed.ok ? (looksRight(body) ? 'healthy' : 'unauthorized') : 'unconfirmed'
+    }
     if (authed.ok) return (await bodyLooksRight(authed, looksRight)) ? 'healthy' : 'unauthorized'
-    return authed.status === 401 ? 'unauthorized' : 'unconfirmed'
+    return 'unconfirmed'
   } catch {
-    // Same rule for a listener that took the credential and then hung or reset.
-    return presented ? 'unconfirmed' : 'unreachable'
+    // Same rule for a listener that took the credential and then hung or reset. #213: when the caller
+    // expects a pid, nothing that never named it keeps the password (fleetview's own booting 2.x
+    // answers 503 with its pid, so only a hang or reset of its own costs a rotation).
+    return presented ? (isOwner ? 'unauthorized' : 'unconfirmed') : 'unreachable'
   }
 }
 

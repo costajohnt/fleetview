@@ -25,7 +25,7 @@ import { createRequire } from 'node:module'
 import { App } from './app.ts'
 import { OpencodeClient } from './backends/opencode/client.ts'
 import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, createProcessBackends, defaultBackendName, fallbackBackend, isBackendName, resolveBackend } from './backends/index.ts'
-import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
+import { loadServer, saveServer, defaultServerFile, childEnv, withServerLock } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer, OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
 import type { ProbeState } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
@@ -156,8 +156,11 @@ export async function adoptServerCredential(
   // `unconfirmed` (the credential was shown, no proper answer) is fleetview's own server only when
   // server.json's pid is still a live `opencode serve`; then it is just not answering yet. Anything
   // else has seen the password and counts as a rejection.
+  // #213: the record's pid vouches only for the server minted with the record's password, so it is
+  // matched only while that password is the one being presented. A user-set password may belong to a
+  // server the user started there since.
   const ask = async (): Promise<'healthy' | 'unauthorized' | 'unreachable'> => {
-    const asked = await probe(saved)
+    const asked = await probe(saved.password && env.OPENCODE_SERVER_PASSWORD === saved.password ? saved : { ...saved, pid: null })
     return asked !== 'unconfirmed' ? asked : isOwnServer(saved) ? 'unreachable' : 'unauthorized'
   }
   let state = await ask()
@@ -226,6 +229,7 @@ export function makeEnsureServer({
   // is supported, documented behaviour, so it gets one plain line rather than a warning voice.
   notice = console.error,
   identifyServer = looksLikeOpencodeServer,
+  loadServerImpl = loadServer,
   env = process.env,
 }: {
   isServerHealthy: (server: ServerRef) => Promise<boolean>
@@ -240,6 +244,7 @@ export function makeEnsureServer({
   warn?: typeof console.warn
   notice?: typeof console.error
   identifyServer?: (pid: number) => { ok: boolean; reason?: string; command?: string }
+  loadServerImpl?: (file: string) => ServerRef | null
   env?: NodeJS.ProcessEnv
 }) {
   // opencode cold boot (plugins) can exceed 5s; observed live on 1.18.4
@@ -253,7 +258,8 @@ export function makeEnsureServer({
     let presented = false
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, pollMs))
-      const state = await probeServer(candidate)
+      // #213: with the pid, an answer from anything but this child is `unauthorized`.
+      const state = await probeServer({ ...candidate, pid })
       if (state === 'healthy') return { healthy: true, seen: false }
       if (state === 'unauthorized') return { healthy: false, seen: true }
       if (state === 'unconfirmed') {
@@ -326,7 +332,7 @@ export function makeEnsureServer({
     withheld = env.OPENCODE_SERVER_PASSWORD
     dropPassword(env)
   }
-  return async function ensureServer(saved: ServerRef) {
+  const ensure = async (saved: ServerRef, locked: boolean): ReturnType<EnsureServer> => {
     if (withheld && !env.OPENCODE_SERVER_PASSWORD) env.OPENCODE_SERVER_PASSWORD = withheld
     withheld = undefined
     const held = env.OPENCODE_SERVER_PASSWORD
@@ -351,6 +357,27 @@ export function makeEnsureServer({
       noticeIfForeign(server, adopted.credential === 'unenforced' || adopted.credential === 'unknown')
       return { ok: true, server }
     }
+    // #213 F4: two fleetview processes that both found no server would each spawn one on the same
+    // port and each write server.json, so the record of one (and the password to it) was lost. Only
+    // the lock holder spawns. One that had to wait re-reads server.json and starts over from what
+    // the holder recorded, which is usually a healthy server to adopt.
+    if (!locked) {
+      return withServerLock(
+        serverFile,
+        (waited) => {
+          if (!waited) return replace(server, state, adopted.credential)
+          // A password this pass adopted from the old record is not the user's: left in env, the
+          // reload would read it as a user-set one and present it before the holder's.
+          if (saved.password && env.OPENCODE_SERVER_PASSWORD === saved.password) dropPassword(env)
+          return ensure(loadServerImpl(serverFile) ?? server, true)
+        },
+        () => notice(`fleetview: waiting for another fleetview that is starting the opencode server (${serverFile}.lock)`),
+      )
+    }
+    return replace(server, state, adopted.credential)
+  }
+  // ensureServer's spawn half: the port's occupant is not a server fleetview can use.
+  const replace = async (server: ServerRef, state: 'unauthorized' | 'unreachable', credential: string): ReturnType<EnsureServer> => {
     // M6: everything below spawns `opencode serve`. Without opencode on PATH that spawn fails
     // asynchronously (server-manager swallows the ENOENT), so asking first saves a full poll window
     // of blank waiting and lets the roster lead with the actual problem.
@@ -358,6 +385,9 @@ export function makeEnsureServer({
     if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
       return { ok: false, server, reason: OPENCODE_MISSING }
     }
+    // #213: "opencode v2.3.2" / "1.18.5". Recorded so every probe of this server, now and in later
+    // runs, offers the credential only where it can check the answering pid.
+    const major = Number(/(\d+)\./.exec(String(probe.stdout ?? ''))?.[1])
     // We're spawning the server ourselves, so we own its environment: an unauthenticated opencode
     // serve exposes POST /session/:id/shell (arbitrary shell) to anything on loopback, and it stays
     // up after fleetview exits. Mint a password when the user hasn't set one — the child inherits it
@@ -369,7 +399,7 @@ export function makeEnsureServer({
     // The replacement enforces whatever is in env now, so a saved password that differs from it
     // belongs to a server that is gone and is dropped rather than persisted alongside a child that
     // has never heard of it.
-    const target = generated ? { ...server, password: generated } : env.OPENCODE_SERVER_PASSWORD === server.password ? server : { ...server, password: undefined }
+    const target = { ...(generated ? { ...server, password: generated } : env.OPENCODE_SERVER_PASSWORD === server.password ? server : { ...server, password: undefined }), api: major >= 2 ? (2 as const) : undefined }
     // `unauthorized` means the port is held by a server enforcing a password we don't have, so our
     // own spawn there could never bind — skip straight to the fallback walk rather than spending the
     // poll window on a child that is already doomed.
@@ -383,6 +413,13 @@ export function makeEnsureServer({
         // Out of server.json as well as env (trySpawn saved the record with it), so a run that ends
         // here with ok:false leaves nothing on disk for the next run to adopt and present again.
         burnSavedPassword({ ...candidate, pid: null }, { serverFile, saveServerImpl: saveServer, env })
+        // #213 F5: no password on the candidate means it was the user's (target never carries a
+        // user-set one), and it is about to stop applying to the server fleetview ends up with.
+        if (!candidate.password) {
+          warn(
+            `fleetview: OPENCODE_SERVER_PASSWORD may have reached something other than fleetview's server on ${candidate.host}:${candidate.port}, so fleetview has stopped using it and arms any server it starts with a generated password instead. Treat that value as exposed: change it wherever else you use it.`,
+          )
+        }
         armed = { ...armed, password: (env.OPENCODE_SERVER_PASSWORD = randomUUID()) }
       }
       return null
@@ -391,7 +428,7 @@ export function makeEnsureServer({
       const spawned = await attempt(target)
       if (spawned) return { ok: true, server: spawned }
     } else {
-      const dropped = adopted.credential === 'rejected' ? ' That listener has now seen the password, so it will not be used again: the replacement gets a freshly generated one.' : ''
+      const dropped = credential === 'rejected' ? ' That listener has now seen the password, so it will not be used again: the replacement gets a freshly generated one.' : ''
       warn(`fleetview: something on ${server.host}:${server.port} is answering but rejecting fleetview's password — leaving it alone and trying the next port.${dropped}`)
     }
     // configured port never came healthy — a bind failure or a non-opencode squatter holding it.
@@ -404,6 +441,7 @@ export function makeEnsureServer({
     }
     return { ok: false, server, reason: 'server did not become healthy' }
   }
+  return (saved: ServerRef) => ensure(saved, false)
 }
 
 // A pid in server.json is a claim about the past, not a fact about now: opencode may have exited

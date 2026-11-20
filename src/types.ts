@@ -213,6 +213,10 @@ export type ServerRef = {
   // is detached, so the next run needs the credential to reach it. Never a user-set
   // OPENCODE_SERVER_PASSWORD — that one is not copied to disk.
   password?: string
+  // #213: 2 when fleetview spawned it from an opencode 2.x binary. Such a server never wants a
+  // credential on 1.x's /project, so probeServer does not offer one there (only the pid-checked
+  // /api/info gets it).
+  api?: 2
 }
 
 // What a backend can actually do, so the UI can degrade honestly instead of offering a key that
