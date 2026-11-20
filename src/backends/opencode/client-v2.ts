@@ -74,18 +74,30 @@ export function v1Question(form: Record<string, unknown>): QuestionAsked {
 export const isSessionForm = (form: Record<string, unknown>) => typeof form.sessionID === 'string' && form.sessionID !== 'global'
 
 // 1.x answers are positional, one array of option labels per question. 2.x wants a map keyed by
-// field, holding option values: a string for single choice, an array for multiselect. A label
-// that matches no option is a custom answer and goes as typed.
+// field, holding option values: one for single choice, an array for multiselect. A picked option
+// sends its value as declared, whatever its type; a label that matches no option is a custom
+// answer and goes as typed. A field with nothing picked is left out rather than sent as an empty
+// string, false or 0, which the server would take as a real answer (#186).
 export function v2Answer(form: Record<string, unknown>, answers: unknown) {
   const rows = Array.isArray(answers) ? answers : []
-  const answer: Record<string, string | string[] | number | boolean> = {}
+  const answer: Record<string, unknown> = {}
   records(form.fields).forEach((f, i) => {
     const picked = (Array.isArray(rows[i]) ? rows[i] : []).map(String)
+    if (!picked.length) return
     const options = records(f.options)
-    const values = picked.map((label) => asString(options.find((o) => o.label === label)?.value) ?? label)
-    const first = values[0] ?? ''
+    const values = picked.map((label) => {
+      const option = options.find((o) => o.label === label)
+      return option && option.value !== undefined ? option.value : label
+    })
+    const first = values[0]
     answer[String(f.key)] =
-      f.type === 'multiselect' ? values : f.type === 'boolean' ? first === 'true' : f.type === 'number' || f.type === 'integer' ? Number(first) : first
+      f.type === 'multiselect'
+        ? values
+        : f.type === 'boolean'
+          ? typeof first === 'boolean' ? first : first === 'true'
+          : f.type === 'number' || f.type === 'integer'
+            ? Number(first)
+            : first
   })
   return answer
 }
@@ -208,10 +220,12 @@ export class OpencodeV2Client {
       const body = await this.req('GET', `/api/session?${query}`)
       out.push(...records(unwrap(body)).map((s) => v1Session(s, directory)))
       const next = isRecord(body) && isRecord(body.cursor) ? asString(body.cursor.next) : undefined
-      if (!next || next === cursor) break
+      if (!next || next === cursor) return out
       cursor = next
     }
-    return out
+    // Pages left unread: older sessions are missing, not gone, so the listing must not be taken as
+    // authoritative about what no longer exists (#186; session-store's retire sweep reads this).
+    return Object.assign(out, { truncated: true as const })
   }
 
   // 2.x's active map is server-wide and says only "running"; the status seed upserts every id it

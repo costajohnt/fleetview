@@ -56,12 +56,16 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
         const auth = authHeader()
         // 2.x has one server-wide stream in its own vocabulary; it is cut to this directory and
         // translated to 1.x's events here, so the store downstream never knows which it got.
-        const isV2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 // unanswered: the stream attempt below fails the same way and backs off
+        const isV2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 // unanswered: try 1.x's stream; a 1.x server whose /api/info is proxied off-box can be slow to answer it
         let v2: ((frame: unknown) => OpencodeEvent[]) | null = null
         const url = isV2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
         const res = await fetchImpl(url, { signal: ac.signal, headers: auth ? { authorization: auth } : undefined })
         if (stopped) return
         if (!res.ok || !res.body) throw new Error(`event stream ${res.status}`)
+        // A 2.x server answers 1.x's /event (asked after an unanswered probe) 200 with its web app,
+        // which read as online and then dropped: a flap per attempt (#186). Only a stream is one.
+        const type = res.headers?.get?.('content-type')
+        if (type && !type.startsWith('text/event-stream')) throw new Error(`event stream is ${type}`)
         onOnline?.(directory)
         delay = 1000
         let buf = ''
@@ -154,6 +158,15 @@ async function v2Filter(base: string, directory: string, fetchImpl: typeof fetch
 // Stateful only for streamed text: 2.x sends deltas, 1.x sent the part's whole text each time.
 export function createV2Translator() {
   const texts = new Map<string, string>()
+  // Assistant messages this translator has announced. A stream that reconnects mid-step never sees
+  // that step's session.step.started, and the store drops text for a message it doesn't know.
+  const announced = new Set<string>()
+  const running = new Map<string, number>() // executions plus shells in flight, per session
+  const announce = (sessionID: string, messageID: string | undefined): OpencodeEvent[] => {
+    if (!messageID || announced.has(messageID)) return []
+    announced.add(messageID)
+    return [{ type: 'message.updated', properties: { sessionID, info: { id: messageID, role: 'assistant' } } }]
+  }
   return (frame: unknown): OpencodeEvent[] => {
     if (!isRecord(frame) || !isRecord(frame.data)) return []
     const d = frame.data
@@ -164,6 +177,19 @@ export function createV2Translator() {
       typeof frame.created === 'number' ? [{ type: 'session.updated', properties: { info: { id: sessionID, time: { updated: frame.created } } } }] : []
     const messageID = asString(d.assistantMessageID)
     const idle: OpencodeEvent = { type: 'session.status', properties: { sessionID, status: { type: 'idle' } } }
+    // 2.x lets a shell overlap a model execution (Session.shell has no busy check), and idle closes
+    // the run and clears pending permissions and questions in the store, so idle waits until both
+    // have finished. Starts from zero at each connect, where an unmatched end reads as idle.
+    const busy = (): OpencodeEvent[] => {
+      running.set(sessionID, (running.get(sessionID) ?? 0) + 1)
+      return [{ type: 'session.status', properties: { sessionID, status: { type: 'busy' } } }]
+    }
+    const ended = (): OpencodeEvent[] => {
+      const left = Math.max(0, (running.get(sessionID) ?? 0) - 1)
+      if (left) running.set(sessionID, left)
+      else running.delete(sessionID)
+      return left ? [] : [idle]
+    }
     switch (frame.type) {
       case 'session.status':
         return [{ type: 'session.status', properties: { sessionID, status: isRecord(d.status) ? (d.status as { type: string }) : undefined } }]
@@ -174,7 +200,8 @@ export function createV2Translator() {
       case 'session.inbox.enqueued':
         return [{ type: 'message.updated', properties: { sessionID, info: { role: 'user' } } }, ...touched()]
       case 'session.step.started':
-        return [{ type: 'message.updated', properties: { sessionID, info: { id: messageID, role: 'assistant' } } }, ...touched()]
+        announced.delete(messageID ?? '')
+        return [...announce(sessionID, messageID), ...touched()]
       case 'session.step.ended':
       case 'session.step.failed':
         return touched()
@@ -184,21 +211,28 @@ export function createV2Translator() {
         const text = frame.type === 'session.text.ended' ? (asString(d.text) ?? '') : (texts.get(key) ?? '') + (asString(d.delta) ?? '')
         if (frame.type === 'session.text.ended') texts.delete(key)
         else texts.set(key, text)
-        return [{ type: 'message.part.updated', properties: { sessionID, part: { type: 'text', text, messageID } } }]
+        return [...announce(sessionID, messageID), { type: 'message.part.updated', properties: { sessionID, part: { type: 'text', text, messageID } } }]
       }
       // opencode 2.3.2 publishes no session.status (core/session/execution.ts sends only these
       // execution events, and opencode's own client derives busy/idle from them), so busy and idle
       // come from here. Idle after the error, as 1.x ordered them.
       case 'session.execution.started':
-        return [{ type: 'session.status', properties: { sessionID, status: { type: 'busy' } } }]
+        return busy()
       case 'session.execution.succeeded':
-        return [idle]
+        return ended()
+      // A `!` shell job runs no execution at all on 2.x: these are the only frames it sends (opencode
+      // 2.3.2 schema/session-event.ts has started and ended, nothing else; recorded live in
+      // test/fixtures/opencode-2.3.2-events.sse), so they are its busy and idle (#206).
+      case 'session.shell.started':
+        return [...busy(), ...touched()]
+      case 'session.shell.ended':
+        return [...ended(), ...touched()]
       case 'session.execution.failed':
-        return [{ type: 'session.error', properties: { sessionID, error: v1Error(d.error) } }, idle]
+        return [{ type: 'session.error', properties: { sessionID, error: v1Error(d.error) } }, ...ended()]
       // 1.x reported a user's stop as an error named MessageAbortedError, which the store records as
       // stopped rather than failed. A shutdown, supersede or inactivity stop is just the end.
       case 'session.execution.interrupted':
-        return d.reason === 'user' ? [{ type: 'session.error', properties: { sessionID, error: { name: 'MessageAbortedError', data: { message: 'user' } } } }, idle] : [idle]
+        return d.reason === 'user' ? [{ type: 'session.error', properties: { sessionID, error: { name: 'MessageAbortedError', data: { message: 'user' } } } }, ...ended()] : ended()
       case 'permission.asked':
         return [{ type: 'permission.asked', properties: v1Permission(d) }]
       case 'permission.replied':
