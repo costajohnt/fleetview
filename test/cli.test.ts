@@ -379,6 +379,89 @@ test('a walk that ends with every candidate rejecting leaves no seen password in
   expect(saved.at(-1).password).toBeUndefined()
 })
 
+// #202: `unconfirmed` (shown the password, no proper answer) is excused only for the server whose
+// pid server.json recorded and which is still a live `opencode serve`.
+test('an unconfirmed answer from a listener that is not fleetview\'s own burns the saved password', async () => {
+  const env: NodeJS.ProcessEnv = {}
+  const saved: any[] = []
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: () => Promise.resolve('unconfirmed'),
+    identifyServer: () => ({ ok: false, reason: 'no such process' }),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: (_file: any, s: any) => saved.push(s),
+    serverFile: '/tmp/s.json',
+    spawnSyncImpl: () => ({ error: { code: 'ENOENT' } }),
+    warn: vi.fn(),
+    env,
+  }
+  await makeEnsureServer(deps as any)({ ...server, pid: 4242, password: 'from-server-json' })
+  expect(saved).toEqual([{ ...server, pid: 4242 }])
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+})
+
+test('an unconfirmed answer from fleetview\'s own live server keeps the saved password', async () => {
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: () => Promise.resolve('unconfirmed'),
+    identifyServer: () => ({ ok: true, command: 'opencode serve' }),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: () => { throw new Error('nothing to burn') },
+    serverFile: '/tmp/s.json',
+    spawnSyncImpl: () => ({ error: { code: 'ENOENT' } }),
+    env,
+  }
+  await makeEnsureServer(deps as any)({ ...server, pid: 4242, password: 'from-server-json' })
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe('from-server-json')
+})
+
+// The child fleetview just spawned may answer `unconfirmed` while it boots, but if its window ends
+// without healthy, whatever answered may not have been it: the password is rotated before the next.
+test('a poll window that ends unhealthy after the password was presented rotates it', async () => {
+  const spawned: any[] = []
+  const saved: any[] = []
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unconfirmed' : 'healthy'),
+    identifyServer: () => ({ ok: true, command: 'opencode serve' }), // the child stays alive
+    spawnServer: (s: any) => (spawned.push(s), 700 + spawned.length),
+    saveServer: (_file: any, s: any) => saved.push(s),
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    processKill: () => {},
+    spawnSyncImpl: () => ({}),
+    env,
+  }
+  const result = await makeEnsureServer(deps as any)(server)
+  expect(spawned.map((s) => s.port)).toEqual([4900, 4901])
+  expect(spawned[1].password).not.toBe(spawned[0].password)
+  expect(saved).toContainEqual({ ...server, pid: null })
+  expect(result.server!.password).toBe(spawned[1].password)
+})
+
+test('an unconfirmed poll answer while the spawned child is gone abandons the candidate at once', async () => {
+  const spawned: any[] = []
+  let polls = 0
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) => (s.port === 4900 ? (polls++, Promise.resolve('unconfirmed')) : Promise.resolve('healthy')),
+    identifyServer: () => ({ ok: false, reason: 'no such process' }),
+    spawnServer: (s: any) => (spawned.push(s), 700 + spawned.length),
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    processKill: () => {},
+    spawnSyncImpl: () => ({}),
+    env,
+  }
+  await makeEnsureServer(deps as any)(server)
+  expect(polls).toBe(2) // the adoption probe, then one poll
+  expect(spawned[1].password).not.toBe(spawned[0].password)
+})
+
 // #202: an enforcement check that failed is no evidence the listener is ours. The password stops
 // going out for this pass but stays on disk, since it was never shown and the next pass asks again.
 test('adopting a healthy server whose enforcement check fails stops presenting the password but keeps it saved', async () => {

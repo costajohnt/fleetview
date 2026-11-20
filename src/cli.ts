@@ -27,6 +27,7 @@ import { OpencodeClient } from './backends/opencode/client.ts'
 import { BACKEND_NAMES, DEFAULT_BACKEND, createBackends, createProcessBackends, defaultBackendName, fallbackBackend, isBackendName, resolveBackend } from './backends/index.ts'
 import { loadServer, saveServer, defaultServerFile, childEnv } from './registry.ts'
 import { spawnServer, isServerHealthy, isAuthEnforced, probeServer, OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
+import type { ProbeState } from './backends/opencode/server-manager.ts'
 import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
 import { noteExit } from './paths.ts'
 import { loadRoster, makePersistRoster, defaultRosterFile } from './roster-store.ts'
@@ -62,7 +63,7 @@ type RunServerDeps = {
   serverFile: string
   loadServerImpl?(file: string): ServerRef | null
   isServerHealthyImpl?(server: ServerRef): Promise<boolean>
-  probeServerImpl?(server: ServerRef): Promise<'healthy' | 'unauthorized' | 'unreachable'>
+  probeServerImpl?(server: ServerRef): Promise<ProbeState>
   saveServerImpl?(file: string, server: ServerRef): unknown
   identifyServer?(pid: number): { ok: boolean; reason?: string; command?: string }
   processKill?(pid: number, signal?: string): unknown
@@ -128,12 +129,14 @@ export async function adoptServerCredential(
   {
     probe,
     isAuthEnforced = async () => true,
+    isOwnServer = () => false,
     serverFile,
     saveServerImpl = saveServer,
     env = process.env,
   }: {
-    probe: (server: ServerRef) => Promise<'healthy' | 'unauthorized' | 'unreachable'>
+    probe: (server: ServerRef) => Promise<ProbeState>
     isAuthEnforced?: (server: ServerRef) => Promise<boolean | null>
+    isOwnServer?: (server: ServerRef) => boolean
     serverFile: string
     saveServerImpl?: typeof saveServer
     env?: NodeJS.ProcessEnv
@@ -150,11 +153,18 @@ export async function adoptServerCredential(
     const { password, ...bare } = saved
     return bare
   }
-  let state = await probe(saved)
+  // `unconfirmed` (the credential was shown, no proper answer) is fleetview's own server only when
+  // server.json's pid is still a live `opencode serve`; then it is just not answering yet. Anything
+  // else has seen the password and counts as a rejection.
+  const ask = async (): Promise<'healthy' | 'unauthorized' | 'unreachable'> => {
+    const asked = await probe(saved)
+    return asked !== 'unconfirmed' ? asked : isOwnServer(saved) ? 'unreachable' : 'unauthorized'
+  }
+  let state = await ask()
   if (state === 'unauthorized' && saved.password && env.OPENCODE_SERVER_PASSWORD && env.OPENCODE_SERVER_PASSWORD !== saved.password) {
     env.OPENCODE_SERVER_PASSWORD = saved.password
     delete env.OPENCODE_PASSWORD // the user's, under its 2.x name; it would shadow the saved one for attach
-    state = await probe(saved)
+    state = await ask()
     if (state === 'healthy') return { state, server: saved, credential: 'saved-over-user' }
     // Anything short of healthy is not the server the saved password was made for. A listener that
     // 401s and then fails the authenticated retry some other way (a 500, a wrong body) reads as
@@ -220,7 +230,7 @@ export function makeEnsureServer({
 }: {
   isServerHealthy: (server: ServerRef) => Promise<boolean>
   isAuthEnforced?: (server: ServerRef) => Promise<boolean | null>
-  probeServer?: (server: ServerRef) => Promise<'healthy' | 'unauthorized' | 'unreachable'>
+  probeServer?: (server: ServerRef) => Promise<ProbeState>
   spawnServer: SpawnServer
   saveServer: (file: string, server: ServerRef) => unknown
   serverFile: string
@@ -236,15 +246,24 @@ export function makeEnsureServer({
   // #202: `seen` — a poll got `unauthorized`, so whatever holds that port was shown the password and
   // rejected it. That is final for the candidate: a listener that later answers healthy has still
   // seen the password, so it is never trusted with it.
-  const pollUntilHealthy = async (candidate: ServerRef) => {
+  // `unconfirmed` is tolerated only while the child fleetview just spawned is still alive (it may be
+  // booting), and a window that ends without healthy after one still counts as seen: whatever answered
+  // may not have been that child.
+  const pollUntilHealthy = async (candidate: ServerRef, pid: number | null) => {
+    let presented = false
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, pollMs))
       const state = await probeServer(candidate)
       if (state === 'healthy') return { healthy: true, seen: false }
       if (state === 'unauthorized') return { healthy: false, seen: true }
+      if (state === 'unconfirmed') {
+        if (!isOwnServer({ ...candidate, pid })) return { healthy: false, seen: true }
+        presented = true
+      }
     }
-    return { healthy: false, seen: false }
+    return { healthy: false, seen: presented }
   }
+  const isOwnServer = (s: ServerRef) => Boolean(s.pid) && identifyServer(s.pid!).ok
   // a candidate whose poll window expired is a leaked child (spawned, never healthy) — kill it
   // before moving on, or every failed candidate/restart accumulates a zombie opencode process.
   const reap = (pid: number | null | undefined) => {
@@ -258,7 +277,7 @@ export function makeEnsureServer({
     saveServer(serverFile, { ...candidate, pid: null })
     const pid = spawnServer(candidate, {})
     saveServer(serverFile, { ...candidate, pid })
-    const polled = await pollUntilHealthy(candidate)
+    const polled = await pollUntilHealthy(candidate, pid)
     if (!polled.healthy) {
       reap(pid)
       return { seen: polled.seen }
@@ -301,7 +320,7 @@ export function makeEnsureServer({
     notice(`fleetview: using the opencode server already running on ${server.host}:${server.port} — fleetview did not start it.${unprotected}`)
   }
   return async function ensureServer(saved: ServerRef) {
-    const adopted = await adoptServerCredential(saved, { probe: probeServer, isAuthEnforced, serverFile, saveServerImpl: saveServer, env })
+    const adopted = await adoptServerCredential(saved, { probe: probeServer, isAuthEnforced, isOwnServer, serverFile, saveServerImpl: saveServer, env })
     const { state, server } = adopted
     if (state === 'healthy') {
       if (adopted.credential === 'saved-over-user') {
@@ -432,6 +451,7 @@ export async function runServer(
   const loaded = loadServerImpl(serverFile) ?? DEFAULT_SERVER
   const { state, server, credential } = await adoptServerCredential(loaded, {
     probe: probeServerImpl,
+    isOwnServer: (s) => Boolean(s.pid) && identifyServer(s.pid!).ok,
     serverFile,
     saveServerImpl,
     env,

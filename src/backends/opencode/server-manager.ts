@@ -61,14 +61,20 @@ export async function isServerHealthy(server: ServerRef, fetchImpl = globalThis.
 // listening on that port and enforcing a password fleetview doesn't hold, which is the opposite of
 // "nothing there" even though both read as unhealthy — spawning onto it can never bind, and the
 // occupant may be fleetview's own server under a password only server.json remembers.
-export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetch): Promise<'healthy' | 'unauthorized' | 'unreachable'> {
+//
+// `unconfirmed` (#202): the listener asked for the credential, was shown it, and then failed to answer
+// properly (a non-2xx other than 401, or no answer at all). That is fleetview's own server booting or
+// overloaded, or a stranger that now holds the password; only the caller knows which pid it spawned,
+// so the caller decides, and anything it cannot prove is its own is treated as having seen it.
+export type ProbeState = 'healthy' | 'unauthorized' | 'unreachable' | 'unconfirmed'
+export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetch): Promise<ProbeState> {
   // opencode 1.x answers GET /project with its project list. 2.x serves its web app there (200
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl)
   return v1 === 'unreachable' ? askServer(server, '/api/info', isV2Info, fetchImpl) : v1
 }
 
-async function askServer(server: ServerRef, path: string, looksRight: (body: unknown) => boolean, fetchImpl: typeof fetch) {
+async function askServer(server: ServerRef, path: string, looksRight: (body: unknown) => boolean, fetchImpl: typeof fetch): Promise<ProbeState> {
   const url = `http://${server.host}:${server.port}${path}`
   let presented = false
   try {
@@ -84,16 +90,14 @@ async function askServer(server: ServerRef, path: string, looksRight: (body: unk
     if (!auth) return 'unauthorized'
     presented = true
     const authed = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
-    // #202: the credential has now been shown. Anything but a real answer means this listener is not
-    // the server it was meant for, and it reads as `unauthorized` so callers burn what it saw. The
-    // one exception is 2.x booting, which fleetview's own server goes through too (burning its
-    // password then would orphan it): a 503 carrying 2.x's own /api/info body, the same bar a
-    // healthy answer has to clear. A bare 503 is just a way to keep the password from being burned.
-    if (authed.status === 503) return (await bodyLooksRight(authed, looksRight)) ? 'unreachable' : 'unauthorized'
-    return (await answered(authed, looksRight)) ? 'healthy' : 'unauthorized'
+    // #202: the credential has now been shown. A 401 or a 2xx that isn't opencode is a rejection;
+    // any other non-2xx is `unconfirmed` (see ProbeState), never plain `unreachable`, since any
+    // listener can answer 503 with a copied boot body to keep the password from being burned.
+    if (authed.ok) return (await bodyLooksRight(authed, looksRight)) ? 'healthy' : 'unauthorized'
+    return authed.status === 401 ? 'unauthorized' : 'unconfirmed'
   } catch {
     // Same rule for a listener that took the credential and then hung or reset.
-    return presented ? 'unauthorized' : 'unreachable'
+    return presented ? 'unconfirmed' : 'unreachable'
   }
 }
 
