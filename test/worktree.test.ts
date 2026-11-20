@@ -338,9 +338,9 @@ test("a repo's own filter drivers never run through createLocalWorktree, worktre
   repo.g('config', 'filter.evil.required', 'true') // blanked without required=false, git would die instead
   repo.g('config', 'filter.proc.process', `touch ${marker}`)
   // A changed mtime makes `status` re-hash the file, which is what passes it through the clean filter.
-  const restat = (dir: string) => {
+  const restat = (dir: string, files = ['a.txt', 'b.dat']) => {
     const later = new Date(Date.now() + 60_000)
-    for (const f of ['a.txt', 'b.dat']) utimesSync(join(dir, f), later, later)
+    for (const f of files) utimesSync(join(dir, f), later, later)
   }
 
   const wt = createLocalWorktree(repo.dir, 'x', dataRoot()) // checkout: smudge and process
@@ -351,8 +351,9 @@ test("a repo's own filter drivers never run through createLocalWorktree, worktre
   expect(existsSync(wt)).toBe(false)
   expect(existsSync(marker)).toBe(false)
 
-  // Control: the same repository through plain git does run the payload, so the test is armed.
-  restat(repo.dir)
+  // Control: the same repository through plain git does run the payload, so the test is armed. Only
+  // a.txt: the `proc` payload is not a real filter-process speaker, so git dies when it reaches b.dat.
+  restat(repo.dir, ['a.txt'])
   execFileSync('git', ['-C', repo.dir, 'status', '--porcelain'], { stdio: 'ignore' })
   expect(existsSync(marker)).toBe(true)
 })
