@@ -77,7 +77,7 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
   // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
   // the password (the reason opencodeApi in client.ts asks this route credential-free).
-  const v2 = await askServer(server, '/api/info', isV2Info, fetchImpl, wantsV2Credential)
+  const v2 = await askServer(server, '/api/info', isV2Info, fetchImpl, isV2UnauthorizedResponse)
   // What the probe found is the server's API for everything after it (client.ts opencodeApi).
   if (v2 === 'healthy') noteOpencodeApi(base, 2)
   return v2
@@ -129,8 +129,9 @@ async function bodyLooksRight(res: Response, looksRight: (body: unknown) => bool
   }
 }
 
-// The credential goes only to 2.x's own 401 body on /api/info (isV2Unauthorized).
-async function wantsV2Credential(res: Response): Promise<boolean> {
+// 2.x's own 401 on /api/info (isV2Unauthorized on its body). The probe's credential retry and
+// isAuthEnforced both count only this 401, never one a proxied 1.x path answers.
+async function isV2UnauthorizedResponse(res: Response): Promise<boolean> {
   try {
     return isV2Unauthorized(await res.json())
   } catch {
@@ -180,7 +181,7 @@ export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.f
     const base = `http://${server.host}:${server.port}`
     if ((await fetchImpl(`${base}/project`, { signal: AbortSignal.timeout(2000) })).status === 401) return true
     const info = await fetchImpl(`${base}/api/info`, { signal: AbortSignal.timeout(2000) })
-    return info.status === 401 && (await isV2Unauthorized(info))
+    return info.status === 401 && (await isV2UnauthorizedResponse(info))
   } catch {
     return null
   }
