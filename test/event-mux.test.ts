@@ -1,5 +1,9 @@
-import { test, expect, vi } from 'vitest'
+import { beforeEach, test, expect, vi } from 'vitest'
 import { connectEvents, parseSseChunk } from '../src/backends/opencode/event-mux.ts'
+import { resetOpencodeApiMemo } from '../src/backends/opencode/client.ts'
+
+// Every test here shares a base URL, and the API-version answer is memoised per URL module-wide.
+beforeEach(resetOpencodeApiMemo)
 
 test('parseSseChunk yields JSON payloads from data: lines, keeps partial tail', () => {
   const { events, rest } = parseSseChunk('data: {"type":"session.status"}\n\ndata: {"ty')
@@ -63,7 +67,8 @@ test('stop() during backoff resolves done without waiting out the backoff, and m
   vi.useFakeTimers()
   try {
     let calls = 0
-    const fetchImpl = vi.fn(() => { calls++; return Promise.reject(new Error('down')) })
+    // Counts stream attempts only: each attempt first asks /api/info, which is down too and so never memoised.
+    const fetchImpl = vi.fn((url: string) => { if (url.includes('/event')) calls++; return Promise.reject(new Error('down')) })
     const conn = connectEvents({ host: 'h', port: 1, directory: '/repos/r' }, { fetchImpl, onEvent: vi.fn(), onOffline: vi.fn(), onOnline: vi.fn(), reconnect: true })
     await vi.advanceTimersByTimeAsync(0) // first attempt fails and enters backoff; no time passes
     conn.stop()
