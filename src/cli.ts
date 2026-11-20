@@ -289,9 +289,8 @@ export function makeEnsureServer({
     const enforced = await isAuthEnforced(candidate)
     if (enforced) return { server: { ...candidate, pid } }
     if (enforced === null) {
-      // No evidence either way: stop presenting it this pass, keep the record (already saved with
-      // the password) so the next pass adopts it and asks again.
-      dropPassword(env)
+      // No evidence either way: stop presenting it this pass and ask again on the next.
+      withhold()
       return { server: { ...candidate, pid } }
     }
     warn(
@@ -319,8 +318,20 @@ export function makeEnsureServer({
       : ' No OPENCODE_SERVER_PASSWORD is set, so its shell route is reachable by anything on loopback.'
     notice(`fleetview: using the opencode server already running on ${server.host}:${server.port} — fleetview did not start it.${unprotected}`)
   }
+  // A password withheld for one pass because the enforcement check failed (`unknown`). It was never
+  // shown, but a user-set one lives nowhere else (server.json keeps only generated ones), so it is
+  // held here and put back before the next pass's probe, which asks the question again.
+  let withheld: string | undefined
+  const withhold = () => {
+    withheld = env.OPENCODE_SERVER_PASSWORD
+    dropPassword(env)
+  }
   return async function ensureServer(saved: ServerRef) {
+    if (withheld && !env.OPENCODE_SERVER_PASSWORD) env.OPENCODE_SERVER_PASSWORD = withheld
+    withheld = undefined
+    const held = env.OPENCODE_SERVER_PASSWORD
     const adopted = await adoptServerCredential(saved, { probe: probeServer, isAuthEnforced, isOwnServer, serverFile, saveServerImpl: saveServer, env })
+    if (adopted.credential === 'unknown') withheld = held ?? saved.password
     const { state, server } = adopted
     if (state === 'healthy') {
       if (adopted.credential === 'saved-over-user') {
@@ -337,7 +348,7 @@ export function makeEnsureServer({
           `fleetview: OPENCODE_SERVER_PASSWORD is set, but the opencode server already running on ${server.host}:${server.port} does not require it — its arbitrary-shell route is reachable without a password, and fleetview will not send the password to it${saved.password ? ` (the saved one is removed from ${serverFile})` : ''}. Stop that server to have fleetview spawn a password-protected one.`,
         )
       }
-      noticeIfForeign(server, adopted.credential === 'unenforced')
+      noticeIfForeign(server, adopted.credential === 'unenforced' || adopted.credential === 'unknown')
       return { ok: true, server }
     }
     // M6: everything below spawns `opencode serve`. Without opencode on PATH that spawn fails

@@ -483,6 +483,31 @@ test('adopting a healthy server whose enforcement check fails stops presenting t
   expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
 })
 
+// A user-set password lives nowhere but env, so a pass that withheld it has to hand it back.
+test('a user-set password withheld after a failed enforcement check is presented again on the next pass', async () => {
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'set-by-user' }
+  const checks: any[] = []
+  let enforced: boolean | null = null
+  const deps = {
+    isServerHealthy: () => Promise.resolve(true),
+    isAuthEnforced: () => (checks.push(env.OPENCODE_SERVER_PASSWORD), Promise.resolve(enforced)),
+    spawnServer: () => { throw new Error('should not spawn') },
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    warn: vi.fn(),
+    notice: vi.fn(),
+    env,
+  }
+  const ensureServer = makeEnsureServer(deps as any)
+  await ensureServer(server)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined() // not presented while there is no evidence
+  enforced = true
+  await ensureServer(server)
+  expect(checks).toEqual(['set-by-user', 'set-by-user'])
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe('set-by-user')
+  expect(deps.notice.mock.calls[0][0]).not.toMatch(/No OPENCODE_SERVER_PASSWORD is set/)
+})
+
 test('a spawned server whose enforcement check fails keeps its record but is not sent the password this pass', async () => {
   const env: NodeJS.ProcessEnv = {}
   const saved: any[] = []
