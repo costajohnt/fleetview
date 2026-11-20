@@ -44,21 +44,15 @@ export async function readEventStream(
 ): Promise<never> {
   // The event stream needs the same credential as every other request, or enabling auth
   // would leave fleetview rendering a permanently offline roster.
-  // #216: unless the owner is in doubt, and any end that is not our own stop puts it in doubt.
-  try {
-    return await readStream(url, { fetchImpl, signal, idleMs, onOpen, onChunk }, credentialFor(url, authHeader()))
-  } catch (err) {
+  // #216: unless the owner is in doubt (request.ts). A lost connection, not one of our own stops,
+  // puts it there: refused, reset, ended or silent. A server that answers (a status, a page) or a
+  // handler that throws has not given up the port.
+  const auth = credentialFor(url, authHeader())
+  const lost: (err: unknown) => never = (err) => {
     if (!signal.aborted) ownershipLost(url)
     throw err
   }
-}
-
-async function readStream(
-  url: string,
-  { fetchImpl, signal, idleMs, onOpen, onChunk }: Parameters<typeof readEventStream>[1],
-  auth: string | undefined,
-): Promise<never> {
-  const res = await fetchImpl(url, { signal, headers: auth ? { authorization: auth } : undefined })
+  const res = await fetchImpl(url, { signal, headers: auth ? { authorization: auth } : undefined }).catch(lost)
   if (signal.aborted) throw new Error('event stream stopped')
   if (!res.ok || !res.body) throw new Error(`event stream ${res.status}`)
   // A 2.x server answers 1.x's /event (asked after an unanswered probe) 200 with its web app,
@@ -84,11 +78,13 @@ async function readStream(
       })
       // Armed per chunk, so the deadline measures silence since the last byte — not since the
       // connection opened, which would kill every healthy long-lived stream on schedule.
-      const step = await Promise.race([iterator.next(), idle]).finally(() => {
-        clearTimeout(timer)
-        signal.removeEventListener('abort', onAbort)
-      })
-      if (step.done) break
+      const step = await Promise.race([iterator.next(), idle])
+        .catch(lost)
+        .finally(() => {
+          clearTimeout(timer)
+          signal.removeEventListener('abort', onAbort)
+        })
+      if (step.done) lost(new Error('event stream ended'))
       if (signal.aborted) throw new Error('event stream stopped')
       const chunk = step.value
       buf += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })

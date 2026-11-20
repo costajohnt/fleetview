@@ -54,7 +54,7 @@ test('after a lost connection the credential waits for a pid-matched probe, on r
       // Fleetview's server dies: the open stream ends.
       return { ok: true, status: 200, headers: { get: () => 'text/event-stream' }, body: (async function* () {})() }
     }
-    return json(200, [])
+    return listener === 'ours' && !auth ? json(401, {}) : json(200, [])
   }) as any
   const stream = () => readEventStream(`${base}/api/event`, { fetchImpl, signal: new AbortController().signal, idleMs: 60_000, onOpen: () => {}, onChunk: () => {} }).catch(() => {})
   const request = () => opencodeRequest(fetchImpl, base, 'GET', '/api/session', { auth: authHeader() }).catch(() => {})
@@ -71,6 +71,8 @@ test('after a lost connection the credential waits for a pid-matched probe, on r
     await request()
     expect(shown.squatter).toEqual([undefined, undefined, undefined])
     listener = 'ours'
+    // Its own server refuses the bare request, and the error says why rather than blaming it.
+    await expect(opencodeRequest(fetchImpl, base, 'GET', '/api/session', { auth: authHeader() })).rejects.toThrow(/not sending the password/)
     expect(await probeServer(server, fetchImpl, () => null)).toBe('healthy')
     await request()
     expect(shown.ours.at(-1)).toBe(authHeader())

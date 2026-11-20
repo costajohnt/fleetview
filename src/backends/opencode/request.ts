@@ -39,9 +39,14 @@ export async function opencodeRequest<T = unknown>(
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(10_000),
   }).catch((err: unknown) => {
-    ownershipLost(baseUrl)
+    // A timeout is a slow server, not a lost one: whoever hangs has already read this request.
+    if ((err as Error)?.name !== 'TimeoutError') ownershipLost(baseUrl)
     throw err
   })
+  // Withheld above and refused for it: say so, or this reads as the server rejecting fleetview.
+  if (res.status === 401 && auth && !credential) {
+    throw Object.assign(new Error(`${method} ${path}: not sending the password to ${baseUrl} until fleetview re-checks the server it lost the connection to; try again in a moment`), { status: 401 })
+  }
   // The body is the server's words, and an adopted server is untrusted (SECURITY.md); the CLI
   // verbs print this message straight to the terminal, so it gets the same stripControl as every
   // other foreign string, and a cap so an error page cannot flood it.
