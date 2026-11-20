@@ -18,14 +18,15 @@ export const credentialFor = (url: string, auth: string | undefined) => (ownersh
 
 // #225: opencode's error bodies are JSON envelopes, 1.x `{"name":…,"data":{"message":…}}` and 2.x a
 // tagged error (`_tag`, `name`, `message`), so the raw text puts the readable message last and any
-// cut lands in the envelope. Their message, else their tag; anything else is passed through as sent.
-const errorText = (text: string) => {
+// cut lands in the envelope. `detail` is their message, else their tag, else the text as sent; the
+// error message keeps the whole body, since a tag and any other fields are facts too.
+const str = (...vs: unknown[]) => vs.find((v): v is string => typeof v === 'string' && v.trim() !== '')
+const errorDetail = (text: string) => {
   let body: { data?: { message?: unknown } | null; message?: unknown; _tag?: unknown; name?: unknown } | null = null
   try {
     body = JSON.parse(text)
   } catch {}
-  const said = [body?.data?.message, body?.message, body?._tag, body?.name].find((m): m is string => typeof m === 'string' && m.trim() !== '')
-  return said ?? text
+  return str(body?.data?.message, body?.message, body?._tag, body?.name) ?? text
 }
 
 // One request to an opencode server, for both API versions: they differ in paths, in how the
@@ -66,8 +67,9 @@ export async function opencodeRequest<T = unknown>(
   // #225: `detail` is the body's own message, so a caller with room for one short line (the dispatch
   // notice) shows the readable part rather than the method, path and JSON envelope around it.
   if (!res.ok) {
-    const detail = stripControl(errorText(await res.text())).slice(0, 500)
-    throw Object.assign(new Error(`${method} ${path} → ${res.status}: ${detail}`), { status: res.status, detail })
+    const text = await res.text()
+    const detail = stripControl(errorDetail(text)).slice(0, 500)
+    throw Object.assign(new Error(`${method} ${path} → ${res.status}: ${stripControl(text).slice(0, 500)}`), { status: res.status, detail })
   }
   const text = await res.text()
   return (text.trim() ? JSON.parse(text) : null) as T

@@ -2848,7 +2848,7 @@ test('#192: an isolation failure names its reason in the confirmation and the di
 })
 
 // #225: a server refusal's 60 characters went on the method, path and JSON envelope; the notice
-// shows the body's own message (request.ts `detail`) and the log keeps the whole line.
+// shows the status and the body's own message (request.ts `detail`); the log keeps the whole line.
 test('#225: an isolation refusal shows the server message, not the request line', async () => {
   const { deps } = isolatingDeps()
   deps.client.createWorktree = vi.fn(() =>
@@ -2859,7 +2859,7 @@ test('#225: an isolation refusal shows the server message, not the request line'
   stdin.write('fix the thing')
   await tick()
   stdin.write('\r')
-  await waitFor(() => lastFrame().includes('not isolated (worktree failed: fatal: no source branch)'))
+  await waitFor(() => lastFrame().includes('not isolated (worktree failed: 400: fatal: no source branch)'))
 })
 
 // #204: alt+enter attached before the warning branch, so a dispatch that fell back to the checkout

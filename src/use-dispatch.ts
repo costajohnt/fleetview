@@ -25,9 +25,11 @@ const isolationFailure = (e: unknown, target: string) => {
   const reason = stripControl(e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').trim() || 'unknown error'
   logDispatchDebug({ event: 'isolation-failed', target, reason: reason.slice(0, 500) })
   // #225: a server refusal carries its own message as `detail` (request.ts); 60 characters of the
-  // whole line were the method, path and status, and the message never showed.
-  const detail = (e as { detail?: unknown } | null)?.detail
-  const said = (typeof detail === 'string' && detail.replace(/\s+/g, ' ').trim()) || reason
+  // whole line were the method, path, status and JSON envelope, and the message never showed. The
+  // status stays in front, so an old server's 404 still reads differently from a refusal (#192).
+  const { detail, status } = (e ?? {}) as { detail?: unknown; status?: unknown }
+  const message = typeof detail === 'string' ? detail.replace(/\s+/g, ' ').trim() : ''
+  const said = message ? `${typeof status === 'number' ? `${status}: ` : ''}${message}` : reason
   const short = truncateGraphemes(said, 60)
   return short === said ? said : `${short}…`
 }
