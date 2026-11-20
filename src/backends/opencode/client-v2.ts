@@ -7,7 +7,7 @@
 // what fleetview reads is mapped, and reads stay defensive, as in types.ts.
 import { execFileSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { basename, isAbsolute } from 'node:path'
+import { basename, isAbsolute, resolve } from 'node:path'
 import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 import { stripControl } from '../../text-utils.ts'
@@ -118,7 +118,7 @@ function v2Model(model: ModelSelection | undefined) {
 // The directory is one the server named, so its repository config is untrusted: see git-safe.ts.
 // stderr is kept so a failure says why.
 const git = (dir: string, args: string[]) =>
-  execFileSync('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  execFileSync('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }).trim()
 
 export class OpencodeV2Client {
   baseUrl: string
@@ -287,20 +287,42 @@ export class OpencodeV2Client {
     // the server's worktree alone, because removing a path that failed this check is the same risk.
     if (!isAbsolute(dir) || !directory) throw new Error(`refusing worktree ${dir}: no repository to check it against`)
     const top = (d: string) => realpathSync(git(d, ['rev-parse', '--show-toplevel']))
-    const common = (d: string) => realpathSync(git(d, ['rev-parse', '--path-format=absolute', '--git-common-dir']))
-    if (top(dir) !== realpathSync(dir) || top(dir) === top(directory) || common(dir) !== common(directory)) {
-      throw new Error(`refusing worktree ${dir}: not a new worktree of ${directory}`)
+    // Resolved here rather than with --path-format=absolute, which needs git 2.31.
+    const common = (d: string) => realpathSync(resolve(d, git(d, ['rev-parse', '--git-common-dir'])))
+    let linked: boolean
+    try {
+      linked = top(dir) === realpathSync(dir) && top(dir) !== top(directory) && common(dir) === common(directory)
+    } catch (e) {
+      throw new Error(`cannot validate worktree ${dir}: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
     }
+    if (!linked) throw new Error(`refusing worktree ${dir}: not a new worktree of ${directory}`)
+    // Already on a branch (a server that makes it, as 1.x did): leave it there. Exit 1 is detached.
+    try {
+      git(dir, ['symbolic-ref', '-q', 'HEAD'])
+      return { name: basename(dir), directory: dir }
+    } catch {}
     const base = `opencode/${basename(dir)}`
+    let branch = base
+    let made = false
     try {
       const taken = new Set(git(dir, ['branch', '--list', `${base}*`, '--format=%(refname:short)']).split('\n'))
-      let branch = base
       for (let n = 2; taken.has(branch); n++) branch = `${base}-${n}`
       // The empty old value makes update-ref fail rather than move a branch that appeared meanwhile.
       git(dir, ['update-ref', `refs/heads/${branch}`, 'HEAD', ''])
+      made = true
       git(dir, ['symbolic-ref', 'HEAD', `refs/heads/${branch}`])
     } catch (e) {
-      await this.removeWorktree(dir, directory).catch(() => {})
+      // Undo both halves; whatever can't be undone is named in the error rather than dropped.
+      const left: string[] = []
+      if (made) {
+        try {
+          git(dir, ['update-ref', '-d', `refs/heads/${branch}`])
+        } catch {
+          left.push(`branch ${branch}`)
+        }
+      }
+      await this.removeWorktree(dir, directory).catch(() => left.push(`worktree ${dir}`))
+      if (left.length && e instanceof Error) e.message += `; left behind: ${left.join(', ')}`
       throw e
     }
     return { name: basename(dir), directory: dir }

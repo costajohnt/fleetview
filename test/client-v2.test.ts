@@ -194,6 +194,14 @@ test('a created worktree is put on an opencode/ branch, stepping around a leftov
   expect(second.git('-C', second.wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/fix-2')
 })
 
+test('a worktree the server already put on a branch is left on it', async () => {
+  const { repo, wt, git } = detachedWorktree('feature')
+  git('-C', wt, 'switch', '-q', '-c', 'opencode/feature')
+  await worktreeServer(wt).c.createWorktree('feature', repo)
+  expect(git('-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/feature')
+  expect(git('branch', '--list', 'opencode/*', '--format=%(refname:short)')).toBe('opencode/feature')
+})
+
 test('a worktree that cannot be branched is removed and the failure thrown', async () => {
   const { repo, wt } = detachedWorktree('feature')
   // A held ref lock: update-ref cannot create the branch.
