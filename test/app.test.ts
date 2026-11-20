@@ -611,6 +611,35 @@ test('seen map prewarms done status on mount; persistSeen called with snapshot',
   expect(snap['/x/alpha:s1']).toEqual({ updated: 0, hasRun: true, stopped: false })
 })
 
+// #176: the first ^x stops, the second deletes. A first ^x on a finished row that is never confirmed
+// must leave its result alone, not relabel it `stopped` (persisted, and outranking done).
+test('a first ^x on a finished row does not relabel it stopped', async () => {
+  const deps = makeDeps()
+  deps.client.listSessions = vi.fn(() => Promise.resolve([{ id: 's1', title: 'fix tests', time: { updated: 0 } }]))
+  const persistSeen = vi.fn()
+  const seen = { '/x/alpha:s1': { updated: 0, hasRun: true } }
+  const { stdin, lastFrame, unmount } = render(React.createElement(App, { ...deps, onAction: vi.fn(), seen, persistSeen }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  stdin.write('\x18')
+  await waitFor(() => lastFrame().includes('stopped "fix tests"')) // the abort itself went through
+  unmount() // flushes the coalesced seen.json write
+  expect(persistSeen.mock.calls.at(-1)![0]['/x/alpha:s1']).toMatchObject({ hasRun: true, stopped: false })
+})
+
+test('a first ^x on a running row still records the stop', async () => {
+  const deps = makeDeps()
+  const persistSeen = vi.fn()
+  const { stdin, lastFrame, unmount } = render(React.createElement(App, { ...deps, onAction: vi.fn(), persistSeen }))
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
+  const onEvent = deps.connectEventsImpl.mock.calls[0][1].onEvent
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  await waitFor(() => lastFrame().includes('1 working'))
+  stdin.write('\x18')
+  await waitFor(() => lastFrame().includes('stopped "fix tests"'))
+  unmount()
+  expect(persistSeen.mock.calls.at(-1)![0]['/x/alpha:s1']).toMatchObject({ stopped: true })
+})
+
 test('a mid-arm reorder cannot make the second ^x delete a different session than the one it armed', async () => {
   const deps = makeDeps()
   deps.client.listSessions = vi.fn(() =>

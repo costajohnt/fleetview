@@ -1,5 +1,7 @@
 import { beforeEach, test, expect, vi } from 'vitest'
-import { connectEvents, parseSseChunk } from '../src/backends/opencode/event-mux.ts'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { connectEvents, createV2Translator, parseSseChunk } from '../src/backends/opencode/event-mux.ts'
 import { resetOpencodeApiMemo } from '../src/backends/opencode/client.ts'
 
 // Tests here reuse base URLs, and the API-version answer is memoised per URL module-wide.
@@ -148,4 +150,123 @@ test('backoff sleep removes its abort listener when the timer elapses', async ()
   await conn.done
   vi.restoreAllMocks()
   vi.useRealTimers()
+})
+
+// #184: 2.x's one server-wide stream, cut to a directory by v2Filter. The transcript is a live
+// recording from opencode 2.3.2 (paths rewritten to /fv): sessions created in /fv/repo (mine), /fv
+// (foreign) and /fv/repo-link (a symlink to repo), a rename and a `!` shell in mine, a rename of the
+// foreign one, then all three deleted. Renames and deletes carry no location.
+const transcript = readFileSync(join(import.meta.dirname, 'fixtures', 'opencode-2.3.2-events.sse'), 'utf8')
+const MINE = 'ses_e09924833ffeym6fKgnk261ATw'
+const FOREIGN = 'ses_e099247e8ffeDhdud5GOTg1DX2'
+
+const v2Server = ({ listed = [] as string[], frames = transcript }: { listed?: string[]; frames?: string } = {}) => {
+  const order: string[] = []
+  const fetchImpl = vi.fn((url: string) => {
+    const path = new URL(url).pathname
+    order.push(path)
+    const json = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
+    if (path === '/api/info') return json({ version: '2.3.2', pid: 1 })
+    if (path === '/api/session') return json({ data: listed.map((id) => ({ id, location: { directory: '/fv/repo' }, time: {} })) })
+    if (path === '/api/event') {
+      // Split mid-frame, as a socket would.
+      const body = (async function* () { for (let i = 0; i < frames.length; i += 97) yield new TextEncoder().encode(frames.slice(i, i + 97)) })()
+      return Promise.resolve({ ok: true, status: 200, body })
+    }
+    return Promise.reject(new Error(`unexpected ${path}`))
+  })
+  return { fetchImpl: fetchImpl as any, order }
+}
+const replay = async (directory: string, server = v2Server()) => {
+  const events: any[] = []
+  await connectEvents({ host: '127.0.0.1', port: 4802, directory }, { fetchImpl: server.fetchImpl, onEvent: (_d, e) => events.push(e), reconnect: false }).done
+  return events
+}
+const sessionsIn = (events: any[]) => [...new Set(events.map((e) => e.properties?.sessionID ?? e.properties?.info?.id))]
+
+test('2.x: the recorded stream reaches only its own directory, location-less renames and deletes included', async () => {
+  const events = await replay('/fv/repo')
+  expect(sessionsIn(events)).toEqual([MINE])
+  expect(events).toContainEqual({ type: 'session.updated', properties: { info: { id: MINE, title: 'renamed', time: { updated: expect.any(Number) } } } })
+  expect(events).toContainEqual({ type: 'message.updated', properties: { sessionID: MINE, info: { role: 'user' } } })
+  expect(events.at(-1)).toEqual({ type: 'session.deleted', properties: { info: { id: MINE } } })
+  // The foreign directory gets the foreign session and none of mine.
+  expect(sessionsIn(await replay('/fv'))).toEqual([FOREIGN])
+})
+
+test('2.x: a roster directory spelled with a trailing slash still matches (2.x strips it)', async () => {
+  expect(await replay('/fv/repo/')).toEqual(await replay('/fv/repo'))
+})
+
+test('2.x: the seed is listed after the stream opens, so a session made in between is not lost', async () => {
+  const server = v2Server()
+  await replay('/fv/repo', server)
+  expect(server.order.indexOf('/api/event')).toBeLessThan(server.order.indexOf('/api/session'))
+})
+
+test('2.x: location-less frames pass for a listed session and drop for an unknown one; a nested form routes by its session', async () => {
+  const frame = (o: object) => `data: ${JSON.stringify(o)}\n\n`
+  const form = { id: 'frm_1', sessionID: 'ses_listed', title: 'Pick', fields: [{ key: 'q0', type: 'string', title: 'Fruit', options: [{ value: 'pear', label: 'pear' }] }] }
+  const frames = [
+    frame({ type: 'session.renamed', created: 5, data: { sessionID: 'ses_listed', title: 'kept' } }),
+    frame({ type: 'session.renamed', created: 6, data: { sessionID: 'ses_unknown', title: 'dropped' } }),
+    frame({ type: 'form.created', created: 7, data: { form } }),
+    frame({ type: 'form.created', created: 8, data: { form: { ...form, id: 'frm_2', sessionID: 'ses_unknown' } } }),
+  ].join('')
+  const events = await replay('/fv/repo', v2Server({ listed: ['ses_listed'], frames }))
+  expect(events.map((e) => e.type)).toEqual(['session.updated', 'question.asked'])
+  expect(events[1].properties).toMatchObject({ id: 'frm_1', sessionID: 'ses_listed' })
+})
+
+test('2.x translator: the branches no recording reaches without a model', () => {
+  const t = createV2Translator()
+  const at = (type: string, data: object) => t({ type, created: 9, data })
+  expect(at('permission.asked', { id: 'per_1', sessionID: 's', action: 'bash', resources: ['ls'] })).toEqual([{ type: 'permission.asked', properties: { id: 'per_1', sessionID: 's', permission: 'bash', patterns: ['ls'], metadata: undefined } }])
+  t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm', ordinal: 0, delta: 'Hel' } })
+  expect(at('session.text.ended', { sessionID: 's', assistantMessageID: 'm', ordinal: 0, text: 'Hello' })).toEqual([{ type: 'message.part.updated', properties: { sessionID: 's', part: { type: 'text', text: 'Hello', messageID: 'm' } } }])
+  // ended clears the accumulator: a later delta for the same part starts over
+  expect(t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm', ordinal: 0, delta: 'x' } })[0]).toMatchObject({ properties: { part: { text: 'x' } } })
+  expect(at('form.cancelled', { sessionID: 's', id: 'frm_1' })).toEqual([{ type: 'question.rejected', properties: { sessionID: 's', requestID: 'frm_1' } }])
+  expect(at('session.deleted', { sessionID: 's' })).toEqual([{ type: 'session.deleted', properties: { info: { id: 's' } } }])
+  expect(at('session.inbox.enqueued', { sessionID: 's' })).toEqual([{ type: 'message.updated', properties: { sessionID: 's', info: { role: 'user' } } }, { type: 'session.updated', properties: { info: { id: 's', time: { updated: 9 } } } }])
+  expect(at('session.step.started', { sessionID: 's', assistantMessageID: 'm2' })[0]).toEqual({ type: 'message.updated', properties: { sessionID: 's', info: { id: 'm2', role: 'assistant' } } })
+  for (const type of ['session.step.ended', 'session.step.failed']) expect(at(type, { sessionID: 's' })).toEqual([{ type: 'session.updated', properties: { info: { id: 's', time: { updated: 9 } } } }])
+})
+
+test('2.x: a listing that fails after the stream opened releases the body and goes offline', async () => {
+  const release = vi.fn(() => Promise.resolve({ done: true, value: undefined }))
+  let sent = false
+  const body = {
+    [Symbol.asyncIterator]: () => ({
+      next: () => (sent ? new Promise(() => {}) : ((sent = true), Promise.resolve({ done: false, value: new TextEncoder().encode('data: {"type":"server.connected","data":{}}\n\n') }))),
+      return: release,
+    }),
+  }
+  const fetchImpl = vi.fn((url: string) => {
+    const path = new URL(url).pathname
+    if (path === '/api/info') return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: '2.3.2', pid: 1 }) })
+    if (path === '/api/event') return Promise.resolve({ ok: true, status: 200, body })
+    return Promise.reject(new Error('listing failed'))
+  }) as any
+  const onOffline = vi.fn()
+  await connectEvents({ host: '127.0.0.1', port: 4803, directory: '/fv/repo' }, { fetchImpl, onEvent: vi.fn(), onOffline, reconnect: false }).done
+  expect(release).toHaveBeenCalled()
+  expect(onOffline).toHaveBeenCalledWith('/fv/repo')
+})
+
+test('2.x: stop() while the seed is being listed delivers nothing more', async () => {
+  let listed!: (v: unknown) => void
+  const fetchImpl = vi.fn((url: string) => {
+    const path = new URL(url).pathname
+    if (path === '/api/info') return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: '2.3.2', pid: 1 }) })
+    if (path === '/api/event') return Promise.resolve({ ok: true, status: 200, body: (async function* () { yield new TextEncoder().encode(transcript) })() })
+    return new Promise((r) => { listed = r })
+  }) as any
+  const onEvent = vi.fn()
+  const conn = connectEvents({ host: '127.0.0.1', port: 4804, directory: '/fv/repo' }, { fetchImpl, onEvent, reconnect: false })
+  await vi.waitFor(() => expect(listed).toBeDefined())
+  conn.stop()
+  listed({ ok: true, status: 200, text: () => Promise.resolve('{"data":[]}') })
+  await conn.done
+  expect(onEvent).not.toHaveBeenCalled()
 })

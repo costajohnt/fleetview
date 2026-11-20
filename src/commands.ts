@@ -10,9 +10,9 @@ import { createOpencodeBackend } from './backends/opencode/index.ts'
 import { DEFAULT_BACKEND } from './backends/index.ts'
 import { loadServer, childEnv } from './registry.ts'
 import { OPENCODE_MISSING } from './backends/opencode/server-manager.ts'
-import { loadSeen, defaultSeenFile } from './seen-store.ts'
+import { loadSeen, saveSeen, defaultSeenFile } from './seen-store.ts'
 import { loadRoster, saveRoster, withRosterLock, defaultRosterFile } from './roster-store.ts'
-import { createStore, memberTitle, messageBody, errorLabel, isAbortError } from './session-store.ts'
+import { createStore, memberTitle, messageBody, errorLabel, isAbortError, abortStopped, isRunningStatus } from './session-store.ts'
 import type { SessionStore } from './session-store.ts'
 import { connectEvents } from './backends/opencode/event-mux.ts'
 import { summarise } from './ui/header.ts'
@@ -937,6 +937,9 @@ type SessionCommandDeps = {
   backends?: Backends
   rosterFile?: string
   spawnSyncImpl?: typeof spawnSync
+  seenFile?(): string
+  loadSeenImpl?(file: string): SeenMap
+  saveSeenImpl?(file: string, map: SeenMap): void
   log?(message: string): void
   error?(message: string): void
   setExitCode?(code: number): void
@@ -947,13 +950,16 @@ const withDefaults = ({
   backends = {},
   rosterFile = defaultRosterFile(),
   spawnSyncImpl = spawnSync,
+  seenFile = defaultSeenFile,
+  loadSeenImpl = loadSeen,
+  saveSeenImpl = saveSeen,
   log = console.log,
   error = console.error,
   setExitCode = (code: number) => {
     process.exitCode = code
   },
   ...rest
-}: SessionCommandDeps) => ({ ...rest, createClient, backends, rosterFile, spawnSyncImpl, log, error, setExitCode })
+}: SessionCommandDeps) => ({ ...rest, createClient, backends, rosterFile, spawnSyncImpl, seenFile, loadSeenImpl, saveSeenImpl, log, error, setExitCode })
 
 // The adapter that owns a found session: opencode's is built from the connection that found it.
 const adapterFor = (found: { backend: string; opencode: { client: RosterClient; server: ServerRef } | null }, backends: Backends) =>
@@ -1031,19 +1037,69 @@ export async function runLogs(args: ParsedArgs, deps: SessionCommandDeps) {
     // #24: a failed turn's only content is `info.error` — without this, `logs` on a session that
     // failed every dispatch printed the user's own prompt and nothing else. errorLabel strips it
     // for the same reason the body above is stripped.
+    // A turn the user stopped is not a failure: say so, as peek and the roster do (#21).
     const failure = errorLabel(m?.info?.error)
-    if (failure) d.log(`error: ${failure}`)
+    if (isAbortError(m?.info?.error)) d.log('stopped')
+    else if (failure) d.log(`error: ${failure}`)
   }
 }
 
 // `fleetview stop <id>`: abort the running turn, leaving the session in the list.
+const STOP_SETTLE_MS = 5000
+
 export async function runStop(args: ParsedArgs, deps: SessionCommandDeps) {
   const d = withDefaults(deps)
   const found = await findSession(args.id, { ...d, cwd: args.cwd })
   if (!found) return
-  const result = await adapterFor(found, d.backends).abort(found.id, found.worktree)
+  const reason = (e: unknown) => stripControl(e instanceof Error ? e.message : String(e))
+  // #176: read before the abort, like the TUI's ^x. opencode's status map says whether a turn is
+  // running; an unreadable map proves nothing, so no stop is recorded (and the output says so). A
+  // process backend answers for itself with {aborted:false} below.
+  let statusUnread = false
+  const wasRunning = found.opencode
+    ? await found.opencode.client.sessionStatus(found.worktree).then(
+        (statuses) => {
+          if (!statuses) statusUnread = true
+          return isRunningStatus(statuses?.[found.id]?.type ?? 'idle')
+        },
+        () => {
+          statusUnread = true
+          return false
+        },
+      )
+    : true
+  let result
+  try {
+    result = await adapterFor(found, d.backends).abort(found.id, found.worktree)
+  } catch (e) {
+    d.error(`couldn't stop ${found.id}: ${reason(e)}`)
+    d.setExitCode(1)
+    return
+  }
   // A process backend answers {aborted:false} when nothing of this session's is running (no pid, a
   // pid that is no longer this run, or one that already exited); "stopped" would claim otherwise.
-  d.log(isRecord(result) && result.aborted === false ? `nothing running to stop on ${found.id}` : `stopped ${found.id}`)
+  // The same goes for an opencode session the status map showed idle.
+  if ((isRecord(result) && result.aborted === false) || (!wasRunning && !statusUnread)) return d.log(`nothing running to stop on ${found.id}`)
+  d.log(`stopped ${found.id}`)
+  if (statusUnread) return d.error(`couldn't read ${found.id}'s status before stopping it, so the stop isn't recorded; ls may show it as done`)
+  // #176: the server reports an aborted session as plain idle, so `ls` and the roster read it as
+  // completed unless the stop is remembered in seen.json, which is what the TUI's ^x does through
+  // the store. Ceiling: a TUI running at the same moment rewrites seen.json from its own store; on
+  // opencode 1.x it sees the abort frame live and records the stop itself.
+  if (abortStopped(wasRunning, result)) {
+    const file = d.seenFile()
+    try {
+      const seen = d.loadSeenImpl(file)
+      const k = `${found.worktree}:${found.id}`
+      // A persisted stop is retired by any server `time.updated` newer than this, and the interrupted
+      // turn writes its abort error (bumping it) after the abort call returns.
+      // ponytail: stamped STOP_SETTLE_MS ahead to outlast that bump, so a new run inside that window
+      // still reads stopped until it does something more; wait for idle and read time.updated if not.
+      d.saveSeenImpl(file, { ...seen, [k]: { ...seen[k], updated: Date.now() + STOP_SETTLE_MS, hasRun: true, stopped: true } })
+    } catch (e) {
+      d.error(`couldn't record the stop in ${file}, so ls may show ${found.id} as done: ${reason(e)}`)
+      d.setExitCode(1)
+    }
+  }
 }
 

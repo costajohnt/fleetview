@@ -131,6 +131,54 @@ test('an opencode id still resolves to opencode with claude in the mix', async (
   expect(h.out).toEqual(['stopped ses_open1'])
 })
 
+// #176: the CLI stop records the stop where the TUI's ^x does, so `ls` reads it as stopped.
+test('stop on a running opencode session records it as stopped for ls', async () => {
+  const h = setup()
+  const seenFile = join(mkdtempSync(join(tmpdir(), 'fleetview-all-seen-')), 'seen.json')
+  await runStop({ command: 'stop', id: 'ses_open1' }, { ...h.deps, seenFile: () => seenFile })
+  expect(h.out).toEqual(['stopped ses_open1'])
+  expect(JSON.parse(readFileSync(seenFile, 'utf8'))['/x/alpha:ses_open1']).toMatchObject({ hasRun: true, stopped: true })
+  h.client.sessionStatus = vi.fn(() => Promise.resolve({} as any)) // what the server says once the abort lands
+  // ...and the interrupted turn's abort error bumps time.updated just after the abort returned.
+  h.client.listSessions = vi.fn((dir: string) => Promise.resolve(dir === '/x/alpha' ? [{ id: 'ses_open1', title: 'opencode work', time: { created: 1, updated: Date.now() + 50 } }] : []))
+  await listSessions({ command: 'ls', json: true, all: true }, h.ensureServer, '/tmp/s.json', { ...h.lsDeps, seenFile: () => seenFile, loadSeenImpl: undefined as any })
+  expect(JSON.parse(h.out.slice(1).join('\n')).find((r: any) => r.id === 'ses_open1').state).toBe('stopped')
+})
+
+test('stop on an opencode session with no run open does not relabel its result as stopped', async () => {
+  const h = setup()
+  h.client.sessionStatus = vi.fn(() => Promise.resolve({} as any))
+  const seenFile = join(mkdtempSync(join(tmpdir(), 'fleetview-all-seen-')), 'seen.json')
+  await runStop({ command: 'stop', id: 'ses_open1' }, { ...h.deps, seenFile: () => seenFile })
+  expect(h.client.abortSession).toHaveBeenCalled()
+  expect(h.out).toEqual(['nothing running to stop on ses_open1'])
+  expect(() => readFileSync(seenFile, 'utf8')).toThrow() // nothing written
+})
+
+test('stop says so when it could not read the status first or could not record the stop', async () => {
+  const unread = setup()
+  unread.client.sessionStatus = vi.fn(() => Promise.reject(new Error('503')))
+  const saveSeenImpl = vi.fn()
+  await runStop({ command: 'stop', id: 'ses_open1' }, { ...unread.deps, saveSeenImpl })
+  expect(unread.out).toEqual(['stopped ses_open1'])
+  expect(unread.errs[0]).toMatch(/couldn't read ses_open1's status/)
+  expect(saveSeenImpl).not.toHaveBeenCalled()
+
+  const unwritable = setup()
+  await runStop({ command: 'stop', id: 'ses_open1' }, { ...unwritable.deps, loadSeenImpl: () => ({}), saveSeenImpl: () => { throw new Error('EROFS') } })
+  expect(unwritable.out).toEqual(['stopped ses_open1'])
+  expect(unwritable.errs[0]).toMatch(/couldn't record the stop .*EROFS/)
+  expect(unwritable.codes).toEqual([1])
+})
+
+test('stop reports an abort the server refused instead of throwing', async () => {
+  const h = setup()
+  h.client.abortSession = vi.fn(() => Promise.reject(new Error('POST /session/ses_open1/abort → 500: boom')))
+  await runStop({ command: 'stop', id: 'ses_open1' }, h.deps)
+  expect(h.errs).toEqual(["couldn't stop ses_open1: POST /session/ses_open1/abort → 500: boom"])
+  expect(h.codes).toEqual([1])
+})
+
 test('stop on a claude session signals its run through the claude adapter', async () => {
   const h = setup({ opencodeUp: false })
   startRun(h.runDir)
@@ -259,4 +307,18 @@ test('attach on an opencode session passes the child exit status through', async
     expect(spawnSyncImpl).toHaveBeenCalled()
     expect(h.codes).toEqual(codes)
   }
+})
+
+// #176 addendum: a turn the user stopped reads as stopped in logs, not as an error (1.x and 2.x names).
+test('logs shows a user abort as stopped rather than an error', async () => {
+  const h = setup()
+  h.client.listMessages = vi.fn(() =>
+    Promise.resolve([
+      { info: { role: 'assistant', error: { name: 'MessageAbortedError', data: { message: 'Aborted' } } }, parts: [] },
+      { info: { role: 'assistant', error: { name: 'aborted', data: { message: 'Step interrupted' } } }, parts: [] },
+      { info: { role: 'assistant', error: { name: 'APIError', data: { message: 'overloaded' } } }, parts: [] },
+    ] as any),
+  )
+  await runLogs({ command: 'logs', id: 'ses_open1' }, h.deps)
+  expect(h.out).toEqual(['stopped', 'stopped', 'error: APIError: overloaded'])
 })
