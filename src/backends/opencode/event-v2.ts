@@ -32,24 +32,23 @@ type Subscriber = V2Handlers & {
 const servers = new WeakMap<typeof fetch, Map<string, { join: (sub: Subscriber) => void; leave: (sub: Subscriber) => void }>>()
 
 export function subscribeV2(base: string, directory: string, handlers: V2Handlers, { fetchImpl, idleMs }: { fetchImpl: typeof fetch; idleMs: number }) {
-  let byBase = servers.get(fetchImpl)
-  if (!byBase) servers.set(fetchImpl, (byBase = new Map()))
+  const byBase = servers.get(fetchImpl) ?? new Map()
+  servers.set(fetchImpl, byBase)
   const key = `${base} ${idleMs}`
-  let server = byBase.get(key)
-  if (!server) {
+  const server = byBase.get(key) ?? openServer()
+  function openServer() {
     const created = serverStream(base, fetchImpl, idleMs, () => byBase.get(key) === created && byBase.delete(key))
-    byBase.set(key, (server = created))
+    byBase.set(key, created)
+    return created
   }
-  let finish!: () => void
-  const done = new Promise<void>((r) => (finish = r))
+  const { promise: done, resolve: finish } = Promise.withResolvers<void>()
   const sub: Subscriber = { ...handlers, directory, route: null, held: [], connection: -1, stopped: false, finish }
-  const joined = server
-  joined.join(sub)
+  server.join(sub)
   return {
     done,
     stop: () => {
       sub.stopped = true
-      joined.leave(sub)
+      server.leave(sub)
     },
   }
 }
@@ -99,6 +98,8 @@ function serverStream(base: string, fetchImpl: typeof fetch, idleMs: number, for
         sub.held = []
         sub.onOffline?.(sub.directory)
         if (!sub.reconnect) return leave(sub)
+        // Fixed, as it effectively was with a connection per directory: a failed listing backed off
+        // from the delay the stream's open had just reset to a second.
         await backoff(1000, ac.signal)
         if (sub.stopped || at !== connection || !open) return
         sub.onOnline?.(sub.directory)

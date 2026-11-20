@@ -188,6 +188,9 @@ export type AttachOutcome = {
 // The per-worktree live-state seed use-discovery publishes back through App's refs, and which the
 // peek failure paths reconcile through. Named here rather than in the hook because App holds the ref
 // and use-peek calls it — three modules, so the shape belongs to none of them.
+// Several directories' statuses off one server-wide answer (2.x's active map): each call cuts it to
+// one directory, using `listed` as that directory's sessions when the caller already has a listing.
+export type StatusSnapshot = (directory: string, listed?: ListedSession[]) => Promise<Record<string, OpencodeSessionStatus> | null>
 // `shared`: a poll tick's one status answer for every worktree (2.x's server-wide active map), with
 // the watermark taken before it was fetched, which every seed on that answer must use.
 export type SeedOptions = {
@@ -195,7 +198,7 @@ export type SeedOptions = {
   additive?: boolean
   closeRuns?: boolean
   relist?: boolean
-  shared?: { mark: number; statusOf: (directory: string, listed?: ListedSession[]) => Promise<Record<string, OpencodeSessionStatus> | null> }
+  shared?: { mark: number; statusOf: StatusSnapshot }
 }
 // Reported per list, not as one flag: a peek path that only cares whether `/question` succeeded must
 // not read a `/session/status` timeout as its own failure.

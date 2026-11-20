@@ -92,7 +92,7 @@ export async function readEventStream(
     try {
       Promise.resolve(iterator.return?.()).catch(() => {})
     } catch {
-      // an iterator without a return(); nothing to release
+      // return() threw synchronously; nothing more to release
     }
   }
   throw new Error('event stream ended')
@@ -100,8 +100,8 @@ export async function readEventStream(
 
 // Sleep `ms`, cut short by `signal`. The listener is removed when the timer wins, so a long run of
 // backoffs doesn't pile listeners on one signal.
-export const backoff = (ms: number, signal: AbortSignal) =>
-  new Promise<void>((r) => {
+export function backoff(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((r) => {
     const onAbort = () => {
       clearTimeout(t)
       r()
@@ -112,3 +112,4 @@ export const backoff = (ms: number, signal: AbortSignal) =>
     }, ms)
     signal.addEventListener('abort', onAbort, { once: true })
   })
+}

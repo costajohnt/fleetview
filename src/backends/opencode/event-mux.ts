@@ -22,7 +22,7 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
   let delay = 1000
   const ac = new AbortController()
   const base = `http://${host}:${port}`
-  let v2: { done: Promise<void>; stop: () => void } | null = null
+  let v2: ReturnType<typeof subscribeV2> | null = null
 
   const done = (async () => {
     while (!stopped) {

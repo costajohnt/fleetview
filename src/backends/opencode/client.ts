@@ -1,4 +1,4 @@
-import type { Session, ListedSession, OpencodeMessage, Project, PermissionAsked, QuestionAsked, OpencodeSessionStatus, Worktree } from '../../types.ts'
+import type { Session, ListedSession, OpencodeMessage, Project, PermissionAsked, QuestionAsked, OpencodeSessionStatus, StatusSnapshot, Worktree } from '../../types.ts'
 import { opencodeRequest } from './request.ts'
 import { isRecord } from '../../types.ts'
 import { OpencodeV2Client } from './client-v2.ts'
@@ -231,8 +231,6 @@ export class OpencodeV1Client {
 
 // The client fleetview holds per server: asks once which API the server speaks (opencodeApi), then
 // hands every call to that version's client. The choice lives here and nowhere else.
-export type StatusSnapshot = (directory: string, listed?: ListedSession[]) => Promise<Record<string, OpencodeSessionStatus> | null>
-
 export class OpencodeClient {
   baseUrl: string
   fetch: typeof fetch

@@ -364,3 +364,49 @@ test('2.x: one directory stopping leaves the shared connection to the others', a
   await Promise.all(conns.map((c) => c.done))
   expect(sessionsIn(got)).toEqual([MINE])
 })
+
+// A 2.x stream that sends `frames` once and then stays open until it is stopped.
+const heldOpen = (frames: string, listing: () => Promise<unknown>) =>
+  vi.fn((url: string) => {
+    const path = new URL(url).pathname
+    const json = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
+    if (path === '/api/info') return json({ version: '2.3.2', pid: 1 })
+    if (path === '/api/session') return listing()
+    const body = (async function* () {
+      yield new TextEncoder().encode(frames)
+      await new Promise(() => {})
+    })()
+    return Promise.resolve({ ok: true, status: 200, body })
+  }) as any
+
+test('2.x: a directory whose listing fails goes offline alone, retries, and then gets the frames it missed', async () => {
+  let calls = 0
+  const listing = () => (calls++ === 0 ? Promise.reject(new Error('listing failed')) : Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('{"data":[]}') }))
+  const fetchImpl = heldOpen(transcript, listing)
+  const events: any[] = []
+  const seen: string[] = []
+  const conn = connectEvents(
+    { host: '127.0.0.1', port: 4808, directory: '/fv/repo' },
+    { fetchImpl, onEvent: (_d, e) => events.push(e), onOnline: () => seen.push('online'), onOffline: () => seen.push('offline'), reconnect: true },
+  )
+  await vi.waitFor(() => expect(sessionsIn(events)).toEqual([MINE]), { timeout: 5000 })
+  expect(seen).toEqual(['online', 'offline', 'online'])
+  expect(fetchImpl.mock.calls.filter(([u]: [string]) => u.includes('/api/event'))).toHaveLength(1) // the stream itself never dropped
+  conn.stop()
+  await conn.done
+})
+
+test('2.x: when the shared stream drops, a one-shot subscriber finishes and a reconnecting one stays', async () => {
+  const server = v2Server()
+  const offline: string[] = []
+  const once = connectEvents({ host: '127.0.0.1', port: 4809, directory: '/fv' }, { fetchImpl: server.fetchImpl, onEvent: vi.fn(), onOffline: (d) => offline.push(d), reconnect: false })
+  const staying = connectEvents({ host: '127.0.0.1', port: 4809, directory: '/fv/repo' }, { fetchImpl: server.fetchImpl, onEvent: vi.fn(), onOffline: (d) => offline.push(d), reconnect: true })
+  await once.done
+  expect(offline.sort()).toEqual(['/fv', '/fv/repo'])
+  let finished = false
+  void staying.done.then(() => (finished = true))
+  await new Promise((r) => setTimeout(r, 50))
+  expect(finished).toBe(false)
+  staying.stop()
+  await staying.done
+})
