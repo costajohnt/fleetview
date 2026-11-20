@@ -2,6 +2,7 @@ import { beforeEach, test, expect, vi } from 'vitest'
 import { waitForExpect } from './helpers.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
 import { noteOpencodeApi, resetOpencodeApiMemo } from '../src/backends/opencode/client.ts'
+import { ownershipLost, ownershipVerified } from '../src/backends/opencode/request.ts'
 
 const server = { host: '127.0.0.1', port: 4900 }
 // Only the methods the adapter is allowed to reach for: a fake that grew every OpencodeClient method
@@ -104,4 +105,17 @@ test('attach follows the probed API, and refuses a server that was never probed'
   expect(backend().attach({ id: 's1', directory: '/x/alpha' })).toEqual(['opencode', '--server', 'http://127.0.0.1:4900', '-s', 's1', '/x/alpha'])
   resetOpencodeApiMemo()
   expect(() => backend().attach({ id: 's1', directory: '/x/alpha' })).toThrow(/not been probed/)
+})
+
+// #216: the attached TUI reads the password from its env, so it is held back like every request.
+test('attach waits for a re-verified server after a lost connection when a password is set', () => {
+  vi.stubEnv('OPENCODE_SERVER_PASSWORD', 'hunter2')
+  try {
+    ownershipLost('http://127.0.0.1:4900')
+    expect(() => backend().attach({ id: 's1', directory: '/x/alpha' })).toThrow(/lost the connection/)
+    ownershipVerified('http://127.0.0.1:4900')
+    expect(backend().attach({ id: 's1', directory: '/x/alpha' })[1]).toBe('attach')
+  } finally {
+    vi.unstubAllEnvs()
+  }
 })

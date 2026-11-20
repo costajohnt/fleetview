@@ -7,12 +7,14 @@ import { stripControl } from '../../text-utils.ts'
 // without the credential until a probe answers healthy again (server-manager.ts). Against fleetview's
 // own server that is a 401, which sends the roster to ensureServer, whose probe re-verifies it.
 // ponytail: a port taken over with no failed connection in between (no stream open, no request in
-// flight) is not seen; a probe per request is the upgrade if that matters.
+// flight) is not seen; a probe per request is the upgrade if that matters. Nor is an `opencode`
+// TUI already attached: it reconnects with the password from its own env, out of fleetview's reach.
 const unverified = new Set<string>()
 const originOf = (url: string) => URL.parse(url)?.origin ?? url
 export const ownershipLost = (url: string) => void unverified.add(originOf(url))
 export const ownershipVerified = (url: string) => void unverified.delete(originOf(url))
-export const credentialFor = (url: string, auth: string | undefined) => (unverified.has(originOf(url)) ? undefined : auth)
+export const ownershipKnown = (url: string) => !unverified.has(originOf(url))
+export const credentialFor = (url: string, auth: string | undefined) => (ownershipKnown(url) ? auth : undefined)
 
 // One request to an opencode server, for both API versions: they differ in paths, in how the
 // directory travels (1.x `?directory=`, 2.x a header) and in payload shapes, not in this.

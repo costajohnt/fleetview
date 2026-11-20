@@ -83,11 +83,7 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const base = `http://${server.host}:${server.port}`
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl, async () => server.api !== 2)
-  // #216: either healthy answer is the check a lost connection waits on (request.ts).
-  if (v1 === 'healthy') {
-    noteOpencodeApi(base, 1)
-    ownershipVerified(base)
-  }
+  if (v1 === 'healthy') noteOpencodeApi(base, 1)
   if (v1 !== 'unreachable') return v1
   // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
   // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
@@ -95,10 +91,7 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   const owner = server.pid ? (pid: number) => descendsFrom(pid, server.pid!, parentOf) : undefined
   const v2 = await askServer(server, '/api/info', isV2Info, fetchImpl, isV2UnauthorizedResponse, owner)
   // What the probe found is the server's API for everything after it (client.ts opencodeApi).
-  if (v2 === 'healthy') {
-    noteOpencodeApi(base, 2)
-    ownershipVerified(base)
-  }
+  if (v2 === 'healthy') noteOpencodeApi(base, 2)
   return v2
 }
 
@@ -124,6 +117,12 @@ async function askServer(
 ): Promise<ProbeState> {
   const url = `http://${server.host}:${server.port}${path}`
   let presented = false
+  // #216: the only answer that ends a lost connection's doubt (request.ts): one that asked for the
+  // credential and then proved itself with it. A healthy answer that never asked proves nothing.
+  const verified = (): ProbeState => {
+    ownershipVerified(url)
+    return 'healthy'
+  }
   try {
     // The first request carries NO credential, on purpose. fleetview adopts the password from
     // server.json before it has any evidence about who holds the port, so an authenticated first
@@ -149,9 +148,9 @@ async function askServer(
       } catch {}
       const pid = (body as { pid?: unknown } | undefined)?.pid
       if (typeof pid !== 'number' || !isOwner(pid)) return 'unauthorized'
-      return authed.ok ? (looksRight(body) ? 'healthy' : 'unauthorized') : 'unconfirmed'
+      return authed.ok ? (looksRight(body) ? verified() : 'unauthorized') : 'unconfirmed'
     }
-    if (authed.ok) return (await bodyLooksRight(authed, looksRight)) ? 'healthy' : 'unauthorized'
+    if (authed.ok) return (await bodyLooksRight(authed, looksRight)) ? verified() : 'unauthorized'
     return 'unconfirmed'
   } catch {
     // Same rule for a listener that took the credential and then hung or reset. #213: when the caller

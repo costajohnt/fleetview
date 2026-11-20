@@ -3,7 +3,8 @@
 // and nothing more. Anything opencode can do that the contract doesn't name is still reached through
 // OpencodeClient directly.
 import type { Backend, OpencodeEvent, ServerRef } from '../../types.ts'
-import { knownOpencodeApi, type RosterClient } from './client.ts'
+import { authHeader, knownOpencodeApi, type RosterClient } from './client.ts'
+import { ownershipKnown } from './request.ts'
 import { connectEvents } from './event-mux.ts'
 import { assertSessionId } from '../session-id.ts'
 import { isAbsolute } from 'node:path'
@@ -40,6 +41,8 @@ export function createOpencodeBackend({
   const serverApi = () => {
     const api = knownOpencodeApi(url)
     if (!api) throw new Error(`opencode server at ${url} has not been probed yet`)
+    // #216: the attached TUI sends the password from its env, so it waits for the same re-check.
+    if (authHeader() && !ownershipKnown(url)) throw new Error(`lost the connection to the opencode server at ${url}; reconnecting, try again in a moment`)
     return api
   }
   return {

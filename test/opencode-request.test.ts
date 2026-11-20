@@ -44,7 +44,8 @@ test('after a lost connection the credential waits for a pid-matched probe, on r
   const fetchImpl = vi.fn(async (url: string, init: any = {}) => {
     const auth: string | undefined = init.headers?.authorization
     const path = new URL(url).pathname
-    if (path === '/project') return { ok: true, status: 200, json: async () => { throw new SyntaxError('html') } }
+    // The squatter passes as a passwordless 1.x: healthy without ever asking for the credential.
+    if (path === '/project') return listener === 'squatter' ? json(200, [{ id: 'g', worktree: '/' }]) : { ok: true, status: 200, json: async () => { throw new SyntaxError('html') } }
     // The probe's route: 2.x's own 401 until the credential is shown, then the answering pid.
     if (path === '/api/info') return auth ? json(200, { version: '2.3.2', pid: listener === 'ours' ? 42 : 666 }) : json(401, { _tag: 'UnauthorizedError' })
     shown[listener].push(auth)
@@ -65,8 +66,8 @@ test('after a lost connection the credential waits for a pid-matched probe, on r
     listener = 'squatter'
     await request()
     await stream()
-    // A probe that the pid does not match keeps it withheld.
-    expect(await probeServer(server, fetchImpl, () => null)).toBe('unauthorized')
+    // A healthy answer that never asked for the credential proves nothing: still withheld.
+    expect(await probeServer(server, fetchImpl, () => null)).toBe('healthy')
     await request()
     expect(shown.squatter).toEqual([undefined, undefined, undefined])
     listener = 'ours'
