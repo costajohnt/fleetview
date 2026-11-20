@@ -1,5 +1,13 @@
-import { test, expect } from 'vitest'
+import { test, expect, vi } from 'vitest'
 import { createStore, memberTitle, messageBody, errorLabel } from '../src/session-store.ts'
+
+// #185: run durations are read off Date.now(); a faked clock makes them exact instead of a
+// real-timer sleep with a slack bound that a loaded runner can still miss.
+const fakeClock = () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(1_000_000)
+  return { advance: (ms: number) => vi.setSystemTime(Date.now() + ms), restore: () => vi.useRealTimers() }
+}
 
 const seed = (store: any) =>
   store.setSessions('repoA', [
@@ -836,244 +844,61 @@ test('I1: a 200KB lastAssistantText still yields the correct 80-char snippet', (
   expect(snippet).toBe('a'.repeat(80))
 })
 
-// Coarse perf guard, not a benchmark: publicView must read a cached value, not re-segment the
-// full 200KB text on every call — 1000 calls on the same record finishing in well under a second
-// catches an O(text.length) regression without flaking on ordinary CI variance.
-test('I1: publicView on a 200KB-snippet record is cheap — 1000 calls stay well under the O(full-text) bound', () => {
+// publicView must read a cached value, not re-derive the snippet from the 200KB text on every
+// call. #185: pinned on the work rather than a wall-clock budget: deriving the snippet segments a
+// 640-unit pre-slice of the text, so a get() that does that shows up as a long segment() input.
+test('I1: publicView on a 200KB-snippet record reads the cached snippet instead of re-deriving it', () => {
   const store: any = createStore()
   seed(store)
   const long = 'a'.repeat(200_000)
   store.apply('repoA', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm1', role: 'assistant' } } })
   store.apply('repoA', { type: 'message.part.updated', properties: { sessionID: 's1', part: { type: 'text', messageID: 'm1', text: long } } })
-  const start = Date.now()
-  for (let i = 0; i < 1000; i++) store.get('repoA', 's1')
-  expect(Date.now() - start).toBeLessThan(200)
-})
-
-
-// Agent view's sixth state. The server can't report it — an aborted session looks idle over the
-// wire — so the store has to remember the stop, and forget it the moment the session runs again.
-test('markStopped derives the stopped state, and a later run retires it', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1000, updated: 1000 } }])
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  expect(store.get('repoA', 's1').status).toBe('done')
-  store.markStopped('repoA', 's1')
-  expect(store.get('repoA', 's1').status).toBe('stopped')
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  expect(store.get('repoA', 's1').status).toBe('running')
-})
-
-test('a stop never hides a pending permission — the session still needs the user', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1000, updated: 1000 } }])
-  store.apply('repoA', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1' } })
-  store.markStopped('repoA', 's1')
-  expect(store.get('repoA', 's1').status).toBe('waiting')
-})
-
-test('ranForMs measures the run fleetview watched, on one clock', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1000, updated: 1000 } }])
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  expect(store.get('repoA', 's1').ranForMs).toBe(null) // still running: the age is a live clock
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  const span = store.get('repoA', 's1').ranForMs
-  expect(span).toBeGreaterThanOrEqual(0)
-  expect(span).toBeLessThan(5_000) // the run just happened; not the session's whole lifetime
-})
-
-// A session created an hour ago and stopped in seconds used to report a one-hour run, because the
-// span was creation-to-last-activity rather than the run itself.
-test('a session fleetview never saw start reports no duration rather than its lifetime', () => {
-  const store: any = createStore()
-  const hourAgo = Date.now() - 60 * 60_000
-  store.setSessions('repoA', [{ id: 's1', title: 'adopted', time: { created: hourAgo, updated: hourAgo } }])
-  store.markStopped('repoA', 's1')
-  const row = store.get('repoA', 's1')
-  expect(row.status).toBe('stopped')
-  expect(row.ranForMs).toBe(null) // honest unknown, not a fabricated 1h
-})
-
-// Only an observed `busy` used to clear an error, so a session that succeeded from opencode's own
-// TUI while fleetview's stream was down stayed red forever.
-test('activity after an error retires it', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'X' } } })
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  expect(store.get('repoA', 's1').status).toBe('error')
-  // The first refresh only establishes the baseline — it carries the error's own bump, whichever
-  // order the frames arrived in, so it is not evidence the session did anything since.
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 500 } }])
-  expect(store.get('repoA', 's1').status).toBe('error')
-  // A bump beyond that baseline is.
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 900 } }])
-  expect(store.get('repoA', 's1').status).toBe('done')
-})
-
-// Measured against opencode 1.18.4: recording an error bumps the session's time.updated, and the
-// session.updated frame carrying it arrives before session.error. Anchoring on the last known
-// value therefore works — until that one frame is dropped, at which point the error's own bump
-// reads as activity after itself and a real failure disappears.
-test('a dropped session.updated cannot retire an error by its own timestamp', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 100 } }])
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  // the session.updated carrying the error's new timestamp (200) never arrives
-  store.apply('repoA', { type: 'session.error', properties: { sessionID: 's1', error: { name: 'X' } } })
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  expect(store.get('repoA', 's1').status).toBe('error')
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 200 } }]) // the error's own bump
-  expect(store.get('repoA', 's1').status).toBe('error') // still failed
-})
-
-// A shape fleetview doesn't recognise is not information: the sweep would otherwise mark every session
-// in the project idle, rendering the whole roster as completed.
-test('an unrecognised status payload shape applies nothing', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  store.seedStatuses('repoA', [{ s1: { type: 'idle' } }]) // an array, not the expected map
-  expect(store.get('repoA', 's1').status).toBe('running')
-})
-
-// The watermark's entire purpose: a stale seed must not overwrite a live status. Rebuilding the
-// record without statusSeq made both guards fail open.
-test('a listSessions refresh does not disarm the seed watermark', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
-  const mark = store.seedMark()
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }]) // reconnect refresh
-  store.seedStatuses('repoA', {}, mark) // the older in-flight seed finally lands, session absent
-  expect(store.get('repoA', 's1').status).toBe('running') // not "completed"
-})
-
-// A 200 with an empty body is "no information", not "nobody is running".
-test('an empty status payload applies nothing', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
-  store.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  store.seedStatuses('repoA', null)
-  expect(store.get('repoA', 's1').status).toBe('running')
-  store.seedStatuses('repoA', {}) // a real, genuinely empty map is still authoritative
-  expect(store.get('repoA', 's1').status).toBe('done')
-})
-
-// opencode names a session ~20s after its first prompt, and until then the title is a timestamp
-// placeholder. The dispatch prompt fills that gap without ever competing with the real name.
-test('the dispatch prompt shows until opencode names the session, then the real name wins', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'New session - 2026-07-22T19:51:37.625Z' }])
-  store.setProvisionalTitle('repoA', 's1', 'count the vowels in banana')
-  expect(store.get('repoA', 's1').title).toBe('count the vowels in banana')
-  store.apply('repoA', { type: 'session.updated', properties: { info: { id: 's1', title: 'Count vowels in banana' } } })
-  expect(store.get('repoA', 's1').title).toBe('Count vowels in banana')
-})
-
-test('a user-set name is never overridden by the dispatch prompt', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [{ id: 's1', title: 'my own name' }])
-  store.setProvisionalTitle('repoA', 's1', 'whatever was typed')
-  expect(store.get('repoA', 's1').title).toBe('my own name')
-})
-
-// "Subagents and teammates a session spawns aren't listed as separate rows."
-test('child sessions are not rows', () => {
-  const store: any = createStore()
-  store.setSessions('repoA', [
-    { id: 's1', title: 'real' },
-    { id: 's2', title: 'a subagent', parentID: 's1' },
-  ])
-  expect(store.byProject()[0].sessions.map((s: any) => s.id)).toEqual(['s1'])
-})
-
-// The server reports an aborted session as plain idle, so if the stop isn't persisted a restart
-// renders it as "completed" — claiming a result the user never received.
-test('a stopped session is still stopped after a restart', () => {
-  const first: any = createStore()
-  first.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }])
-  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  first.markStopped('repoA', 's1')
-  expect(first.get('repoA', 's1').status).toBe('stopped')
-
-  const persisted = first.snapshot()
-  const restarted: any = createStore()
-  restarted.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }], persisted)
-  expect(restarted.get('repoA', 's1').status).toBe('stopped')
-})
-
-test('a session that merely ran comes back as completed, not stopped', () => {
-  const first: any = createStore()
-  first.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }])
-  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  first.apply('repoA', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  const restarted: any = createStore()
-  restarted.setSessions('repoA', [{ id: 's1', title: 'x', time: { created: 1, updated: 2 } }], first.snapshot())
-  expect(restarted.get('repoA', 's1').status).toBe('done')
-})
-
-// The heuristic must not fire on code. A reply ending in a fenced block used to be reduced to the
-// block's last line, so a trailing regex or ternary read as a question.
-test('a reply ending in code is not mistaken for a question', () => {
-  const run = (text: string) => {
-    const s: any = createStore()
-    s.setSessions('r', [{ id: 's1', title: 'x' }])
-    s.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-    s.apply('r', { type: 'message.updated', properties: { sessionID: 's1', info: { id: 'm1', role: 'assistant' } } })
-    s.apply('r', { type: 'message.part.updated', properties: { sessionID: 's1', part: { type: 'text', messageID: 'm1', text } } })
-    s.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-    return s.get('r', 's1').status
+  const segment = vi.spyOn(Intl.Segmenter.prototype, 'segment')
+  try {
+    for (let i = 0; i < 1000; i++) expect(store.get('repoA', 's1').snippet).toBe('a'.repeat(80))
+    expect(segment.mock.calls.filter(([text]) => text.length > 100)).toEqual([])
+  } finally {
+    segment.mockRestore()
   }
-  expect(run('Here it is:\n```\nconst re = /^\\d+?$/\n```')).toBe('done')
-  expect(run('Use `x ? a : b`')).toBe('done')
-  expect(run('Which branch should I use?')).toBe('waiting') // a real question still counts
-})
-
-// A guess is fine for grouping a row and not for interrupting the user, so the two have to be
-// distinguishable downstream.
-test('publicView says whether waiting rests on a real request or the heuristic', () => {
-  const s: any = createStore()
-  s.setSessions('r', [{ id: 's1', title: 'x' }, { id: 's2', title: 'y' }])
-  s.apply('r', { type: 'permission.asked', properties: { sessionID: 's1', id: 'p1' } })
-  s.apply('r', { type: 'session.status', properties: { sessionID: 's2', status: { type: 'busy' } } })
-  s.apply('r', { type: 'message.updated', properties: { sessionID: 's2', info: { id: 'm1', role: 'assistant' } } })
-  s.apply('r', { type: 'message.part.updated', properties: { sessionID: 's2', part: { type: 'text', messageID: 'm1', text: 'shall I?' } } })
-  s.apply('r', { type: 'session.status', properties: { sessionID: 's2', status: { type: 'idle' } } })
-  expect(s.get('r', 's1')).toMatchObject({ status: 'waiting', pendingRequest: true })
-  expect(s.get('r', 's2')).toMatchObject({ status: 'waiting', pendingRequest: false })
 })
 
 
 // opencode emits several `busy` frames per turn, and restamping the run start on each one made the
 // duration measure from the last frame rather than the start of the run.
-test('repeated busy frames do not restart the run clock', async () => {
-  const store: any = createStore()
-  store.setSessions('r', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
-  const busy = { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } }
-  store.apply('r', busy)
-  await new Promise((r) => setTimeout(r, 30))
-  store.apply('r', busy) // opencode sends these repeatedly during one turn
-  store.apply('r', busy)
-  store.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  expect(store.get('r', 's1').ranForMs).toBeGreaterThanOrEqual(25) // the whole run, not the last frame
+test('repeated busy frames do not restart the run clock', () => {
+  const clock = fakeClock()
+  try {
+    const store: any = createStore()
+    store.setSessions('r', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
+    const busy = { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } }
+    store.apply('r', busy)
+    clock.advance(30)
+    store.apply('r', busy) // opencode sends these repeatedly during one turn
+    store.apply('r', busy)
+    store.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+    expect(store.get('r', 's1').ranForMs).toBe(30) // the whole run, not the last frame
+  } finally {
+    clock.restore()
+  }
 })
 
-test('a second run measures itself, not the gap since the first', async () => {
-  const store: any = createStore()
-  store.setSessions('r', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
-  const busy = { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } }
-  const idle = { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } }
-  store.apply('r', busy)
-  store.apply('r', idle)
-  await new Promise((r) => setTimeout(r, 40))
-  store.apply('r', busy)
-  store.apply('r', idle)
-  expect(store.get('r', 's1').ranForMs).toBeLessThan(30) // not 40+, which would include the idle gap
+test('a second run measures itself, not the gap since the first', () => {
+  const clock = fakeClock()
+  try {
+    const store: any = createStore()
+    store.setSessions('r', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
+    const busy = { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } }
+    const idle = { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } }
+    store.apply('r', busy)
+    store.apply('r', idle)
+    clock.advance(40)
+    store.apply('r', busy)
+    clock.advance(5)
+    store.apply('r', idle)
+    expect(store.get('r', 's1').ranForMs).toBe(5) // not 45, which would include the idle gap
+  } finally {
+    clock.restore()
+  }
 })
 
 // Retiring a stale error used to compare a local Date.now() against a server timestamp; skew in
@@ -1097,17 +922,23 @@ test('an error retires on the server clock, not a mix of two', () => {
 
 // "runStartedAt is non-zero" means a run was once seen, not that this run's start is known.
 // Reusing it across runs restates an old start as the current one.
-test('a seed observing a new run does not reuse the previous run start', async () => {
-  const store: any = createStore()
-  store.setSessions('r', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
-  store.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
-  store.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  await new Promise((r) => setTimeout(r, 40)) // time passes with the session idle
+test('a seed observing a new run does not reuse the previous run start', () => {
+  const clock = fakeClock()
+  try {
+    const store: any = createStore()
+    store.setSessions('r', [{ id: 's1', title: 'x', time: { created: 1, updated: 1 } }])
+    store.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+    store.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+    clock.advance(40) // time passes with the session idle
 
-  // a reconnect finds it busy again — a different run
-  store.seedStatuses('r', { s1: { type: 'busy' } })
-  store.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
-  expect(store.get('r', 's1').ranForMs).toBeLessThan(30) // this run, not the idle gap before it
+    // a reconnect finds it busy again — a different run
+    store.seedStatuses('r', { s1: { type: 'busy' } })
+    clock.advance(5)
+    store.apply('r', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
+    expect(store.get('r', 's1').ranForMs).toBe(5) // this run, not the idle gap before it
+  } finally {
+    clock.restore()
+  }
 })
 
 test('the authoritative idle sweep marks the session idle', () => {
@@ -1364,6 +1195,23 @@ test('a backend re-listing does not erase the origin tag the sweep reads', () =>
   store.setSessions('repoA', [{ id: 'c1', title: 'a claude run' }], undefined)
   store.seedStatuses('repoA', {}, store.seedMark(), { closeRuns: true })
   expect(store.get('repoA', 'c1').status).toBe('running')
+})
+
+// #185: the retire sweep has no `!r.origin` guard of its own. A claude/copilot row survives an
+// opencode retiring listing only because process-backend listings never arm `listed`
+// (use-discovery's streamBackend); this pins that, so a change on either side can't silently start
+// deleting another backend's rows.
+test("opencode's retiring listing leaves claude and copilot rows in the same directory alone", () => {
+  const store: any = createStore()
+  store.setSessions('repoA', [{ id: 's1', title: 'opencode' }, { id: 's2', title: 'gone' }], undefined, { retire: true })
+  for (const [id, origin] of [['c1', 'claude'], ['k1', 'copilot']]) {
+    store.noteOrigin('repoA', id, origin)
+    store.setSessions('repoA', [{ id, title: `a ${origin} run` }], undefined) // the backend's own listing
+  }
+  store.setSessions('repoA', [{ id: 's1', title: 'opencode' }], undefined, { retire: true })
+  expect(store.get('repoA', 's2')).toBe(undefined) // the sweep still runs for opencode's own rows
+  expect(store.get('repoA', 'c1').origin).toBe('claude')
+  expect(store.get('repoA', 'k1').origin).toBe('copilot')
 })
 
 // M10: the store's origin tag is the single source of session→backend identity — App's

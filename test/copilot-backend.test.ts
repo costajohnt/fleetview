@@ -1,4 +1,5 @@
 import { test, expect, vi } from 'vitest'
+import { waitForExpect } from './helpers.ts'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -258,7 +259,7 @@ test('events reports a running session as working, from the lock alone', async (
   writeSession(stateDir, 'busy', '/repo/alpha', { pid: 12, events: SAID('halfway there') })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent).toHaveBeenCalledWith('/repo/alpha', expect.objectContaining({ type: 'copilot.session', sessionId: 'busy', status: 'working', lastOutput: 'halfway there' }))
@@ -271,10 +272,10 @@ test('events picks up appended lines without re-reading the log', async () => {
   const dir = writeSession(stateDir, 'growing', '/repo/alpha', { pid: 12, events: SAID('starting') })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
   appendFileSync(join(dir, 'events.jsonl'), SAID('all green') + RESULT('growing'))
   rmSync(join(dir, 'inuse.12.lock')) // the process exited and took its lock with it
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(2))
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[1][1]).toMatchObject({ status: 'completed', lastOutput: 'all green' })
@@ -289,12 +290,12 @@ test('a transcript replaced by a LARGER rename-over is re-folded from the start,
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
   try {
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     // Padded so the replacement is comfortably larger than what it replaces.
     writeFileSync(join(dir, 'events.jsonl.new'), SAID(`second answer ${'x'.repeat(500)}`) + RESULT('swapped'))
     renameSync(join(dir, 'events.jsonl.new'), join(dir, 'events.jsonl'))
     rmSync(join(dir, 'inuse.12.lock')) // the process exited and took its lock with it
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(2))
   } finally {
     sub.stop()
     await sub.done
@@ -309,7 +310,7 @@ test('events stay quiet while nothing about a session changes', async () => {
   writeSession(stateDir, 'settled', '/repo/alpha', { events: SAID('done') + RESULT('settled') })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
   await new Promise((r) => setTimeout(r, 30)) // several poll intervals
   sub.stop()
   await sub.done
@@ -323,7 +324,7 @@ test('a session whose process vanished without a result is failed, not completed
   writeSession(stateDir, 'killed', '/repo/alpha', { events: SAID('was working on it') })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ status: 'failed', lastOutput: 'was working on it' })
@@ -339,7 +340,7 @@ test("events prefer fleetview's own log for a run this process started", async (
   writeFileSync(join(logDir, 'session-1.jsonl'), SAID('from fleetview') + RESULT('session-1'))
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ lastOutput: 'from fleetview' })
@@ -356,7 +357,7 @@ test('abort does not repoint events at the transcript for a run this process sta
   await backend.abort('session-1', '/repo/alpha')
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ lastOutput: 'from fleetview stderr' })
@@ -379,7 +380,7 @@ test('a stale capture from a previous fleetview run does not pin a discovered se
   writeFileSync(join(logDir, 'resumed.jsonl'), SAID('stale answer') + RESULT('resumed'))
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ lastOutput: 'live answer' })
@@ -393,7 +394,7 @@ test('a session fleetview just dispatched is visible before copilot has written 
   await backend.dispatch({ prompt: 'go', directory: '/repo/alpha' })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ sessionId: 'session-1', status: 'working' })
@@ -413,7 +414,7 @@ test('a pending session whose process is gone reads as failed, and one still ali
   await dead.backend.dispatch({ prompt: 'go', directory: '/repo/alpha' })
   const deadEvents = vi.fn()
   const deadSub = dead.backend.events({ directory: '/repo/alpha' }, { onEvent: deadEvents })
-  await vi.waitFor(() => expect(deadEvents).toHaveBeenCalled())
+  await waitForExpect(() => expect(deadEvents).toHaveBeenCalled())
   deadSub.stop()
   await deadSub.done
   expect(deadEvents.mock.calls[0][1]).toMatchObject({ sessionId: 'session-1', status: 'failed' })
@@ -429,7 +430,7 @@ test('a pending session whose process is gone reads as failed, and one still ali
   await live.backend.dispatch({ prompt: 'go', directory: '/repo/alpha' })
   const liveEvents = vi.fn()
   const liveSub = live.backend.events({ directory: '/repo/alpha' }, { onEvent: liveEvents })
-  await vi.waitFor(() => expect(liveEvents).toHaveBeenCalled())
+  await waitForExpect(() => expect(liveEvents).toHaveBeenCalled())
   liveSub.stop()
   await liveSub.done
   expect(liveEvents.mock.calls[0][1]).toMatchObject({ sessionId: 'session-1', status: 'working' })
@@ -441,7 +442,7 @@ test('a dispatch that could not spawn is reported as failed rather than staying 
   child.fail(new Error('spawn copilot ENOENT'))
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ sessionId: 'session-1', status: 'failed' })
@@ -466,7 +467,7 @@ test('a run that has reported its result is not held at working by a lingering l
   writeSession(stateDir, 'exiting', '/repo/alpha', { pid: 12, events: SAID('all done') + RESULT('exiting') })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ status: 'completed' })
@@ -480,7 +481,7 @@ test('events announce online once and never offline', async () => {
   const onOnline = vi.fn()
   const onOffline = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent: vi.fn(), onOnline, onOffline })
-  await vi.waitFor(() => expect(onOnline).toHaveBeenCalledTimes(1))
+  await waitForExpect(() => expect(onOnline).toHaveBeenCalledTimes(1))
   await new Promise((r) => setTimeout(r, 30))
   sub.stop()
   await sub.done
@@ -505,7 +506,7 @@ test('a stale lock from a crashed process reads as failed, not working', async (
   writeSession(stateDir, 'crashed', '/repo/alpha', { pid: 99, events: SAID('was working') })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ sessionId: 'crashed', status: 'failed' })
@@ -520,7 +521,7 @@ test('a lock whose pid answers EPERM still counts as running', async () => {
   writeSession(stateDir, 'shared', '/repo/alpha', { pid: 99, events: SAID('still going') })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
-  await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+  await waitForExpect(() => expect(onEvent).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(onEvent.mock.calls[0][1]).toMatchObject({ sessionId: 'shared', status: 'working' })
@@ -552,7 +553,7 @@ test('a multi-byte character split across two ticks decodes intact', async () =>
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
   await new Promise((r) => setTimeout(r, 20)) // let a tick read the torn half
   appendFileSync(join(dir, 'events.jsonl'), line.subarray(cut))
-  await vi.waitFor(() => expect(onEvent.mock.calls.at(-1)?.[1]).toMatchObject({ lastOutput: 'done — verified' }))
+  await waitForExpect(() => expect(onEvent.mock.calls.at(-1)?.[1]).toMatchObject({ lastOutput: 'done — verified' }))
   sub.stop()
   await sub.done
 })
@@ -592,23 +593,27 @@ test('a pre-existing capture is re-tightened to 0600 on the next run', async () 
 // behavioral: the transcript keeps its inode across the rename, so no reset fires, and only a
 // dropped tail (fresh fold, fresh emitted-signature) explains the event re-emitting unchanged.
 test('a tail whose session vanished is pruned, so a returning session re-folds and re-emits from scratch', async () => {
+  // #185: the poll interval is faked, so "ticks with the session invisible" is a count of polls
+  // that definitely ran rather than a 50ms window a loaded runner can fit zero polls into.
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
   const { backend, stateDir } = harness()
   const dir = writeSession(stateDir, 'wanderer', '/repo/alpha', { pid: 12, events: SAID('halfway there') })
   const onEvent = vi.fn()
   const sub = backend.events({ directory: '/repo/alpha' }, { onEvent })
   try {
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(1))
     // Hide the workspace.yaml, as deletion of the session would: a dir without one is skipped as
     // mid-creation, so the session drops out of visible() and its tail must be dropped with it.
     // events.jsonl itself never moves, so its inode and size are unchanged throughout — a surviving
     // tail would see no reset, no new bytes, an unchanged emitted-signature, and never emit again.
     renameSync(join(dir, 'workspace.yaml'), join(dir, 'workspace.yaml.hidden'))
-    await new Promise((r) => setTimeout(r, 50)) // several ticks with the session invisible
+    vi.advanceTimersByTime(25) // five polls (pollMs 5) with the session invisible
     renameSync(join(dir, 'workspace.yaml.hidden'), join(dir, 'workspace.yaml'))
-    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2))
+    await waitForExpect(() => expect(onEvent).toHaveBeenCalledTimes(2))
     expect(onEvent.mock.calls[1][1]).toMatchObject({ sessionId: 'wanderer', status: 'working', lastOutput: 'halfway there' })
   } finally {
     sub.stop()
     await sub.done
+    vi.useRealTimers()
   }
 })

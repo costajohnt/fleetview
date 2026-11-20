@@ -1,4 +1,4 @@
-import { test, expect } from 'vitest'
+import { test, expect, vi } from 'vitest'
 import { mkdtempSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,9 +37,14 @@ test('a stale lock is broken and leaves no lock or aside file', () => {
   writeFileSync(`${file}.lock`, '')
   const old = (Date.now() - 60_000) / 1000
   utimesSync(`${file}.lock`, old, old)
-  const started = Date.now()
-  expect(withRosterLock(file, () => 'ran')).toBe('ran')
-  expect(Date.now() - started).toBeLessThan(1000) // broken on sight, not waited out
+  // #185: broken on sight, not waited out — pinned as "never slept" rather than a wall-clock bound.
+  const sleep = vi.spyOn(Atomics, 'wait')
+  try {
+    expect(withRosterLock(file, () => 'ran')).toBe('ran')
+    expect(sleep).not.toHaveBeenCalled()
+  } finally {
+    sleep.mockRestore()
+  }
   expect(readdirSync(join(file, '..')).filter((f) => f.includes('.lock'))).toEqual([])
   expect(loadRoster(file).sessions).toEqual([])
 })

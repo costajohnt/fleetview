@@ -1,9 +1,10 @@
 import { test, expect } from 'vitest'
-import { mkdtempSync, writeFileSync, readdirSync, mkdirSync, rmdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readdirSync, mkdirSync, rmdirSync, existsSync, rmSync, utimesSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { loadRoster, saveRoster, hasSession, makePersistRoster } from '../src/roster-store.ts'
+import { waitFor } from './helpers.ts'
 
 const tmpFile = () => join(mkdtempSync(join(tmpdir(), 'fleetview-roster-')), 'roster.json')
 
@@ -207,32 +208,70 @@ test('makePersistRoster retries a removal whose save failed instead of resurrect
 // before either saves each write back a merge missing the other's append. The lockfile serialises
 // the read-merge-write across processes. Driven through real child processes because a single JS
 // thread runs each sync persist to completion — the race only exists between processes.
-test('#106: concurrent persists from separate processes all survive the merge', async () => {
-  const file = tmpFile()
-  saveRoster(file, rosterOf(member('seed')))
-  const store = resolve(import.meta.dirname, '../src/roster-store.ts')
-  const worker = join(tmpFile(), '..', 'append.mjs')
+// #185: start-up jitter alone serialised the workers, so this passed with the lock removed. Each
+// worker now loads, says it is ready, and blocks on a go file, so all eight persist at once.
+const STORE = resolve(import.meta.dirname, '../src/roster-store.ts')
+const appendWorker = (dir: string) => {
+  const worker = join(dir, 'append.mjs')
   writeFileSync(
     worker,
-    `import { loadRoster, makePersistRoster } from ${JSON.stringify(store)}
-const [file, id] = process.argv.slice(2)
+    `import { existsSync, writeFileSync } from 'node:fs'
+import { loadRoster, makePersistRoster } from ${JSON.stringify(STORE)}
+const [file, id, ready, go] = process.argv.slice(2)
 const roster = loadRoster(file)
-makePersistRoster({ roster, file })({ ...roster, sessions: [...roster.sessions, { worktree: '/x', id, addedAt: 1 }] })
+const persist = makePersistRoster({ roster, file })
+writeFileSync(ready, '')
+const cell = new Int32Array(new SharedArrayBuffer(4))
+while (go && !existsSync(go)) Atomics.wait(cell, 0, 0, 1)
+persist({ ...roster, sessions: [...roster.sessions, { worktree: '/x', id, addedAt: 1 }] })
 `,
   )
+  return worker
+}
+const runWorker = (worker: string, args: string[]) => {
+  const c = spawn(process.execPath, [worker, ...args], { stdio: 'ignore' })
+  const exited = new Promise<void>((res, rej) => {
+    c.on('exit', (code) => (code === 0 ? res() : rej(new Error(`worker ${args[1]} exited ${code}`))))
+    c.on('error', rej)
+  })
+  return { child: c, exited }
+}
+
+test('#106: concurrent persists from separate processes all survive the merge', async () => {
+  const file = tmpFile()
+  const dir = join(file, '..')
+  saveRoster(file, rosterOf(member('seed')))
+  const worker = appendWorker(dir)
+  const go = join(dir, 'go')
   const ids = Array.from({ length: 8 }, (_, i) => `p${i}`)
-  await Promise.all(
-    ids.map(
-      (id) =>
-        new Promise<void>((res, rej) => {
-          const c = spawn(process.execPath, [worker, file, id], { stdio: 'ignore' })
-          c.on('exit', (code) => (code === 0 ? res() : rej(new Error(`worker ${id} exited ${code}`))))
-          c.on('error', rej)
-        }),
-    ),
-  )
+  const runs = ids.map((id) => runWorker(worker, [file, id, join(dir, `ready-${id}`), go]))
+  await waitFor(() => ids.every((id) => existsSync(join(dir, `ready-${id}`))))
+  writeFileSync(go, '')
+  await Promise.all(runs.map((r) => r.exited))
   const got = loadRoster(file).sessions.map((s) => s.id).sort()
   expect(got).toEqual(['seed', ...ids].sort())
+})
+
+// #185: the wait path. A fresh lock is a live holder: the writer must block on it rather than
+// write unlocked, and finish once the holder lets go.
+test('#106: a persist waits out a live lock holder, then writes', async () => {
+  const file = tmpFile()
+  const dir = join(file, '..')
+  saveRoster(file, rosterOf(member('seed')))
+  writeFileSync(`${file}.lock`, '') // a live holder: fresh mtime, well inside STALE_LOCK_MS
+  const ready = join(dir, 'ready')
+  const run = runWorker(appendWorker(dir), [file, 'late', ready, ''])
+  let exited = false
+  run.exited.then(() => (exited = true), () => (exited = true))
+  await waitFor(() => existsSync(ready))
+  const now = Date.now() / 1000
+  utimesSync(`${file}.lock`, now, now) // however slow the worker was to start, the holder is still fresh
+  await new Promise((r) => setTimeout(r, 300)) // a window for an unlocked write to show itself
+  expect(exited).toBe(false)
+  expect(loadRoster(file).sessions.map((s) => s.id)).toEqual(['seed'])
+  rmSync(`${file}.lock`)
+  await run.exited
+  expect(loadRoster(file).sessions.map((s) => s.id)).toEqual(['seed', 'late'])
 })
 
 // A file corrupted mid-run must not take the running instance down on its next keystroke; writing
