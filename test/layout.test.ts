@@ -74,6 +74,11 @@ test('help fits the terminal it is given, and pages the rest', () => {
   expect(seen.size).toBe(new Set(all.map((l) => (l as any).heading ?? (l as any).keys)).size) // every row reachable
 })
 
+// #188: ^x^x on a header deletes the whole group; the in-app list has to say so, not only the guide.
+test('help warns that ^x^x on a group header deletes the whole group', () => {
+  expect(helpLines().some((l) => l.what !== undefined && /group header/.test(l.what) && /delete every session/.test(l.what))).toBe(true)
+})
+
 test('help paging clamps instead of running off the end', () => {
   const all = helpLines()
   expect(helpPage(all, 24, 999).page).toBe(helpPage(all, 24, 0).pages - 1)

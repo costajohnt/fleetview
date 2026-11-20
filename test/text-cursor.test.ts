@@ -1,9 +1,15 @@
-import { describe, test, expect } from 'vitest'
+import React from 'react'
+import { describe, test, expect, vi } from 'vitest'
+import { render } from 'ink-testing-library'
+import { RenameInput } from '../src/ui/rename-input.ts'
+import { tick, waitFor } from './helpers.ts'
 import {
   atEnd,
   backspaceAt,
   deleteForwardAt,
   insertAt,
+  killToStart,
+  killWordBack,
   motionOf,
   move,
   withCaret,
@@ -133,4 +139,28 @@ describe('motionOf', () => {
     expect(motionOf('', key({ ctrl: true }))).toBe(null)
     expect(motionOf('x', key({ meta: true }))).toBe(null)
   })
+})
+
+// #188: rename opens prefilled with the current title, so it needs the readline kills to clear it.
+test('killToStart and killWordBack delete back from the caret, keeping what follows it', () => {
+  expect(killToStart({ text: 'fix the tests', cursor: 7 })).toEqual({ text: ' tests', cursor: 0 })
+  expect(killWordBack(atEnd('fix the tests'))).toEqual({ text: 'fix the ', cursor: 8 })
+  expect(killWordBack({ text: 'fix the  tests', cursor: 9 })).toEqual({ text: 'fix tests', cursor: 4 })
+  expect(killWordBack({ text: 'abc', cursor: 0 })).toEqual({ text: 'abc', cursor: 0 })
+})
+
+test('the rename input clears the prefilled title on ^u and drops a word on ^w', async () => {
+  const onSubmit = vi.fn()
+  const { stdin, lastFrame, unmount } = render(React.createElement(RenameInput, { initial: 'old title', onSubmit, onCancel: vi.fn() }))
+  await tick()
+  stdin.write('\x17') // ^w
+  await waitFor(() => lastFrame()!.includes('Rename: old █'))
+  stdin.write('\x15') // ^u
+  await waitFor(() => lastFrame()!.includes('Rename: █'))
+  stdin.write('new')
+  await tick()
+  stdin.write('\r')
+  await waitFor(() => onSubmit.mock.calls.length > 0)
+  expect(onSubmit).toHaveBeenCalledWith('new')
+  unmount()
 })

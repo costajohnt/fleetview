@@ -20,6 +20,11 @@ const messageText = (m: OpencodeMessage) => messageBody(m)
 
 const ROLE_LABEL: Record<string, string> = { user: 'you:', assistant: 'opencode:' }
 
+const isAbort = (err: unknown) => {
+  const name = typeof err === 'object' && err !== null ? (err as { name?: unknown }).name : undefined
+  return name === 'MessageAbortedError' || name === 'aborted'
+}
+
 // Hard-wraps `text` to terminal rows: split on '\n', then chop each resulting line into
 // `columns`-wide chunks. Pure + exported so truncation math (F3) is unit-testable without ink.
 // Chunks by grapheme cluster (M5: shared with the snippet/roster truncation helper), not code
@@ -155,9 +160,13 @@ export function Peek({
       // and said nothing about the failure. Emitted whenever the error exists rather than only when
       // the body is empty, so a turn that said something before failing keeps both. errorLabel
       // stripControls it, like every other model-provided string this panel renders (M12).
-      const err = errorLabel(m?.info?.error)
+      // #188: a turn the user stopped carries an abort error (1.x MessageAbortedError, 2.x
+      // `aborted` via v1Error) that the roster already reads as `stopped`; peek says the same.
+      const stopped = isAbort(m?.info?.error)
+      const err = stopped ? null : errorLabel(m?.info?.error)
       const rows: PeekRow[] = [{ text: role ? ROLE_LABEL[role] ?? `${role}:` : 'message:', dim: true }]
-      if (body || !err) rows.push({ text: body })
+      if (body || !(err || stopped)) rows.push({ text: body })
+      if (stopped) rows.push({ text: 'stopped', dim: true })
       if (err) rows.push({ text: `error: ${err}`, color: theme.danger })
       return rows
     })

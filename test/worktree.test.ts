@@ -441,6 +441,29 @@ test('mergeBackCommand yields nothing when there is nothing to merge back', () =
   expect(mergeBackCommand('/x/repo', '/x/repo', 'main')).toBe(null)
 })
 
+// #188: opencode never commits, so `git merge <branch>` after a typical session brings nothing.
+test('mergeBackCommand offers the merge only when the branch has commits the parent lacks', () => {
+  const repo = makeRepo()
+  const wt = createLocalWorktree(repo.dir, 'merge back', dataRoot())
+  const branch = gitOut(wt, 'rev-parse', '--abbrev-ref', 'HEAD')
+  expect(mergeBackCommand(wt, repo.dir, branch)).toBe(null) // no changes at all
+  writeFileSync(join(wt, 'a.txt'), 'edited\n')
+  expect(mergeBackCommand(wt, repo.dir, branch)).toBe('nothing committed yet, only uncommitted changes')
+  execFileSync('git', ['-C', wt, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'work'])
+  expect(mergeBackCommand(wt, repo.dir, branch)).toBe(`git -C '${repo.dir}' merge '${branch}'`)
+})
+
+test('mergeBackCommand never offers a known no-op merge, and keeps the command when it cannot count', () => {
+  const zeroThenFail = ((_cmd: string, args: string[]) => {
+    if (args.includes('config')) return '' // #181's filter-driver lookup: no drivers
+    if (args.includes('rev-list')) return '0\n'
+    throw new Error('worktree gone')
+  }) as any
+  expect(mergeBackCommand('/wt/one', '/x/repo', 'b', zeroThenFail)).toBe(null)
+  const fail = (() => { throw new Error('no git') }) as any
+  expect(mergeBackCommand('/wt/one', '/x/repo', 'b', fail)).toBe("git -C '/x/repo' merge 'b'")
+})
+
 // --- M9: worktrees fleetview makes itself, for claude and copilot ---
 
 const dataRoot = () => {
