@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { GIT_SAFE_ARGS, gitSafeEnv } from '../src/git-safe.ts'
+import { GIT_SAFE_ARGS, gitSafeEnv, gitFilterOverrides } from '../src/git-safe.ts'
 
 // The denylist's safety proof ("neither key fires on status/rev-parse/rev-list") covers fleetview's
 // own git commands, not gh's unenumerable internal git subprocesses — so the gh path clears
@@ -51,4 +51,18 @@ test('gitSafeEnv appends after an existing value, preserving a space-containing 
     "'user.name=John Costa' 'core.fsmonitor=' 'core.hooksPath=/dev/null' 'core.pager=cat' 'credential.helper=' 'core.sshCommand='",
   )
   expect(env.PATH).toBe('/usr/bin') // the rest of the env passes through
+})
+
+// #181: the user's own global/system drivers (git-lfs) are kept; repository-scope ones are blanked.
+test('gitFilterOverrides blanks repository-scope drivers only, and fails closed on what it cannot override', () => {
+  const runWith = (out: string) => (() => out) as any
+  expect(gitFilterOverrides('/r', runWith('global\tfilter.lfs.process\nlocal\tfilter.x.clean\nworktree\tfilter.a b.smudge\n'))).toEqual([
+    '-c', 'filter.x.clean=', '-c', 'filter.x.smudge=', '-c', 'filter.x.process=', '-c', 'filter.x.required=false',
+    '-c', 'filter.a b.clean=', '-c', 'filter.a b.smudge=', '-c', 'filter.a b.process=', '-c', 'filter.a b.required=false',
+  ])
+  // git config exits 1 when nothing matches: no drivers, not an error.
+  expect(gitFilterOverrides('/r', (() => { throw Object.assign(new Error('x'), { status: 1 }) }) as any)).toEqual([])
+  expect(() => gitFilterOverrides('/r', (() => { throw Object.assign(new Error('x'), { status: 128 }) }) as any)).toThrow()
+  // `-c` splits at the first `=`, so this name could not be overridden.
+  expect(() => gitFilterOverrides('/r', runWith('local\tfilter.a=b.clean\n'))).toThrow()
 })

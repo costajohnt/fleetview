@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import {
@@ -277,6 +277,7 @@ test('worktreeSafety refuses when the unpushed count cannot be parsed', () => {
     if (args.includes('status')) return ''
     if (args.includes('rev-parse')) return 'origin/main'
     if (args.includes('rev-list')) return 'warning: refname is ambiguous'
+    if (args.includes('config')) return '' // no filter drivers configured
     throw new Error(`unexpected git ${args.join(' ')}`)
   }) as any
   expect(worktreeSafety('/wt', '/repo', run)).toEqual({ removable: false, dirty: false, unpushed: true, reason: 'could not count unpushed commits' })
@@ -320,6 +321,40 @@ test('a repo whose config and hooks try to run commands cannot run them through 
   expect(existsSync(marker)).toBe(false)
   // And the answer is still the right one — hardening must not cost the refusal rules their meaning.
   expect(safety).toMatchObject({ removable: true, dirty: false, unpushed: false })
+})
+
+// #181: a filter driver named by an in-tree `.gitattributes` and defined in the repository's config
+// runs on `status`, on the checkout `worktree add` does, and on the `status` `worktree remove` runs
+// on its target. The driver name is the attacker's, so each is found by reading config and blanked.
+test("a repo's own filter drivers never run through createLocalWorktree, worktreeSafety or removeLocalWorktree", () => {
+  const repo = makeRepo()
+  writeFileSync(join(repo.dir, '.gitattributes'), '*.txt filter=evil\n*.dat filter=proc\n')
+  writeFileSync(join(repo.dir, 'b.dat'), 'data\n')
+  repo.g('add', '-A')
+  repo.g('commit', '-qm', 'attributes')
+  const marker = join(repo.dir, 'PWNED')
+  repo.g('config', 'filter.evil.clean', `touch ${marker}; cat`)
+  repo.g('config', 'filter.evil.smudge', `touch ${marker}; cat`)
+  repo.g('config', 'filter.evil.required', 'true') // blanked without required=false, git would die instead
+  repo.g('config', 'filter.proc.process', `touch ${marker}`)
+  // A changed mtime makes `status` re-hash the file, which is what passes it through the clean filter.
+  const restat = (dir: string) => {
+    const later = new Date(Date.now() + 60_000)
+    for (const f of ['a.txt', 'b.dat']) utimesSync(join(dir, f), later, later)
+  }
+
+  const wt = createLocalWorktree(repo.dir, 'x', dataRoot()) // checkout: smudge and process
+  restat(wt)
+  expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: true, dirty: false, unpushed: false })
+  restat(wt)
+  removeLocalWorktree(wt, repo.dir)
+  expect(existsSync(wt)).toBe(false)
+  expect(existsSync(marker)).toBe(false)
+
+  // Control: the same repository through plain git does run the payload, so the test is armed.
+  restat(repo.dir)
+  execFileSync('git', ['-C', repo.dir, 'status', '--porcelain'], { stdio: 'ignore' })
+  expect(existsSync(marker)).toBe(true)
 })
 
 // --- #113.4: the merge-back command line ---

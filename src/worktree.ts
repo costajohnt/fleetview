@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { statSync, appendFileSync, mkdirSync, readdirSync } from 'node:fs'
 import { basename, join, sep } from 'node:path'
 import { homedir } from 'node:os'
-import { GIT_SAFE_ARGS } from './git-safe.ts'
+import { GIT_SAFE_ARGS, gitFilterOverrides } from './git-safe.ts'
 import { fleetviewDir } from './paths.ts'
 import type { Project } from './types.ts'
 
@@ -154,9 +154,14 @@ export function logNameCollision(entry: { prompt: string; name: string; existing
 // Every caller's `dir` is a project or sandbox path the unauthenticated opencode server named, which
 // makes its repository-local `.git/config` — and its `.git/hooks` — attacker-controlled. `status`
 // runs both a hostile `core.fsmonitor` and a `post-index-change` hook, so the same overrides
-// pull-requests.ts uses belong here too; see git-safe.ts.
-const git = (dir: string, args: string[], run = execFileSync) =>
-  run('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+// pull-requests.ts uses belong here too; see git-safe.ts. So do the filter-driver overrides (#181),
+// read from every directory whose config the command will load: `worktree remove` checks the target
+// with a `status` of its own, which also reads that worktree's own config.worktree.
+const git = (dir: string, args: string[], run = execFileSync, configDirs = [dir]) =>
+  run('git', [...GIT_SAFE_ARGS, ...configDirs.flatMap((d) => gitFilterOverrides(d, run)), '-C', dir, ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim()
 
 // Worktrees for the process-backed CLIs, made locally because there is no server to ask. Same shape
 // as opencode's: <data>/fleetview/worktree/<repo>-<hash>/<name> on a branch `fleetview/<name>`, where
@@ -191,7 +196,7 @@ export function createLocalWorktree(repo: string, prompt: string, root = localWo
 // is gone and the branch, which createLocalWorktree steers around, still holds the commits.
 export function removeLocalWorktree(dir: string, repo: string, run = execFileSync) {
   const branch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'], run)
-  git(repo, ['worktree', 'remove', dir], run)
+  git(repo, ['worktree', 'remove', dir], run, [repo, dir])
   if (!branch.startsWith(LOCAL_BRANCH_PREFIX)) return
   try {
     git(repo, ['branch', '-d', branch], run)
