@@ -307,7 +307,7 @@ test('the API probe carries no credential, and only 2.x bodies read as 2.x', asy
   }
   const base = () => `http://127.0.0.1:${port++}`
   const { opencodeApi } = await import('../src/backends/opencode/client.ts')
-  process.env.OPENCODE_SERVER_PASSWORD = 'secret'
+  vi.stubEnv('OPENCODE_SERVER_PASSWORD', 'secret')
   try {
     expect(await opencodeApi(base(), answer({ _tag: 'UnauthorizedError', message: 'Authentication required' }, 401) as any)).toBe(2)
     expect(await opencodeApi(base(), answer({ version: '2.3.2', pid: 1 }, 500) as any)).toBe(2) // boot failed is still 2.x
@@ -318,7 +318,7 @@ test('the API probe carries no credential, and only 2.x bodies read as 2.x', asy
     await expect(opencodeApi(down, (() => Promise.reject(new Error('ECONNREFUSED'))) as any)).rejects.toThrow('ECONNREFUSED')
     expect(await opencodeApi(down, answer({ _tag: 'UnauthorizedError' }, 401) as any)).toBe(2)
   } finally {
-    delete process.env.OPENCODE_SERVER_PASSWORD
+    vi.unstubAllEnvs()
   }
   expect(seen.every((h) => !h?.authorization)).toBe(true)
 })

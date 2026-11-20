@@ -1,5 +1,8 @@
-import { test, expect, vi } from 'vitest'
-import { OpencodeClient } from '../src/backends/opencode/client.ts'
+import { beforeEach, test, expect, vi } from 'vitest'
+import { OpencodeClient, resetOpencodeApiMemo } from '../src/backends/opencode/client.ts'
+
+// Every test here shares a base URL, and the API-version answer is memoised per URL module-wide.
+beforeEach(resetOpencodeApiMemo)
 
 const ok = (body: any) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
 
