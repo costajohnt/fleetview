@@ -351,8 +351,9 @@ test("a repo's own filter drivers never run through createLocalWorktree, worktre
   expect(existsSync(wt)).toBe(false)
   expect(existsSync(marker)).toBe(false)
 
-  // Control: the same repository through plain git does run the payload, so the test is armed. Only
-  // a.txt: the `proc` payload is not a real filter-process speaker, so git dies when it reaches b.dat.
+  // Control: the same repository through plain git does run the payload, so the test is armed. The
+  // `proc` payload is not a real filter-process speaker and git dies on reaching it, so it goes first.
+  repo.g('config', '--unset', 'filter.proc.process')
   restat(repo.dir, ['a.txt'])
   execFileSync('git', ['-C', repo.dir, 'status', '--porcelain'], { stdio: 'ignore' })
   expect(existsSync(marker)).toBe(true)
