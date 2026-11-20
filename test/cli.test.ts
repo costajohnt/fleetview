@@ -424,7 +424,8 @@ test('a poll window that ends unhealthy after the password was presented rotates
   const env: NodeJS.ProcessEnv = {}
   const deps = {
     isServerHealthy: () => Promise.resolve(false),
-    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'unconfirmed' : 'healthy'),
+    // nothing on 4900 until the spawn; then something there keeps answering unconfirmed
+    probeServer: (s: any) => Promise.resolve(spawned.length === 0 ? 'unreachable' : s.port === 4900 ? 'unconfirmed' : 'healthy'),
     identifyServer: () => ({ ok: true, command: 'opencode serve' }), // the child stays alive
     spawnServer: (s: any) => (spawned.push(s), 700 + spawned.length),
     saveServer: (_file: any, s: any) => saved.push(s),
@@ -447,7 +448,8 @@ test('an unconfirmed poll answer while the spawned child is gone abandons the ca
   const env: NodeJS.ProcessEnv = {}
   const deps = {
     isServerHealthy: () => Promise.resolve(false),
-    probeServer: (s: any) => (s.port === 4900 ? (polls++, Promise.resolve('unconfirmed')) : Promise.resolve('healthy')),
+    probeServer: (s: any) =>
+      spawned.length === 0 ? Promise.resolve('unreachable') : s.port === 4900 ? (polls++, Promise.resolve('unconfirmed')) : Promise.resolve('healthy'),
     identifyServer: () => ({ ok: false, reason: 'no such process' }),
     spawnServer: (s: any) => (spawned.push(s), 700 + spawned.length),
     saveServer: () => {},
@@ -458,7 +460,7 @@ test('an unconfirmed poll answer while the spawned child is gone abandons the ca
     env,
   }
   await makeEnsureServer(deps as any)(server)
-  expect(polls).toBe(2) // the adoption probe, then one poll
+  expect(polls).toBe(1) // one poll, not a whole window
   expect(spawned[1].password).not.toBe(spawned[0].password)
 })
 
