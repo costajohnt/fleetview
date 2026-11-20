@@ -14,6 +14,7 @@ import { asString, isRecord } from '../../types.ts'
 import { opencodeRequest } from './request.ts'
 import { stateDir } from '../../paths.ts'
 import { GIT_SAFE_ARGS } from '../../git-safe.ts'
+import { deleteMergedBranch } from '../../worktree.ts'
 import type { AgentInfo, CommandInfo, ModelSelection, ProvidersResponse } from './client.ts'
 
 type Auth = () => string | undefined
@@ -163,6 +164,28 @@ export const serverHome = () => {
 // stderr is kept so a failure says why.
 const git = (dir: string, args: string[]) =>
   execFileSync('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }).trim()
+
+// #224: the `opencode/` branch a worktree of `repo` is on, read from the repository's own worktree
+// list so a branch is only ever named for a worktree that belongs to it. None on any failure.
+const real = (p: string) => {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+function worktreeBranch(repo: string, dir: string) {
+  try {
+    const block = git(repo, ['worktree', 'list', '--porcelain'])
+      .split('\n\n')
+      .map((b) => b.split('\n'))
+      .find((lines) => lines[0]?.startsWith('worktree ') && real(lines[0].slice('worktree '.length)) === real(dir))
+    const ref = block?.find((l) => l.startsWith('branch refs/heads/opencode/'))
+    return ref?.slice('branch refs/heads/'.length)
+  } catch {
+    return undefined
+  }
+}
 
 export class OpencodeV2Client {
   baseUrl: string
@@ -393,9 +416,14 @@ export class OpencodeV2Client {
   }
 
   // `force` matches 1.x, which removed without checks of its own: callers run worktreeSafety first.
+  // 1.x's removal also deleted the worktree's branch and 2.x's does not (#224), so the `opencode/`
+  // branch is read before and deleted after a removal that succeeded, with `-d` only.
   async removeWorktree(worktreeDirectory: string, directory?: string) {
     const projectID = await this.#projectID(directory)
-    return this.req('DELETE', '/api/worktree', { projectID, directory: worktreeDirectory, force: true }, directory)
+    const branch = directory ? worktreeBranch(directory, worktreeDirectory) : undefined
+    const removed = await this.req('DELETE', '/api/worktree', { projectID, directory: worktreeDirectory, force: true }, directory)
+    if (directory && branch) deleteMergedBranch(directory, branch)
+    return removed
   }
 
   // 2.x's `name` is a display name ("Build"); the id is what a session runs as and what `@build`
