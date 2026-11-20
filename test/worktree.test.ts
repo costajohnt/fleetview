@@ -357,6 +357,27 @@ test("a repo's own filter drivers never run through createLocalWorktree, worktre
   expect(existsSync(marker)).toBe(true)
 })
 
+// A driver behind a conditional include is invisible from the parent repository and applies only
+// inside the new worktree, so the filter list for the checkout has to be read from there (#181).
+test('a filter driver gated by includeIf onbranch or gitdir never runs through createLocalWorktree', () => {
+  const repo = makeRepo()
+  writeFileSync(join(repo.dir, '.gitattributes'), '*.txt filter=gated\n')
+  repo.g('add', '-A')
+  repo.g('commit', '-qm', 'attributes')
+  const marker = join(repo.dir, 'PWNED')
+  const inc = join(repo.dir, '.git', 'evil.inc')
+  writeFileSync(inc, `[filter "gated"]\n\tsmudge = touch ${marker}; cat\n`)
+  repo.g('config', 'includeIf.onbranch:fleetview/**.path', inc)
+  repo.g('config', 'includeIf.gitdir:**/worktrees/**.path', inc)
+  const wt = createLocalWorktree(repo.dir, 'x', dataRoot())
+  expect(readFileSync(join(wt, 'a.txt'), 'utf8')).toBe('hello\n') // still checked out
+  expect(existsSync(marker)).toBe(false)
+  // Control: a plain checkout on a fleetview/ branch runs it.
+  rmSync(join(wt, 'a.txt'))
+  execFileSync('git', ['-C', wt, 'checkout', '--', 'a.txt'], { stdio: 'ignore' })
+  expect(existsSync(marker)).toBe(true)
+})
+
 // The user's global config is not attacker-controlled, but a global `filter.lfs` runs git-lfs, which
 // reads repository-local config that can name programs. So global drivers are blanked too.
 test('a filter driver from the global config never runs through worktreeSafety or removeLocalWorktree', () => {

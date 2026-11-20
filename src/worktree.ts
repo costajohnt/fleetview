@@ -191,7 +191,14 @@ export function createLocalWorktree(repo: string, prompt: string, root = localWo
   const name = worktreeName(prompt, existing)
   if (name !== worktreeName(prompt)) logNameCollision({ prompt, name, existing })
   const dir = join(home, name)
-  git(repo, ['worktree', 'add', '-b', `${LOCAL_BRANCH_PREFIX}${name}`, dir, 'HEAD'], run)
+  // Checked out in a second step, from inside the new worktree: config gated by
+  // `includeIf "onbranch:fleetview/**"` or `"gitdir:**/worktrees/**"` applies only there, so a filter
+  // list read from `repo` would miss a driver the checkout then runs. `--no-recurse-submodules`
+  // because a hostile `submodule.recurse` would otherwise take reset into repositories never read.
+  // ponytail: a failed reset leaves the half-made worktree behind; the caller falls back, and the
+  // next dispatch steers around the taken name.
+  git(repo, ['worktree', 'add', '--no-checkout', '-b', `${LOCAL_BRANCH_PREFIX}${name}`, dir, 'HEAD'], run)
+  git(dir, ['reset', '--hard', '-q', '--no-recurse-submodules'], run, [repo, dir])
   return dir
 }
 

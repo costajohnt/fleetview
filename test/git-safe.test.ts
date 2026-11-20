@@ -57,13 +57,16 @@ test('gitSafeEnv appends after an existing value, preserving a space-containing 
 // git-lfs, which reads repository-local config that can name programs.
 test('gitFilterOverrides blanks every configured driver, and fails closed on what it cannot override', () => {
   const runWith = (out: string) => (() => out) as any
-  expect(gitFilterOverrides('/r', runWith('filter.lfs.process\nfilter.lfs.clean\nfilter.a b.smudge\nfilter.novar\n'))).toEqual([
+  expect(gitFilterOverrides('/r', runWith('filter.lfs.process\nfilter.lfs.clean\nfilter.a b.smudge\nfilter.novar\nfilter..clean\n'))).toEqual([
     '-c', 'filter.lfs.clean=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false',
     '-c', 'filter.a b.clean=', '-c', 'filter.a b.smudge=', '-c', 'filter.a b.process=', '-c', 'filter.a b.required=false',
+    // `[filter ""]` is a real driver, selected by a bare `filter=`
+    '-c', 'filter..clean=', '-c', 'filter..smudge=', '-c', 'filter..process=', '-c', 'filter..required=false',
   ])
   // git config exits 1 when nothing matches: no drivers, not an error.
   expect(gitFilterOverrides('/r', (() => { throw Object.assign(new Error('x'), { status: 1 }) }) as any)).toEqual([])
   expect(() => gitFilterOverrides('/r', (() => { throw Object.assign(new Error('x'), { status: 128 }) }) as any)).toThrow()
+  expect(() => gitFilterOverrides('/r', (() => { throw Object.assign(new Error('x'), { status: 1, stdout: 'filter.x.clean\n' }) }) as any)).toThrow()
   // `-c` splits at the first `=`, so this name could not be overridden.
   expect(() => gitFilterOverrides('/r', runWith('filter.a=b.clean\n'))).toThrow()
 })

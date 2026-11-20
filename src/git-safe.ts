@@ -50,12 +50,16 @@ export function gitFilterOverrides(dir: string, run = execFileSync) {
       stdio: ['ignore', 'pipe', 'ignore'],
     })
   } catch (err) {
-    if ((err as { status?: number }).status !== 1) throw err // 1 is "no filter keys", anything else is unknown
+    // 1 with nothing printed is "no filter keys"; anything else is unknown, so refuse.
+    const { status, stdout } = err as { status?: number; stdout?: string }
+    if (status !== 1 || stdout) throw err
   }
   const drivers = new Set<string>()
   for (const key of out.split('\n')) {
-    const driver = key.slice('filter.'.length, key.lastIndexOf('.'))
-    if (!driver) continue // `filter.<var>` with no subsection names no driver
+    const dot = key.lastIndexOf('.')
+    if (dot <= 'filter'.length) continue // blank line, or `filter.<var>` with no subsection: no driver
+    // An empty subsection (`[filter ""]`, listed as `filter..clean`) is a real driver `filter=` selects.
+    const driver = key.slice('filter.'.length, dot)
     // `-c` splits at the first `=`, so a driver named `a=b` cannot be overridden: refuse it outright.
     if (driver.includes('=')) throw new Error(`unoverridable git filter driver name: ${driver}`)
     drivers.add(driver)
