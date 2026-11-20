@@ -7,6 +7,7 @@
 // `opencode/<name>`, under ~/.local/share/opencode/worktree/<repo-hash>/<name>. What it does NOT do
 // is protect anything on the way out — DELETE removes a worktree holding uncommitted changes, and
 // its branch, without complaint (verified by losing a file to it). So the refusal rules live here.
+// 2.x's DELETE keeps the branch; fleetview deletes it (#224, deleteMergedBranch).
 //
 // claude and copilot have no server to ask, so for them fleetview makes the worktree itself
 // (createLocalWorktree below), laid out the same way.
