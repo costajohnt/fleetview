@@ -225,7 +225,7 @@ test('2.x translator: the branches no recording reaches without a model', () => 
   t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm', ordinal: 0, delta: 'Hel' } })
   expect(at('session.text.ended', { sessionID: 's', assistantMessageID: 'm', ordinal: 0, text: 'Hello' })).toEqual([{ type: 'message.part.updated', properties: { sessionID: 's', part: { type: 'text', text: 'Hello', messageID: 'm' } } }])
   // ended clears the accumulator: a later delta for the same part starts over
-  expect(t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm', ordinal: 0, delta: 'x' } })[0].properties.part.text).toBe('x')
+  expect(t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm', ordinal: 0, delta: 'x' } })[0]).toMatchObject({ properties: { part: { text: 'x' } } })
   expect(at('form.cancelled', { sessionID: 's', id: 'frm_1' })).toEqual([{ type: 'question.rejected', properties: { sessionID: 's', requestID: 'frm_1' } }])
   expect(at('session.deleted', { sessionID: 's' })).toEqual([{ type: 'session.deleted', properties: { info: { id: 's' } } }])
   expect(at('session.inbox.enqueued', { sessionID: 's' })).toEqual([{ type: 'message.updated', properties: { sessionID: 's', info: { role: 'user' } } }, { type: 'session.updated', properties: { info: { id: 's', time: { updated: 9 } } } }])
