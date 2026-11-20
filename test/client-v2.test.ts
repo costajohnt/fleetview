@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OpencodeClient } from '../src/backends/opencode/client.ts'
 import { serverHome, v1Messages, v1Question, v2Answer } from '../src/backends/opencode/client-v2.ts'
+import { messageBody } from '../src/session-store.ts'
 import { createV2Translator } from '../src/backends/opencode/event-v2.ts'
 import { probeServer } from '../src/backends/opencode/server-manager.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
@@ -219,11 +220,31 @@ test('messages become {info, parts}, oldest first, with 2.x errors as NamedError
   const rows = [
     { id: 'msg_1', type: 'user', text: 'do it' },
     { id: 'msg_2', type: 'assistant', content: [{ type: 'reasoning', text: 'hmm' }, { type: 'text', text: 'done' }], error: { type: 'APIError', message: 'overloaded' } },
-    { id: 'msg_3', type: 'shell' },
+    { id: 'msg_3', type: 'compaction' },
   ]
   expect(v1Messages(rows)).toEqual([
     { info: { id: 'msg_1', role: 'user' }, parts: [{ type: 'text', text: 'do it', messageID: 'msg_1' }] },
     { info: { id: 'msg_2', role: 'assistant', error: { name: 'APIError', data: { message: 'overloaded' } } }, parts: [{ type: 'text', text: 'done', messageID: 'msg_2' }] },
+  ])
+})
+
+// #223: a `!` job's output and a tool-only turn's result reach peek and `logs` through messageBody.
+// Shapes as opencode 2.3.2 stores them.
+test('2.x shell jobs and tool-only turns render their output', () => {
+  const rows = [
+    { id: 'msg_1', type: 'shell', command: 'sleep 4; echo shellhi', status: 'exited', output: { output: 'shellhi\n', cursor: 8, size: 8, truncated: false } },
+    { id: 'msg_2', type: 'shell', command: 'sleep 9', status: 'running' },
+    { id: 'msg_2b', type: 'shell', command: 'echo; false', status: 'exited', output: { output: '\n' } },
+    { id: 'msg_2c', type: 'shell', command: 'yes', status: 'exited', output: { output: 'y\n', truncated: true } },
+    { id: 'msg_3', type: 'assistant', content: [{ type: 'reasoning', text: 'ask' }, { type: 'tool', name: 'question', state: { status: 'completed', content: [{ type: 'text', text: 'User has answered your questions: "Which color?"="blue".' }] } }] },
+    { id: 'msg_4', type: 'assistant', content: [{ type: 'text', text: 'blue it is' }, { type: 'tool', name: 'read', state: { status: 'completed', content: [{ type: 'text', text: 'file contents' }] } }] },
+  ]
+  expect(v1Messages(rows).map((m) => [m.info?.role, messageBody(m)])).toEqual([
+    ['assistant', 'shellhi\n'],
+    ['assistant', '(exited, no output)'],
+    ['assistant', 'y\n\n(output truncated)'],
+    ['assistant', 'User has answered your questions: "Which color?"="blue".'],
+    ['assistant', 'blue it is'],
   ])
 })
 
