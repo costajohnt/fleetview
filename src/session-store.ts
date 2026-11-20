@@ -471,7 +471,7 @@ export function createStore() {
     // `seen` is the persisted seen.json watermark map (seen-store owns that shape); `list` is a
     // backend's session listing, already through its normaliser — opencode's rows arrive as they came
     // off GET /session, a process backend's as whatever backend-normalise made of them.
-    setSessions(projectKey: string, list: ListedSession[], seen: SeenMap | undefined, { retire = false }: { retire?: boolean } = {}) {
+    setSessions(projectKey: string, list: ListedSession[] & { truncated?: boolean }, seen: SeenMap | undefined, { retire = false }: { retire?: boolean } = {}) {
       for (const s of list) {
         // "Subagents and teammates a session spawns aren't listed as separate rows." opencode
         // models those as child sessions with a parentID, and GET /session returns them alongside
@@ -593,7 +593,9 @@ export function createStore() {
       //
       // After the upsert loop, so a payload that isn't a list throws above having deleted nothing.
       // An empty array is a real answer ("this project has no sessions"); `null` is not one.
-      if (retire) {
+      // A truncated listing (2.x stops paging at a cap) lacks older sessions that still exist, so it
+      // upserts but retires nothing.
+      if (retire && !list.truncated) {
         const listedIds = new Set(list.map((s) => s.id))
         for (const [k, r] of sessions) {
           if (r.projectKey === projectKey && r.listed && !listedIds.has(r.id)) sessions.delete(k)

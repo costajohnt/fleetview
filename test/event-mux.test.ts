@@ -270,3 +270,30 @@ test('2.x: stop() while the seed is being listed delivers nothing more', async (
   await conn.done
   expect(onEvent).not.toHaveBeenCalled()
 })
+
+// #186: an unanswered probe used to fall back to 1.x's /event, which a 2.x server answers 200 with
+// its web app, so the project flapped online and offline.
+test('an unanswered API probe backs off instead of trying the 1.x stream', async () => {
+  const paths: string[] = []
+  const fetchImpl = vi.fn((url: string) => {
+    const path = new URL(url).pathname
+    paths.push(path)
+    return path === '/api/info' ? Promise.reject(new Error('timeout')) : Promise.resolve({ ok: true, status: 200, body: (async function* () { yield new TextEncoder().encode('<html>') })() })
+  }) as any
+  const onOnline = vi.fn()
+  const onOffline = vi.fn()
+  await connectEvents({ host: '127.0.0.1', port: 4805, directory: '/fv/repo' }, { fetchImpl, onEvent: vi.fn(), onOnline, onOffline, reconnect: false }).done
+  expect(paths).toEqual(['/api/info'])
+  expect(onOnline).not.toHaveBeenCalled()
+  expect(onOffline).toHaveBeenCalledWith('/fv/repo')
+})
+
+// #186: a stream that reconnects mid-step never sees that step's session.step.started.
+test('2.x translator: text for an assistant message it never saw start announces the message first', () => {
+  const t = createV2Translator()
+  const delta = (d: string) => t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm', ordinal: 0, delta: d } })
+  expect(delta('Hel').map((e) => e.type)).toEqual(['message.updated', 'message.part.updated'])
+  expect(delta('lo').map((e) => e.type)).toEqual(['message.part.updated'])
+  expect(t({ type: 'session.step.started', created: 1, data: { sessionID: 's', assistantMessageID: 'm2' } }).map((e) => e.type)).toEqual(['message.updated', 'session.updated'])
+  expect(t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm2', ordinal: 0, delta: 'x' } }).map((e) => e.type)).toEqual(['message.part.updated'])
+})

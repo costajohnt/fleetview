@@ -56,7 +56,9 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
         const auth = authHeader()
         // 2.x has one server-wide stream in its own vocabulary; it is cut to this directory and
         // translated to 1.x's events here, so the store downstream never knows which it got.
-        const isV2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 // unanswered: the stream attempt below fails the same way and backs off
+        // An unanswered probe backs off like any failed connect. It used to fall back to 1.x's
+        // /event, which a 2.x server answers 200 with its web app: online, then offline, on a loop.
+        const isV2 = (await opencodeApi(base, fetchImpl)) === 2
         let v2: ((frame: unknown) => OpencodeEvent[]) | null = null
         const url = isV2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
         const res = await fetchImpl(url, { signal: ac.signal, headers: auth ? { authorization: auth } : undefined })
@@ -154,6 +156,14 @@ async function v2Filter(base: string, directory: string, fetchImpl: typeof fetch
 // Stateful only for streamed text: 2.x sends deltas, 1.x sent the part's whole text each time.
 export function createV2Translator() {
   const texts = new Map<string, string>()
+  // Assistant messages this translator has announced. A stream that reconnects mid-step never sees
+  // that step's session.step.started, and the store drops text for a message it doesn't know.
+  const announced = new Set<string>()
+  const announce = (sessionID: string, messageID: string | undefined): OpencodeEvent[] => {
+    if (!messageID || announced.has(messageID)) return []
+    announced.add(messageID)
+    return [{ type: 'message.updated', properties: { sessionID, info: { id: messageID, role: 'assistant' } } }]
+  }
   return (frame: unknown): OpencodeEvent[] => {
     if (!isRecord(frame) || !isRecord(frame.data)) return []
     const d = frame.data
@@ -174,7 +184,8 @@ export function createV2Translator() {
       case 'session.inbox.enqueued':
         return [{ type: 'message.updated', properties: { sessionID, info: { role: 'user' } } }, ...touched()]
       case 'session.step.started':
-        return [{ type: 'message.updated', properties: { sessionID, info: { id: messageID, role: 'assistant' } } }, ...touched()]
+        announced.delete(messageID ?? '')
+        return [...announce(sessionID, messageID), ...touched()]
       case 'session.step.ended':
       case 'session.step.failed':
         return touched()
@@ -184,7 +195,7 @@ export function createV2Translator() {
         const text = frame.type === 'session.text.ended' ? (asString(d.text) ?? '') : (texts.get(key) ?? '') + (asString(d.delta) ?? '')
         if (frame.type === 'session.text.ended') texts.delete(key)
         else texts.set(key, text)
-        return [{ type: 'message.part.updated', properties: { sessionID, part: { type: 'text', text, messageID } } }]
+        return [...announce(sessionID, messageID), { type: 'message.part.updated', properties: { sessionID, part: { type: 'text', text, messageID } } }]
       }
       // opencode 2.3.2 publishes no session.status (core/session/execution.ts sends only these
       // execution events, and opencode's own client derives busy/idle from them), so busy and idle
