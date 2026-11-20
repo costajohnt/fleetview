@@ -52,6 +52,22 @@ test('a 2.x server is detected and its session listing is mapped to 1.x rows, sc
   expect(calls.at(-1)!.url).toContain('/api/session?directory=%2Frepo')
 })
 
+// #186: the page cap is not the end of the list, so the listing says it was cut short.
+test('a listing that hits the page cap is marked truncated; one that ends is not', async () => {
+  let page = 0
+  const endless = vi.fn((url: string) => {
+    if (new URL(url).pathname === '/api/info') return json({ version: '2.3.2', pid: 1, urls: [], paths: { tmp: '/tmp' } })
+    page++
+    return json({ data: [{ id: `ses_${page}`, location: { directory: '/repo' }, time: {} }], cursor: { next: `c${page}` } })
+  })
+  const list = await new OpencodeClient(`http://127.0.0.1:${port++}`, endless as any).listSessions('/repo')
+  expect(page).toBe(20)
+  expect(list).toHaveLength(20)
+  expect((list as { truncated?: boolean }).truncated).toBe(true)
+  const ended = client({ 'GET /api/session': { data: [], cursor: {} } })
+  expect((await ended.c.listSessions('/repo') as { truncated?: boolean }).truncated).toBeUndefined()
+})
+
 test('an untitled 2.x session lists with an empty title, not undefined', async () => {
   const { c } = client({ 'GET /api/session': { data: [{ id: 'ses_1', location: { directory: '/repo' }, time: { created: 1, updated: 1 } }] } })
   expect((await c.listSessions('/repo'))[0].title).toBe('')
@@ -168,7 +184,14 @@ test('a form reads as a 1.x question, one question per field', () => {
 
 test('positional label answers become a keyed map of option values; an unknown label is a custom answer', () => {
   expect(v2Answer(form, [['Beta'], ['Ex', 'Why']])).toEqual({ q0: 'b', q1: ['x', 'y'] })
-  expect(v2Answer(form, [['something else'], []])).toEqual({ q0: 'something else', q1: [] })
+  // #186: a field nothing was picked for is left out, not sent as an empty answer
+  expect(v2Answer(form, [['something else'], []])).toEqual({ q0: 'something else' })
+  expect(v2Answer(form, [])).toEqual({})
+})
+
+test('a picked option sends its declared value even when that is not a string (#186; 2.3.2 declares strings, so defensive)', () => {
+  const typed = { fields: [{ key: 'n', type: 'string', options: [{ value: 7, label: 'Seven' }] }, { key: 'b', type: 'boolean', options: [{ value: true, label: 'Yes' }] }] }
+  expect(v2Answer(typed, [['Seven'], ['Yes']])).toEqual({ n: 7, b: true })
 })
 
 test('a question reply is routed through its session', async () => {

@@ -1238,6 +1238,15 @@ test('a session absent from a fresh listing is retired', () => {
   expect(Object.keys(store.snapshot())).toEqual(['r:s1']) // and it stops being persisted
 })
 
+// #186: 2.x stops paging at a cap, so a capped listing lacks older sessions that still exist.
+test('a truncated listing upserts but retires nothing', () => {
+  const store: any = createStore()
+  store.setSessions('r', [{ id: 's1', title: 'old but live' }, { id: 's2', title: 'new' }], undefined, { retire: true })
+  store.setSessions('r', Object.assign([{ id: 's2', title: 'renamed' }], { truncated: true }), undefined, { retire: true })
+  expect(store.get('r', 's1')).toBeDefined()
+  expect(store.get('r', 's2').title).toBe('renamed')
+})
+
 // The regression a blanket sweep would cause: `dispatch` calls setProvisionalTitle and then
 // relists, so the row the user created this instant is missing from a server listing that is even
 // slightly behind. Deleting it there would delete the session they are watching.
