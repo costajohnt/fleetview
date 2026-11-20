@@ -357,6 +357,50 @@ test("a repo's own filter drivers never run through createLocalWorktree, worktre
   expect(existsSync(marker)).toBe(true)
 })
 
+// The user's global config is not attacker-controlled, but a global `filter.lfs` runs git-lfs, which
+// reads repository-local config that can name programs. So global drivers are blanked too.
+test('a filter driver from the global config never runs through worktreeSafety or removeLocalWorktree', () => {
+  const repo = makeRepo()
+  writeFileSync(join(repo.dir, '.gitattributes'), '*.txt filter=lfsish\n')
+  repo.g('add', '-A')
+  repo.g('commit', '-qm', 'attributes')
+  const marker = join(repo.dir, 'PWNED')
+  const globalConfig = join(repo.dir, '..', `${basename(repo.dir)}.gitconfig`)
+  repos.push(globalConfig)
+  writeFileSync(globalConfig, `[filter "lfsish"]\n\tclean = touch ${marker}; cat\n\tsmudge = touch ${marker}; cat\n`)
+  const saved = process.env.GIT_CONFIG_GLOBAL
+  process.env.GIT_CONFIG_GLOBAL = globalConfig
+  try {
+    const later = new Date(Date.now() + 60_000)
+    const wt = createLocalWorktree(repo.dir, 'x', dataRoot())
+    utimesSync(join(wt, 'a.txt'), later, later)
+    expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: true })
+    utimesSync(join(wt, 'a.txt'), later, later)
+    removeLocalWorktree(wt, repo.dir)
+    expect(existsSync(marker)).toBe(false)
+    // Control: plain git with the same global config runs it.
+    utimesSync(join(repo.dir, 'a.txt'), later, later)
+    execFileSync('git', ['-C', repo.dir, 'status', '--porcelain'], { stdio: 'ignore' })
+    expect(existsSync(marker)).toBe(true)
+  } finally {
+    if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL
+    else process.env.GIT_CONFIG_GLOBAL = saved
+  }
+})
+
+// A submodule's own config is never read, so its filters are not overridden: fleetview keeps any
+// worktree holding one rather than run git inside it or delete it.
+test('a worktree with a submodule is kept, by worktreeSafety and by removeLocalWorktree', () => {
+  const sub = makeRepo()
+  const repo = makeRepo()
+  repo.g('-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub.dir, 'sub')
+  repo.g('commit', '-qm', 'submodule')
+  const wt = createLocalWorktree(repo.dir, 'x', dataRoot())
+  expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: false, reason: 'contains submodules' })
+  expect(() => removeLocalWorktree(wt, repo.dir)).toThrow(/submodules/)
+  expect(existsSync(wt)).toBe(true)
+})
+
 // --- #113.4: the merge-back command line ---
 
 test('mergeBackCommand names the parent repository and the session branch', () => {

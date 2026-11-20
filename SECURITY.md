@@ -41,9 +41,14 @@ What it does touch:
   titles, snippets, and model/tool output can contain terminal escape sequences;
   fleetview strips control bytes (`stripControl`) on the output paths so a
   crafted title can't drive your terminal (e.g. OSC clipboard writes).
-- **Hostile-repo hardening:** `git`/`gh` invocations run with
-  `GIT_CONFIG_NOSYSTEM` etc. so a malicious `.git/config` in a directory the
-  server reports can't achieve code execution during PR polling.
+- **Hostile-repo hardening:** `git`/`gh` invocations run with `-c` /
+  `GIT_CONFIG_PARAMETERS` overrides (`src/git-safe.ts`) so a malicious
+  `.git/config` or `.git/hooks` in a directory the server reports can't achieve
+  code execution during PR polling or worktree checks. Every configured git
+  filter driver (any scope, including a global `filter.lfs`) is blanked for the
+  worktree commands, so LFS files land as pointer files in worktrees fleetview
+  creates. A worktree containing submodules is never removed by fleetview,
+  since a submodule's own config is not overridden.
 - **State and logs** live under `~/.config/fleetview`, `~/.local/state/fleetview`,
   and the backends' own dirs, created `0o700`/`0o600` — they may contain prompts
   and output, so they are not world-readable.
