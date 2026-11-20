@@ -220,7 +220,12 @@ export function removeLocalWorktree(dir: string, repo: string, run = execFileSyn
   if (hasSubmodules(dir)) throw new Error(`${dir} contains submodules; fleetview leaves it for you to remove`)
   const branch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'], run)
   git(repo, ['worktree', 'remove', dir], run, [repo, dir])
-  if (!branch.startsWith(LOCAL_BRANCH_PREFIX)) return
+  if (branch.startsWith(LOCAL_BRANCH_PREFIX)) deleteMergedBranch(repo, branch, run)
+}
+
+// `branch -d`, never -D: a branch holding commits survives, and that refusal is not an error. Shared
+// with opencode 2.x's removal (#224), whose server leaves the `opencode/` branch fleetview made.
+export function deleteMergedBranch(repo: string, branch: string, run = execFileSync) {
   try {
     git(repo, ['branch', '-d', branch], run)
   } catch {}

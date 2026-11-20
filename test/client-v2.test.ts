@@ -32,7 +32,8 @@ const fakeServer = (routes: Record<string, unknown>) => {
     if (path === '/api/info') return json({ version: '2.3.2', pid: 1, urls: [], paths: { tmp: '/tmp' } })
     const key = `${method} ${path}`
     if (!(key in routes)) return json({ _tag: 'NotFound' }, 404)
-    return json(routes[key])
+    const route = routes[key]
+    return typeof route === 'function' ? route() : json(route)
   })
   return { fetchImpl, calls }
 }
@@ -271,6 +272,40 @@ test('a created worktree is put on an opencode/ branch, stepping around a leftov
   second.git('branch', 'opencode/fix')
   await worktreeServer(second.wt).c.createWorktree('fix', second.repo)
   expect(second.git('-C', second.wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/fix-2')
+})
+
+// #224: 2.x's DELETE leaves the branch, where 1.x deleted it. Only an `opencode/` branch goes, only
+// with `-d`, and only after the server removed the worktree.
+test('removing a worktree deletes its opencode/ branch unless it holds commits', async () => {
+  const removing = (repo: string, wt: string, status = 200) => () => {
+    if (status === 200) execFileSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt])
+    return json(status === 200 ? undefined : { _tag: 'Boom' }, status)
+  }
+  const branches = (git: (...a: string[]) => string) => git('branch', '--list', '--format=%(refname:short)').split('\n').sort()
+  const created = async (name: string) => {
+    const w = detachedWorktree(name)
+    await worktreeServer(w.wt).c.createWorktree(name, w.repo)
+    return w
+  }
+
+  const clean = await created('clean')
+  await client({ 'GET /api/location': { project: { id: 'prj_1' } }, 'DELETE /api/worktree': removing(clean.repo, clean.wt) }).c.removeWorktree(clean.wt, clean.repo)
+  expect(branches(clean.git)).not.toContain('opencode/clean')
+
+  const kept = await created('kept')
+  kept.git('-C', kept.wt, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'work')
+  await client({ 'GET /api/location': { project: { id: 'prj_1' } }, 'DELETE /api/worktree': removing(kept.repo, kept.wt) }).c.removeWorktree(kept.wt, kept.repo)
+  expect(branches(kept.git)).toContain('opencode/kept')
+
+  const failed = await created('failed')
+  const refused = client({ 'GET /api/location': { project: { id: 'prj_1' } }, 'DELETE /api/worktree': removing(failed.repo, failed.wt, 500) }).c
+  await expect(refused.removeWorktree(failed.wt, failed.repo)).rejects.toThrow()
+  expect(branches(failed.git)).toContain('opencode/failed')
+
+  const own = detachedWorktree('own')
+  own.git('-C', own.wt, 'switch', '-q', '-c', 'mine')
+  await client({ 'GET /api/location': { project: { id: 'prj_1' } }, 'DELETE /api/worktree': removing(own.repo, own.wt) }).c.removeWorktree(own.wt, own.repo)
+  expect(branches(own.git)).toContain('mine')
 })
 
 test('a worktree the server already put on a branch is left on it', async () => {
