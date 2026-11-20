@@ -141,7 +141,7 @@ async function adoptServerCredential(
     saveServerImpl?: typeof saveServer
     env?: NodeJS.ProcessEnv
   },
-): Promise<{ state: 'healthy' | 'unauthorized' | 'unreachable'; server: ServerRef; credential: 'kept' | 'saved-over-user' | 'rejected' | 'unenforced' | 'unknown' }> {
+): Promise<{ state: 'healthy' | 'unauthorized' | 'unreachable'; server: ServerRef; credential: 'kept' | 'saved-over-user' | 'rejected' | 'stranger' | 'unenforced' | 'unknown' }> {
   const adoptedSaved = Boolean(saved.password) && !env.OPENCODE_SERVER_PASSWORD
   if (adoptedSaved) env.OPENCODE_SERVER_PASSWORD = saved.password
   const forget = () => {
@@ -159,12 +159,20 @@ async function adoptServerCredential(
   // #213: the record's pid vouches only for the server minted with the record's password, so it is
   // matched only while that password is the one being presented. A user-set password may belong to a
   // server the user started there since.
+  // #216: `stranger` is refused like a rejection (burned all the same), but reported as one that
+  // never saw the password unless some other answer here may have.
+  let shown = false
+  let stranger = false
   const ask = async (): Promise<'healthy' | 'unauthorized' | 'unreachable'> => {
     const asked = await probe(saved.password && env.OPENCODE_SERVER_PASSWORD === saved.password ? saved : { ...saved, pid: null })
+    stranger = asked === 'stranger'
+    if (asked === 'stranger') return 'unauthorized'
+    if (asked === 'unauthorized' || asked === 'unconfirmed') shown = true
     return asked !== 'unconfirmed' ? asked : isOwnServer(saved) ? 'unreachable' : 'unauthorized'
   }
   let state = await ask()
-  if (state === 'unauthorized' && saved.password && env.OPENCODE_SERVER_PASSWORD && env.OPENCODE_SERVER_PASSWORD !== saved.password) {
+  // Not after a stranger: the saved password's server is not there either, so offering it gains nothing.
+  if (state === 'unauthorized' && !stranger && saved.password && env.OPENCODE_SERVER_PASSWORD && env.OPENCODE_SERVER_PASSWORD !== saved.password) {
     env.OPENCODE_SERVER_PASSWORD = saved.password
     delete env.OPENCODE_PASSWORD // the user's, under its 2.x name; it would shadow the saved one for attach
     state = await ask()
@@ -172,10 +180,10 @@ async function adoptServerCredential(
     // Anything short of healthy is not the server the saved password was made for. A listener that
     // 401s and then fails the authenticated retry some other way (a 500, a wrong body) reads as
     // `unreachable`, yet it has seen both passwords, so neither survives.
-    return { state, server: forget(), credential: 'rejected' }
+    return { state, server: forget(), credential: shown ? 'rejected' : 'stranger' }
   }
   if (!env.OPENCODE_SERVER_PASSWORD) return { state, server: saved, credential: 'kept' }
-  if (state === 'unauthorized') return { state, server: forget(), credential: 'rejected' }
+  if (state === 'unauthorized') return { state, server: forget(), credential: shown ? 'rejected' : 'stranger' }
   const enforced = state === 'healthy' ? await isAuthEnforced(saved) : true
   if (enforced === false) return { state, server: forget(), credential: 'unenforced' }
   if (enforced === null) {
@@ -262,6 +270,7 @@ export function makeEnsureServer({
       const state = await probeServer({ ...candidate, pid })
       if (state === 'healthy') return { healthy: true, seen: false }
       if (state === 'unauthorized') return { healthy: false, seen: true }
+      if (state === 'stranger') return { healthy: false, seen: false } // not this child, and never shown it
       if (state === 'unconfirmed') {
         if (!isOwnServer({ ...candidate, pid })) return { healthy: false, seen: true }
         presented = true
@@ -428,8 +437,12 @@ export function makeEnsureServer({
       const spawned = await attempt(target)
       if (spawned) return { ok: true, server: spawned }
     } else {
-      const dropped = credential === 'rejected' ? ' That listener has now seen the password, so it will not be used again: the replacement gets a freshly generated one.' : ''
-      warn(`fleetview: something on ${server.host}:${server.port} is answering but rejecting fleetview's password — leaving it alone and trying the next port.${dropped}`)
+      const dropped = credential === 'rejected' ? ' That listener may have seen the password, so it will not be used again: the replacement gets a freshly generated one.' : ''
+      warn(
+        credential === 'stranger'
+          ? `fleetview: the listener on ${server.host}:${server.port} is not verifiably fleetview's opencode server. It was not shown the password, but fleetview stops using it anyway and tries the next port with a freshly generated one. If it is an opencode server fleetview started, stop it by hand (see SECURITY.md).`
+          : `fleetview: something on ${server.host}:${server.port} is answering but rejecting fleetview's password — leaving it alone and trying the next port.${dropped}`,
+      )
     }
     // configured port never came healthy — a bind failure or a non-opencode squatter holding it.
     // v2 can use ANY healthy opencode server it finds (global db, one server serves all projects),
@@ -439,6 +452,9 @@ export function makeEnsureServer({
       const spawned = await attempt({ ...armed, port: p })
       if (spawned) return { ok: true, server: spawned }
     }
+    // #216: a password minted or rotated above belongs to no server now. Left in env, the next pass
+    // would read it as a user-set one and offer it with no pid to check.
+    if (armed.password && env.OPENCODE_SERVER_PASSWORD === armed.password) dropPassword(env)
     return { ok: false, server, reason: 'server did not become healthy' }
   }
   return (saved: ServerRef) => ensure(saved, false)
@@ -507,6 +523,7 @@ export async function runServer(
   })
   // A status check that rewrites server.json says so: the burn is also the only sign of a squatter.
   if (credential === 'rejected' && loaded.password) error(`the listener on :${server.port} rejected the saved password; removed it from ${serverFile}`)
+  if (credential === 'stranger' && loaded.password) error(`the listener on :${server.port} is not verifiably fleetview's server (it was not shown the saved password); removed it from ${serverFile}`)
   const healthy = state === 'healthy'
   if (args.serverAction === 'status') {
     log(`host     ${server.host}`)

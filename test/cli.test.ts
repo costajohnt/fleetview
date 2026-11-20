@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 import { makeEnsureServer, makePersistSeen, editPrompt, listSessions, looksLikeOpencodeServer, matchSessions, runBg, runAdd, runAnswer, runWatch, runStatus, runServer, runRm, RESTORE_SCREEN, RESET_INPUT_MODES } from '../src/cli.ts'
 import { MOUSE_OFF } from '../src/ui/mouse.ts'
 import { loadServer as realLoadServer, saveServer as realSaveServer } from '../src/registry.ts'
-import { OPENCODE_MISSING } from '../src/backends/opencode/server-manager.ts'
+import { OPENCODE_MISSING, probeServer, isAuthEnforced } from '../src/backends/opencode/server-manager.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -868,6 +868,125 @@ test('adopting an externally started passwordless server mints nothing', async (
   }
   expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: true, server })
   expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+})
+
+// #216: every candidate saw and burned a password, so the walk rotated one per port. The last one
+// belongs to no server; left in env, the next pass would offer it as if the user had set it.
+test('a fallback walk that ends ok:false leaves no generated password in env', async () => {
+  const env: NodeJS.ProcessEnv = {}
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: () => Promise.resolve('unauthorized'),
+    spawnServer: () => 777,
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    env,
+    pollMs: 1,
+    processKill: () => true,
+    spawnSyncImpl: () => ({}),
+    warn: () => {},
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, port: 4950 })
+  expect(result.ok).toBe(false)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+})
+
+// #216: through the real probe. A user-set password over an old generated record for a 2.x server
+// whose pid is gone: the user's own server on that port is offered the user's password and adopted,
+// not mistaken for a stranger because the record still holds the old one.
+test('a user-set password reaches the user\'s own server on a pid-less 2.x record that holds an old password', async () => {
+  vi.stubEnv('OPENCODE_SERVER_PASSWORD', 'user-set')
+  try {
+    const basic = (p: string) => `Basic ${Buffer.from(`opencode:${p}`).toString('base64')}`
+    const fetchImpl = vi.fn((url: string, init: any = {}) => {
+      if (url.endsWith('/project')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new Error('html')) })
+      if (init.headers?.authorization === basic('user-set')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: '2.3.2', pid: 5555 }) })
+      return Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({ _tag: 'UnauthorizedError' }) })
+    })
+    const spawnServer = vi.fn(() => 777)
+    const record = { host: '127.0.0.1', port: 4096, pid: 4242, password: 'old-generated', api: 2 as const }
+    const deps = {
+      isServerHealthy: () => Promise.resolve(false),
+      probeServer: (s: any) => probeServer(s, fetchImpl as any, () => null),
+      isAuthEnforced: (s: any) => isAuthEnforced(s, fetchImpl as any),
+      spawnServer,
+      saveServer: () => {},
+      serverFile: '/tmp/s.json',
+      pollMs: 1,
+      spawnSyncImpl: () => ({}),
+      identifyServer: () => ({ ok: false }),
+      warn: vi.fn(),
+      notice: () => {},
+      env: process.env,
+    }
+    const result = await makeEnsureServer(deps as any)(record)
+    expect(result.ok).toBe(true)
+    expect(result.server.port).toBe(4096)
+    expect(spawnServer).not.toHaveBeenCalled()
+    expect(process.env.OPENCODE_SERVER_PASSWORD).toBe('user-set')
+    expect(fetchImpl.mock.calls.some((c: any) => c[1]?.headers?.authorization === basic('old-generated'))).toBe(false)
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
+// #216: after a stranger answer the saved password is not tried on that port at all.
+test('a stranger answer is not retried with the saved password', async () => {
+  const probe = vi.fn(() => Promise.resolve('stranger'))
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: probe,
+    spawnServer: () => 777,
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    processKill: () => true,
+    spawnSyncImpl: () => ({}),
+    warn: () => {},
+    env: { OPENCODE_SERVER_PASSWORD: 'user-set' } as NodeJS.ProcessEnv,
+  }
+  await makeEnsureServer(deps as any)({ ...server, password: 'old-generated', api: 2 })
+  expect((probe.mock.calls as any[]).filter((c) => c[0].port === 4900)).toHaveLength(1)
+})
+
+// #216: the end-of-walk drop only takes a password fleetview minted; a user-set one that nothing saw stays.
+test('a fallback walk that ends ok:false keeps a user-set password nothing was shown', async () => {
+  const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'user-set' }
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    spawnServer: () => 777,
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    env,
+    pollMs: 1,
+    processKill: () => true,
+    spawnSyncImpl: () => ({}),
+  }
+  expect((await makeEnsureServer(deps as any)(server)).ok).toBe(false)
+  expect(env.OPENCODE_SERVER_PASSWORD).toBe('user-set')
+})
+
+// #216 N1: a stranger on the port was never shown the password, and the warning says so.
+test('a stranger on the port gets its own warning, not the rejected-password one', async () => {
+  const spawned: any[] = []
+  const warn = vi.fn()
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: (s: any) => Promise.resolve(s.port === 4900 ? 'stranger' : spawned.length > 0 ? 'healthy' : 'unreachable'),
+    spawnServer: (s: any) => (spawned.push(s), 777),
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    spawnSyncImpl: () => ({}),
+    warn,
+    env: { OPENCODE_SERVER_PASSWORD: 'minted' } as NodeJS.ProcessEnv,
+  }
+  const result = await makeEnsureServer(deps as any)({ ...server, password: 'minted', api: 2 })
+  expect(result.ok).toBe(true)
+  expect(spawned.map((s) => s.port)).toEqual([4901])
+  expect(spawned[0].password).not.toBe('minted') // burned all the same
+  expect(warn.mock.calls[0][0]).toMatch(/not verifiably fleetview's.*was not shown the password/)
+  expect(warn.mock.calls[0][0]).not.toMatch(/rejecting/)
 })
 
 test('spawn that never becomes healthy, no fallback candidate works → {ok:false, reason} after poll window exhausted', async () => {

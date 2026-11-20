@@ -57,6 +57,28 @@ What it does touch:
   and the backends' own dirs, created `0o700`/`0o600` — they may contain prompts
   and output, so they are not world-readable.
 
+### Known limits of the server-ownership check
+
+Before fleetview sends the server password to a port, it checks that the
+listener is the server it recorded: an opencode 2.x server must report the pid
+fleetview spawned, and after a lost connection fleetview withholds the password
+until that check passes again. Some gaps remain by design:
+
+- The pid is self-reported by the server, so a squatter that reads `ps` can
+  copy it. Asking the OS which process owns the port would be the upgrade.
+- opencode 1.x reports no pid, so a 1.x server cannot be pid-verified, and
+  neither can a server running under a password you set yourself.
+- An `opencode` TUI that is already attached reads the password from its own
+  environment and reconnects with it, outside fleetview's control.
+- A 2.x server whose pid was never recorded (fleetview exited between spawning
+  it and saving its pid) is not offered the password, so fleetview moves to the
+  next port and leaves that server running. Stop it by hand: find it with
+  `lsof -nP -iTCP:4900 -sTCP:LISTEN` (use the port in the warning) or
+  `pgrep -fl 'opencode serve'`, then `kill <pid>`.
+- If the server dies and another process takes the port with no failed
+  connection in between (no event stream open, no request in flight),
+  fleetview does not notice before its next request.
+
 ## Supported versions
 
 fleetview tracks `main`; fixes land there and ship in the next npm release.

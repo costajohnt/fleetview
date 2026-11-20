@@ -6,6 +6,7 @@ import type { ServerRef } from '../../types.ts'
 import { openPrivateAppend } from '../../registry.ts'
 import { authHeader, isV2Info, isV2Unauthorized, noteOpencodeApi } from './client.ts'
 import { serverHome } from './client-v2.ts'
+import { ownershipVerified } from './request.ts'
 
 // ensureServer's failure reason when `opencode` is not on PATH. Exported so the roster can tell this
 // case (install something, then run again) from a server that merely failed to come up.
@@ -66,7 +67,9 @@ export async function isServerHealthy(server: ServerRef, fetchImpl = globalThis.
 // properly (a non-2xx other than 401, or no answer at all). That is fleetview's own server booting or
 // overloaded, or a stranger that now holds the password; only the caller knows which pid it spawned,
 // so the caller decides, and anything it cannot prove is its own is treated as having seen it.
-export type ProbeState = 'healthy' | 'unauthorized' | 'unreachable' | 'unconfirmed'
+//
+// `stranger` (#216): the listener is not the server on record, and was never shown the credential.
+export type ProbeState = 'healthy' | 'unauthorized' | 'unreachable' | 'unconfirmed' | 'stranger'
 
 // #213: `server.pid`, when set, is the process the caller expects on that port (the child it just
 // spawned, or server.json's record). 2.x's /api/info body carries the answering server's pid on
@@ -82,12 +85,25 @@ export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetc
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const base = `http://${server.host}:${server.port}`
   const v1 = await askServer(server, '/project', isProjectList, fetchImpl, async () => server.api !== 2)
+  // A server recorded as 2.x that answers as 1.x is not that server: 1.x reports no pid, so taking
+  // the answer would skip the pid check and hand the stranger the password. Treated as one that
+  // rejected it, so the password is burned and rotated all the same (cli.ts adoptServerCredential).
+  if (v1 === 'healthy' && server.api === 2) return 'stranger'
   if (v1 === 'healthy') noteOpencodeApi(base, 1)
   if (v1 !== 'unreachable') return v1
   // Credential only to a 401 that is 2.x's own: a 1.x without its embedded UI proxies unknown paths,
   // authorization header included, to app.opencode.ai, and whatever 401 that answers must not earn
   // the password (the reason opencodeApi in client.ts asks this route credential-free).
   const owner = server.pid ? (pid: number) => descendsFrom(pid, server.pid!, parentOf) : undefined
+  // #216: a 2.x record whose own password is the one about to be presented, but which has no pid (a
+  // crash between trySpawn's two saves), has nothing to match the answer against, so that password
+  // is not offered at all. Keyed on what would be presented, not on the record: a user-set password
+  // in env is #213's deliberately unmatched case even when the record still holds an old one.
+  if (server.api === 2 && !owner && server.password && server.password === process.env.OPENCODE_SERVER_PASSWORD) {
+    const bare = await askServer(server, '/api/info', isV2Info, fetchImpl, async () => false)
+    if (bare === 'healthy') noteOpencodeApi(base, 2)
+    return bare === 'unauthorized' ? 'stranger' : bare
+  }
   const v2 = await askServer(server, '/api/info', isV2Info, fetchImpl, isV2UnauthorizedResponse, owner)
   // What the probe found is the server's API for everything after it (client.ts opencodeApi).
   if (v2 === 'healthy') noteOpencodeApi(base, 2)
@@ -116,6 +132,12 @@ async function askServer(
 ): Promise<ProbeState> {
   const url = `http://${server.host}:${server.port}${path}`
   let presented = false
+  // #216: the only answer that ends a lost connection's doubt (request.ts): one that asked for the
+  // credential and then proved itself with it. A healthy answer that never asked proves nothing.
+  const verified = (): ProbeState => {
+    ownershipVerified(url)
+    return 'healthy'
+  }
   try {
     // The first request carries NO credential, on purpose. fleetview adopts the password from
     // server.json before it has any evidence about who holds the port, so an authenticated first
@@ -141,9 +163,9 @@ async function askServer(
       } catch {}
       const pid = (body as { pid?: unknown } | undefined)?.pid
       if (typeof pid !== 'number' || !isOwner(pid)) return 'unauthorized'
-      return authed.ok ? (looksRight(body) ? 'healthy' : 'unauthorized') : 'unconfirmed'
+      return authed.ok ? (looksRight(body) ? verified() : 'unauthorized') : 'unconfirmed'
     }
-    if (authed.ok) return (await bodyLooksRight(authed, looksRight)) ? 'healthy' : 'unauthorized'
+    if (authed.ok) return (await bodyLooksRight(authed, looksRight)) ? verified() : 'unauthorized'
     return 'unconfirmed'
   } catch {
     // Same rule for a listener that took the credential and then hung or reset. #213: when the caller
