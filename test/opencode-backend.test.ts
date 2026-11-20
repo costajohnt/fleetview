@@ -1,4 +1,5 @@
 import { test, expect, vi } from 'vitest'
+import { waitForExpect } from './helpers.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
 
 const server = { host: '127.0.0.1', port: 4900 }
@@ -70,7 +71,7 @@ test('opencode declares the full capability set', () => {
 test('events opens the directory-scoped stream on the backend server, and stop() ends it', async () => {
   const fetchImpl = vi.fn(() => Promise.reject(new Error('down')))
   const sub = backend(fakeClient(), fetchImpl).events({ directory: '/x/alpha' }, { onEvent: vi.fn() })
-  await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled())
+  await waitForExpect(() => expect(fetchImpl).toHaveBeenCalled())
   sub.stop()
   await sub.done
   expect(fetchImpl).toHaveBeenCalledWith('http://127.0.0.1:4900/event?directory=%2Fx%2Falpha', expect.objectContaining({ signal: expect.any(AbortSignal) }))

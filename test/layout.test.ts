@@ -1,6 +1,8 @@
 import React from 'react'
 import { test, expect, vi } from 'vitest'
 import { render } from 'ink-testing-library'
+import { useWindowSize } from 'ink'
+import { waitFor } from './helpers.ts'
 import { App } from '../src/app.ts'
 import { Help, helpLines, helpPage } from '../src/ui/help.ts'
 import { Peek } from '../src/ui/peek.ts'
@@ -143,13 +145,16 @@ test('a prompt longer than the terminal scrolls rather than wrapping', () => {
 })
 
 // The whole point: App reserves rows by counting the components it draws, so the total has to fit.
-const appFrameFits = async (rows?: any, drive?: (stdin: any) => void) => {
+// More sessions than any real terminal is tall, so the bound below can't hold by accident on a big
+// dev terminal (#185): ink falls back to the real terminal's size when the test stdout has none.
+const SESSIONS = 200
+const appFrameFits = async (rows?: any, drive?: { press: (stdin: any) => void; until: (frame: string) => boolean }) => {
   const project = { id: 'a-1', worktree: '/x/alpha', time: { created: 1, updated: 1000 } }
   const client = {
     listProjects: vi.fn(() => Promise.resolve([project])),
     listSessions: vi.fn(() =>
       Promise.resolve(
-        Array.from({ length: 25 }, (_, i) => ({ id: `s${i}`, title: `a fairly long session title ${i}`, time: { updated: i } })),
+        Array.from({ length: SESSIONS }, (_, i) => ({ id: `s${i}`, title: `a fairly long session title ${i}`, time: { updated: i } })),
       ),
     ),
     listMessages: vi.fn(() => Promise.resolve([])),
@@ -167,42 +172,61 @@ const appFrameFits = async (rows?: any, drive?: (stdin: any) => void) => {
       connectEventsImpl: vi.fn(() => ({ done: Promise.resolve(), stop: vi.fn() })),
       ensureServerImpl: vi.fn(),
       serverReady: true,
-      roster: { groupBy: 'state', sessions: Array.from({ length: 25 }, (_, i) => ({ worktree: '/x/alpha', id: `s${i}`, addedAt: i })) },
+      roster: { groupBy: 'state', sessions: Array.from({ length: SESSIONS }, (_, i) => ({ worktree: '/x/alpha', id: `s${i}`, addedAt: i })) },
       persistRoster: vi.fn(),
       onAction: vi.fn(),
     }),
     { stdout: Object.assign(process.stdout, {}) },
   )
-  const start = Date.now()
-  while (!instance.lastFrame()!.includes('session title') && Date.now() - start < 3000) {
-    await new Promise((r) => setTimeout(r, 10))
+  try {
+    await waitFor(() => instance.lastFrame()!.includes('session title'))
+    if (drive) {
+      drive.press(instance.stdin)
+      await waitFor(() => drive.until(instance.lastFrame()!))
+    }
+    return instance.lastFrame()
+  } finally {
+    instance.unmount()
   }
-  if (drive) {
-    drive(instance.stdin)
-    await new Promise((r) => setTimeout(r, 300))
+}
+
+// The rows App is given: ink-testing-library reports no `rows`, so ink falls back to the real
+// terminal's size or 24, and the bound has to be read the same way rather than hard-coded.
+const windowRows = () => {
+  let rows = 0
+  const Probe = () => {
+    rows = useWindowSize().rows
+    return null
   }
-  const frame = instance.lastFrame()
-  instance.unmount()
-  return frame
+  render(React.createElement(Probe)).unmount()
+  return rows
 }
 
 test('the roster frame fits the terminal with a notice and a suggestion list open', async () => {
-  // ink-testing-library reports 100x100, so assert against what App actually reserved rather than
-  // a hard-coded 24 — the invariant is "drawn <= reserved", whatever the terminal size is.
+  // #185: measured against the rows App was given, not against another frame, and only once the
+  // suggestion list is actually on screen — otherwise a list that never opens passes too.
+  const rows = windowRows()
   const plain = await appFrameFits()
-  const withSuggestions = await appFrameFits(null, (stdin) => stdin.write('\t')) // Tab opens up to 8 rows
-  expect(rowsOf(withSuggestions)).toBeLessThanOrEqual(rowsOf(plain) + 8 + 1)
+  const withSuggestions = await appFrameFits(null, { press: (stdin) => stdin.write('\t'), until: (f) => f.includes('@agent0') })
   expect(rowsOf(plain)).toBeGreaterThan(3)
+  expect(rowsOf(plain)).toBeLessThanOrEqual(rows)
+  expect(rowsOf(withSuggestions)).toBeLessThanOrEqual(rows)
 })
 
 // tailOf runs on every render and the input can hold a pasted prompt of any size, so it must not
 // segment the whole string to keep the last 80 graphemes.
 test('tailOf stays cheap on a huge pasted prompt', () => {
   const huge = 'x'.repeat(500_000) + '🙂end'
-  const started = process.hrtime.bigint()
-  const tail = tailOf(huge, 20)
-  const ms = Number(process.hrtime.bigint() - started) / 1e6
-  expect([...tail].length).toBeLessThanOrEqual(20)
-  expect(tail.endsWith('🙂end')).toBe(true) // and the boundary emoji survives intact
-  expect(ms).toBeLessThan(50)
+  // #185: what is pinned is the work, not a wall-clock budget a loaded runner can blow: the
+  // segmenter only ever sees a bounded window off the end, never the whole paste.
+  const segment = vi.spyOn(Intl.Segmenter.prototype, 'segment')
+  try {
+    const tail = tailOf(huge, 20)
+    expect([...tail].length).toBeLessThanOrEqual(20)
+    expect(tail.endsWith('🙂end')).toBe(true) // and the boundary emoji survives intact
+    expect(segment).toHaveBeenCalled()
+    for (const [text] of segment.mock.calls) expect(text.length).toBeLessThanOrEqual(20 * 8)
+  } finally {
+    segment.mockRestore()
+  }
 })
