@@ -271,19 +271,16 @@ test('2.x: stop() while the seed is being listed delivers nothing more', async (
   expect(onEvent).not.toHaveBeenCalled()
 })
 
-// #186: an unanswered probe used to fall back to 1.x's /event, which a 2.x server answers 200 with
-// its web app, so the project flapped online and offline.
-test('an unanswered API probe backs off instead of trying the 1.x stream', async () => {
-  const paths: string[] = []
-  const fetchImpl = vi.fn((url: string) => {
-    const path = new URL(url).pathname
-    paths.push(path)
-    return path === '/api/info' ? Promise.reject(new Error('timeout')) : Promise.resolve({ ok: true, status: 200, body: (async function* () { yield new TextEncoder().encode('<html>') })() })
-  }) as any
+// #186: after an unanswered probe, 1.x's /event on a 2.x server is its web app, answered 200.
+test('a 200 that is not an event stream is not online', async () => {
+  const fetchImpl = vi.fn((url: string) =>
+    new URL(url).pathname === '/api/info'
+      ? Promise.reject(new Error('timeout'))
+      : Promise.resolve({ ok: true, status: 200, headers: { get: () => 'text/html; charset=utf-8' }, body: (async function* () { yield new TextEncoder().encode('<html>') })() }),
+  ) as any
   const onOnline = vi.fn()
   const onOffline = vi.fn()
   await connectEvents({ host: '127.0.0.1', port: 4805, directory: '/fv/repo' }, { fetchImpl, onEvent: vi.fn(), onOnline, onOffline, reconnect: false }).done
-  expect(paths).toEqual(['/api/info'])
   expect(onOnline).not.toHaveBeenCalled()
   expect(onOffline).toHaveBeenCalledWith('/fv/repo')
 })

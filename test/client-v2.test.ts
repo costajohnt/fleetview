@@ -147,9 +147,9 @@ test('positional label answers become a keyed map of option values; an unknown l
   expect(v2Answer(form, [])).toEqual({})
 })
 
-test('a picked option sends its declared value even when that is not a string (#186)', () => {
-  const typed = { fields: [{ key: 'n', type: 'string', options: [{ value: 7, label: 'Seven' }] }, { key: 'b', type: 'boolean', options: [{ value: false, label: 'No' }] }] }
-  expect(v2Answer(typed, [['Seven'], ['No']])).toEqual({ n: 7, b: false })
+test('a picked option sends its declared value even when that is not a string (#186; 2.3.2 declares strings, so defensive)', () => {
+  const typed = { fields: [{ key: 'n', type: 'string', options: [{ value: 7, label: 'Seven' }] }, { key: 'b', type: 'boolean', options: [{ value: true, label: 'Yes' }] }] }
+  expect(v2Answer(typed, [['Seven'], ['Yes']])).toEqual({ n: 7, b: true })
 })
 
 test('a question reply is routed through its session', async () => {

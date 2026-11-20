@@ -56,14 +56,16 @@ export function connectEvents({ host, port, directory }: ConnectTarget, { fetchI
         const auth = authHeader()
         // 2.x has one server-wide stream in its own vocabulary; it is cut to this directory and
         // translated to 1.x's events here, so the store downstream never knows which it got.
-        // An unanswered probe backs off like any failed connect. It used to fall back to 1.x's
-        // /event, which a 2.x server answers 200 with its web app: online, then offline, on a loop.
-        const isV2 = (await opencodeApi(base, fetchImpl)) === 2
+        const isV2 = (await opencodeApi(base, fetchImpl).catch(() => 1)) === 2 // unanswered: try 1.x's stream; a 1.x server whose /api/info is proxied off-box can be slow to answer it
         let v2: ((frame: unknown) => OpencodeEvent[]) | null = null
         const url = isV2 ? `${base}/api/event` : `${base}/event?directory=${encodeURIComponent(directory)}`
         const res = await fetchImpl(url, { signal: ac.signal, headers: auth ? { authorization: auth } : undefined })
         if (stopped) return
         if (!res.ok || !res.body) throw new Error(`event stream ${res.status}`)
+        // A 2.x server answers 1.x's /event (asked after an unanswered probe) 200 with its web app,
+        // which read as online and then dropped: a flap per attempt (#186). Only a stream is one.
+        const type = res.headers?.get?.('content-type')
+        if (type && !type.startsWith('text/event-stream')) throw new Error(`event stream is ${type}`)
         onOnline?.(directory)
         delay = 1000
         let buf = ''
