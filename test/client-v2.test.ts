@@ -1,6 +1,10 @@
 // opencode 2.x support (#166): the 2.x API translated to the 1.x shapes the rest of fleetview reads.
 // Wire shapes here are from opencode v2.3.2's source, not a live server.
 import { test, expect, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { OpencodeClient } from '../src/backends/opencode/client.ts'
 import { v1Messages, v1Question, v2Answer } from '../src/backends/opencode/client-v2.ts'
 import { createV2Translator } from '../src/backends/opencode/event-mux.ts'
@@ -149,16 +153,52 @@ test('listMessages reverses 2.x newest-first order', async () => {
   expect((await c.listMessages('ses_1')).map((m) => m.info?.id)).toEqual(['m1', 'm2'])
 })
 
-test('worktrees go through the directory\'s project id, and removal is forced like 1.x', async () => {
-  const { c, calls } = client({
+// A repository with one commit, and a worktree of it on a detached HEAD: what 2.3.2's create leaves.
+const detachedWorktree = (name: string) => {
+  const root = mkdtempSync(join(tmpdir(), 'fleetview-v2-wt-'))
+  const repo = join(root, 'repo')
+  const wt = join(root, name)
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' }
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, env, encoding: 'utf8' }).trim()
+  mkdirSync(repo)
+  git('init', '-q')
+  git('-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'init')
+  git('worktree', 'add', '-q', '--detach', wt)
+  return { repo, wt, git }
+}
+const worktreeServer = (directory: string) =>
+  client({
     'GET /api/location': { directory: '/repo', project: { id: 'prj_1', directory: '/repo', canonical: '/repo' } },
-    'POST /api/worktree': { directory: '/wt/feature' },
+    'POST /api/worktree': { directory },
     'DELETE /api/worktree': undefined,
   })
-  expect(await c.createWorktree('feature', '/repo')).toEqual({ name: 'feature', directory: '/wt/feature' })
-  expect(calls.at(-1)!.body).toEqual({ projectID: 'prj_1', name: 'feature' })
-  await c.removeWorktree('/wt/feature', '/repo')
-  expect(calls.at(-1)!.body).toEqual({ projectID: 'prj_1', directory: '/wt/feature', force: true })
+
+test('worktrees go through the directory\'s project id, and removal is forced like 1.x', async () => {
+  const { wt } = detachedWorktree('feature')
+  const { c, calls } = worktreeServer(wt)
+  expect(await c.createWorktree('feature', '/repo')).toEqual({ name: 'feature', directory: wt })
+  expect(calls.find((call) => call.method === 'POST')!.body).toEqual({ projectID: 'prj_1', name: 'feature' })
+  await c.removeWorktree(wt, '/repo')
+  expect(calls.at(-1)!.body).toEqual({ projectID: 'prj_1', directory: wt, force: true })
+})
+
+// #173: 2.x leaves the worktree detached, where 1.x put it on `opencode/<name>`.
+test('a created worktree is put on an opencode/ branch, stepping around a leftover one', async () => {
+  const { wt, git } = detachedWorktree('feature')
+  await worktreeServer(wt).c.createWorktree('feature', '/repo')
+  expect(git('-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/feature')
+
+  const second = detachedWorktree('fix')
+  second.git('branch', 'opencode/fix')
+  await worktreeServer(second.wt).c.createWorktree('fix', '/repo')
+  expect(second.git('-C', second.wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/fix-2')
+})
+
+test('a worktree that cannot be branched is removed and the failure thrown', async () => {
+  const notARepo = mkdtempSync(join(tmpdir(), 'fleetview-v2-wt-'))
+  const { c, calls } = worktreeServer(notARepo)
+  await expect(c.createWorktree('feature', '/repo')).rejects.toThrow(/git/)
+  expect(calls.at(-1)).toMatchObject({ method: 'DELETE', body: { projectID: 'prj_1', directory: notARepo, force: true } })
 })
 
 test('providers are regrouped from the flat model list', async () => {

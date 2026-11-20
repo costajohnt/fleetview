@@ -5,10 +5,12 @@
 //
 // Shapes are from opencode v2.3.2's source (packages/schema, packages/protocol); see #166. Only
 // what fleetview reads is mapped, and reads stay defensive, as in types.ts.
+import { execFileSync } from 'node:child_process'
 import { basename } from 'node:path'
 import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 import { stripControl } from '../../text-utils.ts'
+import { GIT_SAFE_ARGS } from '../../git-safe.ts'
 import type { AgentInfo, CommandInfo, ModelSelection, ProvidersResponse } from './client.ts'
 
 type Auth = () => string | undefined
@@ -111,6 +113,11 @@ function v2Model(model: ModelSelection | undefined) {
   const slash = model.indexOf('/')
   return slash > 0 ? { providerID: model.slice(0, slash), id: model.slice(slash + 1) } : undefined
 }
+
+// The directory is one the server named, so its repository config is untrusted: see git-safe.ts.
+// stderr is kept so a failure says why.
+const git = (dir: string, args: string[]) =>
+  execFileSync('git', [...GIT_SAFE_ARGS, '-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
 export class OpencodeV2Client {
   baseUrl: string
@@ -263,11 +270,27 @@ export class OpencodeV2Client {
     return rows.map((w) => ({ name: basename(String(w.directory)), directory: String(w.directory) }))
   }
 
+  // 2.x leaves the new worktree on a detached HEAD, and its `branch` field only checks out a ref that
+  // already exists (verified against 2.3.2), so the `opencode/<name>` branch 1.x made is made here:
+  // merge-back and PR badges key off it. A branch of that name left by an earlier worktree is stepped
+  // around, never reset. If branching fails the worktree goes and the error propagates, so the
+  // dispatch reports it is not isolated instead of running in a tree nothing can follow.
   async createWorktree(name: string, directory?: string) {
     const projectID = await this.#projectID(directory)
     const created = unwrap(await this.req('POST', '/api/worktree', { projectID, name }, directory))
     const dir = isRecord(created) ? asString(created.directory) : undefined
-    return dir ? { name: basename(dir), directory: dir } : null
+    if (!dir) return null
+    const base = `opencode/${basename(dir)}`
+    try {
+      const taken = new Set(git(dir, ['branch', '--list', `${base}*`, '--format=%(refname:short)']).split('\n'))
+      let branch = base
+      for (let n = 2; taken.has(branch); n++) branch = `${base}-${n}`
+      git(dir, ['switch', '-c', branch])
+    } catch (e) {
+      await this.removeWorktree(dir, directory).catch(() => {})
+      throw e
+    }
+    return { name: basename(dir), directory: dir }
   }
 
   // `force` matches 1.x, which removed without checks of its own: callers run worktreeSafety first.
