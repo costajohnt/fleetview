@@ -32,7 +32,7 @@ test('restoreScreen puts back the input modes as well as the mouse, cursor and a
 const server = { host: '127.0.0.1', port: 4900, pid: null }
 
 test('healthy server → {ok:true, same server}, no spawn', async () => {
-  const deps = { isServerHealthy: () => Promise.resolve(true), spawnServer: () => { throw new Error('should not spawn') }, saveServer: () => { throw new Error('should not save') }, serverFile: '/tmp/s.json' }
+  const deps = { isServerHealthy: () => Promise.resolve(true), spawnServer: () => { throw new Error('should not spawn') }, saveServer: () => { throw new Error('should not save') }, serverFile: '/tmp/s.json', env: {} }
   expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: true, server })
 })
 
@@ -44,6 +44,7 @@ test('adopting a healthy server that does not enforce a set password warns once'
     spawnServer: () => { throw new Error('should not spawn') },
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     warn,
   }
   expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: true, server })
@@ -59,6 +60,7 @@ test('adopting a healthy server that enforces auth does not warn', async () => {
     spawnServer: () => { throw new Error('should not spawn') },
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     warn,
   }
   await makeEnsureServer(deps as any)(server)
@@ -401,6 +403,7 @@ test('spawn that never becomes healthy, no fallback candidate works → {ok:fals
     spawnServer: () => 777,
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     spawnSyncImpl: () => ({}), // opencode --version succeeds — not an install problem
   }
@@ -414,6 +417,7 @@ test('reap: initial candidate poll timeout kills its pid before the fallback wal
     spawnServer: () => 777,
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     processKill: (pid: any, sig: any) => killed.push([pid, sig]),
     spawnSyncImpl: () => ({}),
@@ -430,6 +434,7 @@ test('reap: a failed fallback candidate is killed before trying the next one (Im
     spawnServer: () => { spawnCalls += 1; return 700 + spawnCalls },
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     processKill: (pid: any, sig: any) => killed.push([pid, sig]),
     spawnSyncImpl: () => ({}),
@@ -445,6 +450,7 @@ test('reap: processKill throwing (already-dead pid) does not crash ensureServer'
     spawnServer: () => 777,
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     processKill: () => { throw new Error('ESRCH') },
     spawnSyncImpl: () => ({}),
@@ -462,6 +468,7 @@ test('ENOENT (opencode not installed) fails before any spawn or poll, with its o
     spawnServer: () => { spawnCalls += 1; return 777 },
     saveServer: () => { throw new Error('should not save a record for a server that cannot exist') },
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     spawnSyncImpl: vi.fn(() => ({ error: { code: 'ENOENT' } })),
   }
@@ -872,6 +879,7 @@ const serverHarness = ({ healthy = true, pid = 4242, identity = { ok: true, comm
     log: (m: any) => out.push(m),
     error: (m: any) => errs.push(m),
     setExitCode: (c: any) => codes.push(c),
+    env: {},
   }
   return { out, errs, codes, killed, deps }
 }
@@ -1229,13 +1237,17 @@ test('port bind-fails on the configured port → falls back to the next free por
     spawnServer: (s: any) => { spawnCalls.push(s.port); return 555 },
     saveServer: (file: any, s: any) => saved.push([file, s]),
     serverFile: '/tmp/s.json',
+    env: {} as NodeJS.ProcessEnv,
     pollMs: 1,
     spawnSyncImpl: () => ({}),
   }
   const result = await makeEnsureServer(deps as any)(server)
-  expect(result).toEqual({ ok: true, server: { host: '127.0.0.1', port: 4901, pid: 555 } })
+  // No password in the environment, so the spawn mints one and the fallback record carries it.
+  const password = deps.env.OPENCODE_SERVER_PASSWORD
+  expect(password).toMatch(/^[0-9a-f-]{36}$/)
+  expect(result).toEqual({ ok: true, server: { host: '127.0.0.1', port: 4901, pid: 555, password } })
   expect(spawnCalls).toEqual([4900, 4901])
-  expect(saved.at(-1)).toEqual(['/tmp/s.json', { host: '127.0.0.1', port: 4901, pid: 555 }])
+  expect(saved.at(-1)).toEqual(['/tmp/s.json', { host: '127.0.0.1', port: 4901, pid: 555, password }])
 })
 
 test('port fallback exhausted (all 10 candidates unhealthy) → {ok:false, reason}', async () => {
@@ -1244,6 +1256,7 @@ test('port fallback exhausted (all 10 candidates unhealthy) → {ok:false, reaso
     spawnServer: () => 555,
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     spawnSyncImpl: () => ({}),
   }

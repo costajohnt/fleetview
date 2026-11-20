@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import {
@@ -277,6 +277,7 @@ test('worktreeSafety refuses when the unpushed count cannot be parsed', () => {
     if (args.includes('status')) return ''
     if (args.includes('rev-parse')) return 'origin/main'
     if (args.includes('rev-list')) return 'warning: refname is ambiguous'
+    if (args.includes('config')) return '' // no filter drivers configured
     throw new Error(`unexpected git ${args.join(' ')}`)
   }) as any
   expect(worktreeSafety('/wt', '/repo', run)).toEqual({ removable: false, dirty: false, unpushed: true, reason: 'could not count unpushed commits' })
@@ -320,6 +321,107 @@ test('a repo whose config and hooks try to run commands cannot run them through 
   expect(existsSync(marker)).toBe(false)
   // And the answer is still the right one — hardening must not cost the refusal rules their meaning.
   expect(safety).toMatchObject({ removable: true, dirty: false, unpushed: false })
+})
+
+// #181: a filter driver named by an in-tree `.gitattributes` and defined in the repository's config
+// runs on `status`, on the checkout `worktree add` does, and on the `status` `worktree remove` runs
+// on its target. The driver name is the attacker's, so each is found by reading config and blanked.
+test("a repo's own filter drivers never run through createLocalWorktree, worktreeSafety or removeLocalWorktree", () => {
+  const repo = makeRepo()
+  writeFileSync(join(repo.dir, '.gitattributes'), '*.txt filter=evil\n*.dat filter=proc\n')
+  writeFileSync(join(repo.dir, 'b.dat'), 'data\n')
+  repo.g('add', '-A')
+  repo.g('commit', '-qm', 'attributes')
+  const marker = join(repo.dir, 'PWNED')
+  repo.g('config', 'filter.evil.clean', `touch ${marker}; cat`)
+  repo.g('config', 'filter.evil.smudge', `touch ${marker}; cat`)
+  repo.g('config', 'filter.evil.required', 'true') // blanked without required=false, git would die instead
+  repo.g('config', 'filter.proc.process', `touch ${marker}`)
+  // A changed mtime makes `status` re-hash the file, which is what passes it through the clean filter.
+  const restat = (dir: string, files = ['a.txt', 'b.dat']) => {
+    const later = new Date(Date.now() + 60_000)
+    for (const f of files) utimesSync(join(dir, f), later, later)
+  }
+
+  const wt = createLocalWorktree(repo.dir, 'x', dataRoot()) // checkout: smudge and process
+  restat(wt)
+  expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: true, dirty: false, unpushed: false })
+  restat(wt)
+  removeLocalWorktree(wt, repo.dir)
+  expect(existsSync(wt)).toBe(false)
+  expect(existsSync(marker)).toBe(false)
+
+  // Control: the same repository through plain git does run the payload, so the test is armed. The
+  // `proc` payload is not a real filter-process speaker and git dies on reaching it, so it goes first.
+  repo.g('config', '--unset', 'filter.proc.process')
+  restat(repo.dir, ['a.txt'])
+  execFileSync('git', ['-C', repo.dir, 'status', '--porcelain'], { stdio: 'ignore' })
+  expect(existsSync(marker)).toBe(true)
+})
+
+// A driver behind a conditional include is invisible from the parent repository and applies only
+// inside the new worktree, so the filter list for the checkout has to be read from there (#181).
+test('a filter driver gated by includeIf onbranch or gitdir never runs through createLocalWorktree', () => {
+  const repo = makeRepo()
+  writeFileSync(join(repo.dir, '.gitattributes'), '*.txt filter=gated\n')
+  repo.g('add', '-A')
+  repo.g('commit', '-qm', 'attributes')
+  const marker = join(repo.dir, 'PWNED')
+  const inc = join(repo.dir, '.git', 'evil.inc')
+  writeFileSync(inc, `[filter "gated"]\n\tsmudge = touch ${marker}; cat\n`)
+  repo.g('config', 'includeIf.onbranch:fleetview/**.path', inc)
+  repo.g('config', 'includeIf.gitdir:**/worktrees/**.path', inc)
+  const wt = createLocalWorktree(repo.dir, 'x', dataRoot())
+  expect(readFileSync(join(wt, 'a.txt'), 'utf8')).toBe('hello\n') // still checked out
+  expect(existsSync(marker)).toBe(false)
+  // Control: a plain checkout on a fleetview/ branch runs it.
+  rmSync(join(wt, 'a.txt'))
+  execFileSync('git', ['-C', wt, 'checkout', '--', 'a.txt'], { stdio: 'ignore' })
+  expect(existsSync(marker)).toBe(true)
+})
+
+// The user's global config is not attacker-controlled, but a global `filter.lfs` runs git-lfs, which
+// reads repository-local config that can name programs. So global drivers are blanked too.
+test('a filter driver from the global config never runs through worktreeSafety or removeLocalWorktree', () => {
+  const repo = makeRepo()
+  writeFileSync(join(repo.dir, '.gitattributes'), '*.txt filter=lfsish\n')
+  repo.g('add', '-A')
+  repo.g('commit', '-qm', 'attributes')
+  const marker = join(repo.dir, 'PWNED')
+  const globalConfig = join(repo.dir, '..', `${basename(repo.dir)}.gitconfig`)
+  repos.push(globalConfig)
+  writeFileSync(globalConfig, `[filter "lfsish"]\n\tclean = touch ${marker}; cat\n\tsmudge = touch ${marker}; cat\n`)
+  const saved = process.env.GIT_CONFIG_GLOBAL
+  process.env.GIT_CONFIG_GLOBAL = globalConfig
+  try {
+    const later = new Date(Date.now() + 60_000)
+    const wt = createLocalWorktree(repo.dir, 'x', dataRoot())
+    utimesSync(join(wt, 'a.txt'), later, later)
+    expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: true })
+    utimesSync(join(wt, 'a.txt'), later, later)
+    removeLocalWorktree(wt, repo.dir)
+    expect(existsSync(marker)).toBe(false)
+    // Control: plain git with the same global config runs it.
+    utimesSync(join(repo.dir, 'a.txt'), later, later)
+    execFileSync('git', ['-C', repo.dir, 'status', '--porcelain'], { stdio: 'ignore' })
+    expect(existsSync(marker)).toBe(true)
+  } finally {
+    if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL
+    else process.env.GIT_CONFIG_GLOBAL = saved
+  }
+})
+
+// A submodule's own config is never read, so its filters are not overridden: fleetview keeps any
+// worktree holding one rather than run git inside it or delete it.
+test('a worktree with a submodule is kept, by worktreeSafety and by removeLocalWorktree', () => {
+  const sub = makeRepo()
+  const repo = makeRepo()
+  repo.g('-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub.dir, 'sub')
+  repo.g('commit', '-qm', 'submodule')
+  const wt = createLocalWorktree(repo.dir, 'x', dataRoot())
+  expect(worktreeSafety(wt, repo.dir)).toMatchObject({ removable: false, reason: 'contains submodules' })
+  expect(() => removeLocalWorktree(wt, repo.dir)).toThrow(/submodules/)
+  expect(existsSync(wt)).toBe(true)
 })
 
 // --- #113.4: the merge-back command line ---

@@ -66,6 +66,11 @@ export function opencodeApi(baseUrl: string, fetchImpl: typeof fetch = globalThi
 // be attached to, the roster has listed it through a client that asked.
 const settledApi = new Map<string, 1 | 2>()
 export const knownOpencodeApi = (baseUrl: string) => settledApi.get(baseUrl)
+// Test-only: both memos are module-wide, so without this one test's answer for a URL leaks into the next.
+export const resetOpencodeApiMemo = () => {
+  apiByUrl.clear()
+  settledApi.clear()
+}
 
 // What the roster and its hooks actually call on a client, and the type App takes rather than the
 // class itself: a class with a private field can only ever be satisfied by an instance of it, which
