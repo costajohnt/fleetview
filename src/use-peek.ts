@@ -97,7 +97,8 @@ export function usePeek({
       return
     }
     let cancelled = false
-    if (fetchedFor.current !== peekTarget) setPeekMessages(null)
+    const refetch = fetchedFor.current === peekTarget
+    if (!refetch) setPeekMessages(null)
     fetchedFor.current = peekTarget
     // `listMessages` is opencode's GET /session/:id/message. A backend without `messages` keeps its
     // transcript in a file on disk in the CLI's own format, so asking the opencode server about an
@@ -111,7 +112,8 @@ export function usePeek({
     client
       .listMessages(peekTarget.id, peekTarget.projectKey)
       .then((msgs) => { if (!cancelled) setPeekMessages(msgs) })
-      .catch(() => { if (!cancelled) setPeekMessages('error') })
+      // A failed background refetch keeps the transcript already on screen rather than replacing it.
+      .catch(() => { if (!cancelled) setPeekMessages((prev) => (refetch && Array.isArray(prev) ? prev : 'error')) })
     return () => { cancelled = true }
   }, [mode, peekTarget, peekStatus])
 

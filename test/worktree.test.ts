@@ -351,6 +351,16 @@ test('mergeBackCommand offers the merge only when the branch has commits the par
   expect(mergeBackCommand(wt, repo.dir, branch)).toBe(`git -C '${repo.dir}' merge '${branch}'`)
 })
 
+test('mergeBackCommand never offers a known no-op merge, and keeps the command when it cannot count', () => {
+  const zeroThenFail = ((_cmd: string, args: string[]) => {
+    if (args.includes('rev-list')) return '0\n'
+    throw new Error('worktree gone')
+  }) as any
+  expect(mergeBackCommand('/wt/one', '/x/repo', 'b', zeroThenFail)).toBe(null)
+  const fail = (() => { throw new Error('no git') }) as any
+  expect(mergeBackCommand('/wt/one', '/x/repo', 'b', fail)).toBe("git -C '/x/repo' merge 'b'")
+})
+
 // --- M9: worktrees fleetview makes itself, for claude and copilot ---
 
 const dataRoot = () => {

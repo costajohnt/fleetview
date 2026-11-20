@@ -252,12 +252,19 @@ export function worktreeSafety(dir: string, parentDir: string | null | undefined
 // what this showed before the check existed.
 export function mergeBackCommand(worktree: string, repo: string | null | undefined, branch: string | null | undefined, run = execFileSync) {
   if (!repo || !branch || repo === worktree) return null
+  let ahead = NaN
   try {
     // Counted in the parent: HEAD there is what `git merge` merges into. --end-of-options keeps a
     // branch the session named from ever reading as a flag.
-    const ahead = Number(git(repo, ['rev-list', '--count', '--end-of-options', `HEAD..${branch}`], run))
-    if (ahead === 0) return git(worktree, ['status', '--porcelain'], run) ? 'nothing committed yet, only uncommitted changes' : null
-  } catch {}
+    ahead = Number(git(repo, ['rev-list', '--count', '--end-of-options', `HEAD..${branch}`], run))
+  } catch {} // count unknown: fall through to the command, as before #188
+  if (ahead === 0) {
+    try {
+      return git(worktree, ['status', '--porcelain'], run) ? 'nothing committed yet, only uncommitted changes' : null
+    } catch {
+      return null // nothing to merge is known; an unreadable worktree is no reason to offer a no-op merge
+    }
+  }
   // Both halves are quoted: paths carry spaces, and branch names may legally carry `$`, backticks,
   // `;`, `&`, `|` and quotes (check-ref-format bans only space, ~^:?*[\ and control characters) —
   // and the branch is whatever the session checked out, so this copy-paste line must not trust it.

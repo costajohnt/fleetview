@@ -356,3 +356,24 @@ test('an open peek refetches the transcript when the session changes state', asy
   onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'idle' } } })
   await waitFor(() => lastFrame().includes('merged it'))
 })
+
+test('a refetch that fails keeps the transcript already on screen', async () => {
+  const deps = makeDeps()
+  deps.client.listMessages = vi.fn(() =>
+    Promise.resolve([{ info: { id: 'm1', role: 'assistant' }, parts: [{ type: 'text', text: 'first answer' }] }]),
+  ) as any
+  const { lastFrame, stdin } = render(React.createElement(App as any, { ...deps, onAction: vi.fn() }))
+  await waitFor(() => lastFrame().includes('fix tests'))
+  await waitFor(() => deps.connectEventsImpl.mock.calls.length > 0)
+  stdin.write(SPACE)
+  await waitFor(() => lastFrame().includes('first answer'))
+
+  const failing = vi.fn(() => Promise.reject(new Error('gone')))
+  deps.client.listMessages = failing as any
+  const onEvent = (deps.connectEventsImpl.mock.calls[0] as any)[1].onEvent
+  onEvent('/x/alpha', { type: 'session.status', properties: { sessionID: 's1', status: { type: 'busy' } } })
+  await waitFor(() => failing.mock.calls.length > 0)
+  await tick()
+  expect(lastFrame()).toContain('first answer')
+  expect(lastFrame()).not.toContain("couldn't load messages")
+})
