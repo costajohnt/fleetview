@@ -117,7 +117,7 @@ test('--json names the backend of a session that only its event stream has repor
   const fake = {
     ...h.claude,
     events,
-    createNormaliser: () => () => [{ type: 'session.status', properties: { sessionID: 'evt-only', status: { type: 'busy' } } }],
+    createNormaliser: () => () => [{ type: 'session.status' as const, properties: { sessionID: 'evt-only', status: { type: 'busy' as const } } }],
     listSessions: async () => [],
   }
   await listSessions({ command: 'ls', json: true, all: true }, h.ensureServer, '/tmp/s.json', { ...h.lsDeps, backends: { claude: fake } })
