@@ -297,3 +297,9 @@ test('2.x translator: text for an assistant message it never saw start announces
   expect(t({ type: 'session.step.started', created: 1, data: { sessionID: 's', assistantMessageID: 'm2' } }).map((e) => e.type)).toEqual(['message.updated', 'session.updated'])
   expect(t({ type: 'session.text.delta', data: { sessionID: 's', assistantMessageID: 'm2', ordinal: 0, delta: 'x' } }).map((e) => e.type)).toEqual(['message.part.updated'])
 })
+
+// #206: the recorded `!` shell in /fv/repo (echo hi) sends only session.shell.started and .ended.
+test('2.x: a recorded shell job reads as busy then idle', async () => {
+  const statuses = (await replay('/fv/repo')).filter((e) => e.type === 'session.status').map((e) => [e.properties.sessionID, e.properties.status.type])
+  expect(statuses).toEqual([[MINE, 'busy'], [MINE, 'idle']])
+})

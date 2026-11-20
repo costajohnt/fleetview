@@ -204,6 +204,13 @@ export function createV2Translator() {
         return [{ type: 'session.status', properties: { sessionID, status: { type: 'busy' } } }]
       case 'session.execution.succeeded':
         return [idle]
+      // A `!` shell job runs no execution at all on 2.x: these are the only frames it sends (opencode
+      // 2.3.2 schema/session-event.ts has started and ended, nothing else; recorded live in
+      // test/fixtures/opencode-2.3.2-events.sse), so they are its busy and idle (#206).
+      case 'session.shell.started':
+        return [{ type: 'session.status', properties: { sessionID, status: { type: 'busy' } } }, ...touched()]
+      case 'session.shell.ended':
+        return [idle, ...touched()]
       case 'session.execution.failed':
         return [{ type: 'session.error', properties: { sessionID, error: v1Error(d.error) } }, idle]
       // 1.x reported a user's stop as an error named MessageAbortedError, which the store records as
