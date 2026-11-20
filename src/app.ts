@@ -224,6 +224,8 @@ export function App({
   // #204: notices held for the return to the roster, drained by the attach's `back()`. A list, so a
   // dispatch-then-attach that arrives while another session is attached still gets its say.
   const returnNotices = useRef<string[]>([])
+  // #222: the attach waiting for Ink to let go of the terminal. See `attach`.
+  const [attachStart, setAttachStart] = useState<{ start: () => void } | null>(null)
   // A selection request by identity, resolved against the live rows by the effect below.
   const [pendingSelect, setPendingSelect] = useState<{ id: string; projectKey: string } | null>(null)
   const [helpPageIndex, setHelpPageIndex] = useState(0)
@@ -593,7 +595,7 @@ export function App({
     // #34: there is no session to hand the terminal over to. Say so and name the key that ends it,
     // rather than launching a CLI against an id the server has never heard of.
     if (row.ghost) return flash(`"${row.title}" is gone — ^x removes it from the roster`, 4000)
-    const done = onAction({
+    const action: AppAction = {
       type: 'enter',
       sessionId: row.id,
       worktree: row.projectKey,
@@ -608,13 +610,23 @@ export function App({
       siblings: navRows
         .flatMap((l) => (l.type === 'session' && !l.session.ghost ? [l.session] : []))
         .map((s): AttachSibling => ({ id: s.id, projectKey: s.projectKey, ...(asString(s.backend) ? { backend: asString(s.backend) } : {}) })),
-    })
+    }
+    // #222: the child is started only once `attached` has committed, from the effect below. Ink
+    // releases raw mode when the last input hook goes inactive: in that commit's passive effects it
+    // queues setRawMode(false) as a microtask, which the host's next-tick (setImmediate) re-assert
+    // then overrides. A child started before that commit could lose the race. From a keypress Ink
+    // commits at once, so it didn't; from a dispatch that awaited first (alt+enter) the commit came
+    // after the re-assert, and the attached terminal stayed cooked: ^z echoed instead of detaching.
+    attachedRef.current = true
+    setAttached(true)
+    setAttachStart({ start: () => startAttach(row, action) })
+  }
+  const startAttach = (row: AttachTarget, action: AppAction) => {
+    const done = onAction(action)
     if (isThenable(done)) {
       // Set on attach, not detach, so a hard exit of the attached PTY still leaves the marker.
       const previous = lastAttached.current
       lastAttached.current = { id: row.id, projectKey: row.projectKey }
-      attachedRef.current = true
-      setAttached(true)
       // `result` is the host's AttachOutcome, read through the same narrowing every other payload
       // gets: the host is injectable, so what settles here is not App's to assume.
       const back = (settled?: unknown) => {
@@ -650,8 +662,15 @@ export function App({
       done.then(back, () => back())
       return
     }
-    exit() // no host (tests, or an older caller): fall back to the unmount-and-spawn behaviour
+    // No host (tests, or an older caller): fall back to the unmount-and-spawn behaviour.
+    attachedRef.current = false
+    setAttached(false)
+    exit()
   }
+  // Runs after the commit that set `attached`, once Ink has queued its raw-mode release.
+  useEffect(() => {
+    attachStart?.start()
+  }, [attachStart])
 
   // Peek owns its own state, message fetch, reply/answer paths and key handling — see use-peek.ts.
   // Everything it needs from App is handed over explicitly; nothing reaches back the other way.
