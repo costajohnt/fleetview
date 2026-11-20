@@ -162,14 +162,17 @@ async function adoptServerCredential(
   // #216: `stranger` is refused like a rejection (burned all the same), but reported as one that
   // never saw the password unless some other answer here may have.
   let shown = false
+  let stranger = false
   const ask = async (): Promise<'healthy' | 'unauthorized' | 'unreachable'> => {
     const asked = await probe(saved.password && env.OPENCODE_SERVER_PASSWORD === saved.password ? saved : { ...saved, pid: null })
-    if (asked === 'stranger') return 'unauthorized'
+    stranger = asked === 'stranger'
+    if (stranger) return 'unauthorized'
     if (asked === 'unauthorized' || asked === 'unconfirmed') shown = true
     return asked !== 'unconfirmed' ? asked : isOwnServer(saved) ? 'unreachable' : 'unauthorized'
   }
   let state = await ask()
-  if (state === 'unauthorized' && saved.password && env.OPENCODE_SERVER_PASSWORD && env.OPENCODE_SERVER_PASSWORD !== saved.password) {
+  // Not after a stranger: the saved password's server is not there either, so offering it gains nothing.
+  if (state === 'unauthorized' && !stranger && saved.password && env.OPENCODE_SERVER_PASSWORD && env.OPENCODE_SERVER_PASSWORD !== saved.password) {
     env.OPENCODE_SERVER_PASSWORD = saved.password
     delete env.OPENCODE_PASSWORD // the user's, under its 2.x name; it would shadow the saved one for attach
     state = await ask()

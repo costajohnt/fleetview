@@ -930,6 +930,25 @@ test('a user-set password reaches the user\'s own server on a pid-less 2.x recor
   }
 })
 
+// #216: after a stranger answer the saved password is not tried on that port at all.
+test('a stranger answer is not retried with the saved password', async () => {
+  const probe = vi.fn(() => Promise.resolve('stranger'))
+  const deps = {
+    isServerHealthy: () => Promise.resolve(false),
+    probeServer: probe,
+    spawnServer: () => 777,
+    saveServer: () => {},
+    serverFile: '/tmp/s.json',
+    pollMs: 1,
+    processKill: () => true,
+    spawnSyncImpl: () => ({}),
+    warn: () => {},
+    env: { OPENCODE_SERVER_PASSWORD: 'user-set' } as NodeJS.ProcessEnv,
+  }
+  await makeEnsureServer(deps as any)({ ...server, password: 'old-generated', api: 2 })
+  expect((probe.mock.calls as any[]).filter((c) => c[0].port === 4900)).toHaveLength(1)
+})
+
 // #216: the end-of-walk drop only takes a password fleetview minted; a user-set one that nothing saw stays.
 test('a fallback walk that ends ok:false keeps a user-set password nothing was shown', async () => {
   const env: NodeJS.ProcessEnv = { OPENCODE_SERVER_PASSWORD: 'user-set' }
