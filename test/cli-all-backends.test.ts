@@ -86,7 +86,7 @@ test('ls asks a server-wide status snapshot once instead of each project\'s stat
   await listSessions({ command: 'ls', json: true, all: true }, h.ensureServer, '/tmp/s.json', h.lsDeps)
   expect(h.client.sessionStatus).not.toHaveBeenCalled()
   expect(statusOf).toHaveBeenCalledWith('/x/alpha', expect.arrayContaining([expect.objectContaining({ id: 'ses_open1' })]))
-  expect(JSON.parse(h.out.join('\n'))[0]).toMatchObject({ id: 'ses_open1', state: 'working' })
+  expect(JSON.parse(h.out.join('\n')).find((r: any) => r.id === 'ses_open1')).toMatchObject({ state: 'working' })
 })
 
 test('without opencode, --json still lists claude sessions and says why on stderr only', async () => {
