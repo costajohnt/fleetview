@@ -1,6 +1,10 @@
 // opencode 2.x support (#166): the 2.x API translated to the 1.x shapes the rest of fleetview reads.
 // Wire shapes here are from opencode v2.3.2's source, not a live server.
 import { test, expect, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { OpencodeClient } from '../src/backends/opencode/client.ts'
 import { v1Messages, v1Question, v2Answer } from '../src/backends/opencode/client-v2.ts'
 import { createV2Translator } from '../src/backends/opencode/event-mux.ts'
@@ -149,16 +153,77 @@ test('listMessages reverses 2.x newest-first order', async () => {
   expect((await c.listMessages('ses_1')).map((m) => m.info?.id)).toEqual(['m1', 'm2'])
 })
 
-test('worktrees go through the directory\'s project id, and removal is forced like 1.x', async () => {
-  const { c, calls } = client({
+// A repository with one commit, and a worktree of it on a detached HEAD: what 2.3.2's create leaves.
+const detachedWorktree = (name: string) => {
+  const root = mkdtempSync(join(tmpdir(), 'fleetview-v2-wt-'))
+  const repo = join(root, 'repo')
+  const wt = join(root, name)
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' }
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, env, encoding: 'utf8' }).trim()
+  mkdirSync(repo)
+  git('init', '-q')
+  git('-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'init')
+  git('worktree', 'add', '-q', '--detach', wt)
+  return { repo, wt, git }
+}
+const worktreeServer = (directory: string) =>
+  client({
     'GET /api/location': { directory: '/repo', project: { id: 'prj_1', directory: '/repo', canonical: '/repo' } },
-    'POST /api/worktree': { directory: '/wt/feature' },
+    'POST /api/worktree': { directory },
     'DELETE /api/worktree': undefined,
   })
-  expect(await c.createWorktree('feature', '/repo')).toEqual({ name: 'feature', directory: '/wt/feature' })
-  expect(calls.at(-1)!.body).toEqual({ projectID: 'prj_1', name: 'feature' })
-  await c.removeWorktree('/wt/feature', '/repo')
-  expect(calls.at(-1)!.body).toEqual({ projectID: 'prj_1', directory: '/wt/feature', force: true })
+
+test('worktrees go through the directory\'s project id, and removal is forced like 1.x', async () => {
+  const { repo, wt } = detachedWorktree('feature')
+  const { c, calls } = worktreeServer(wt)
+  expect(await c.createWorktree('feature', repo)).toEqual({ name: 'feature', directory: wt })
+  expect(calls.find((call) => call.method === 'POST')!.body).toEqual({ projectID: 'prj_1', name: 'feature' })
+  await c.removeWorktree(wt, '/repo')
+  expect(calls.at(-1)!.body).toEqual({ projectID: 'prj_1', directory: wt, force: true })
+})
+
+// #173: 2.x leaves the worktree detached, where 1.x put it on `opencode/<name>`.
+test('a created worktree is put on an opencode/ branch, stepping around a leftover one', async () => {
+  const { repo, wt, git } = detachedWorktree('feature')
+  await worktreeServer(wt).c.createWorktree('feature', repo)
+  expect(git('-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/feature')
+
+  const second = detachedWorktree('fix')
+  second.git('branch', 'opencode/fix')
+  await worktreeServer(second.wt).c.createWorktree('fix', second.repo)
+  expect(second.git('-C', second.wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/fix-2')
+})
+
+test('a worktree the server already put on a branch is left on it', async () => {
+  const { repo, wt, git } = detachedWorktree('feature')
+  git('-C', wt, 'switch', '-q', '-c', 'opencode/feature')
+  await worktreeServer(wt).c.createWorktree('feature', repo)
+  expect(git('-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('opencode/feature')
+  expect(git('branch', '--list', 'opencode/*', '--format=%(refname:short)')).toBe('opencode/feature')
+})
+
+test('a worktree that cannot be branched is removed and the failure thrown', async () => {
+  const { repo, wt } = detachedWorktree('feature')
+  // A held ref lock: update-ref cannot create the branch.
+  mkdirSync(join(repo, '.git', 'refs', 'heads', 'opencode'), { recursive: true })
+  writeFileSync(join(repo, '.git', 'refs', 'heads', 'opencode', 'feature.lock'), '')
+  const { c, calls } = worktreeServer(wt)
+  await expect(c.createWorktree('feature', repo)).rejects.toThrow(/git/)
+  expect(calls.at(-1)).toMatchObject({ method: 'DELETE', body: { projectID: 'prj_1', directory: wt, force: true } })
+})
+
+// A server-named directory that is not a linked worktree of the repository is never written to or
+// removed: the repository's own checkout, a path outside any repository, a relative path.
+test('a directory that is not a new worktree of the repository is refused untouched', async () => {
+  const { repo, git } = detachedWorktree('feature')
+  const other = detachedWorktree('elsewhere')
+  for (const dir of [repo, mkdtempSync(join(tmpdir(), 'fleetview-v2-wt-')), other.wt, 'feature']) {
+    const { c, calls } = worktreeServer(dir)
+    await expect(c.createWorktree('feature', repo)).rejects.toThrow()
+    expect(calls.some((call) => call.method === 'DELETE')).toBe(false)
+  }
+  expect(git('symbolic-ref', '--short', 'HEAD')).not.toMatch(/^opencode\//)
+  expect(git('branch', '--list', 'opencode/*')).toBe('')
 })
 
 test('providers are regrouped from the flat model list', async () => {
@@ -242,7 +307,7 @@ test('the API probe carries no credential, and only 2.x bodies read as 2.x', asy
   }
   const base = () => `http://127.0.0.1:${port++}`
   const { opencodeApi } = await import('../src/backends/opencode/client.ts')
-  process.env.OPENCODE_SERVER_PASSWORD = 'secret'
+  vi.stubEnv('OPENCODE_SERVER_PASSWORD', 'secret')
   try {
     expect(await opencodeApi(base(), answer({ _tag: 'UnauthorizedError', message: 'Authentication required' }, 401) as any)).toBe(2)
     expect(await opencodeApi(base(), answer({ version: '2.3.2', pid: 1 }, 500) as any)).toBe(2) // boot failed is still 2.x
@@ -253,7 +318,7 @@ test('the API probe carries no credential, and only 2.x bodies read as 2.x', asy
     await expect(opencodeApi(down, (() => Promise.reject(new Error('ECONNREFUSED'))) as any)).rejects.toThrow('ECONNREFUSED')
     expect(await opencodeApi(down, answer({ _tag: 'UnauthorizedError' }, 401) as any)).toBe(2)
   } finally {
-    delete process.env.OPENCODE_SERVER_PASSWORD
+    vi.unstubAllEnvs()
   }
   expect(seen.every((h) => !h?.authorization)).toBe(true)
 })

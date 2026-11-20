@@ -3,7 +3,7 @@ import { test, expect, vi, afterEach } from 'vitest'
 import { tick, waitFor } from './helpers.ts'
 import { render as inkRender } from 'ink-testing-library'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { createLocalWorktree, gitKindOf, localWorktreeRoot } from '../src/worktree.ts'
@@ -4139,6 +4139,21 @@ test('#44: a member REMOVED from roster.json externally stays in the running TUI
   await new Promise((r) => setTimeout(r, 150)) // several poll ticks
   expect(lastFrame()).toContain('fix tests')
   expect(lastFrame()).toContain('bg dispatch')
+})
+
+// #177: a member the sync brought in was never in makePersistRoster's `prev`, so removing it here
+// read as a foreign addition: the merge kept it on disk and the next poll tick synced it back.
+test('#177: a member synced in from roster.json stays removed after ^a', async () => {
+  const { deps, file, writeExternally } = rosterFileDeps([])
+  const { stdin, lastFrame } = render(React.createElement(App, { ...deps, onAction: vi.fn() }))
+  await tick()
+  writeExternally([{ worktree: '/x/alpha', id: 'bg1', addedAt: 2 }])
+  await waitFor(() => lastFrame().includes('bg dispatch'))
+  stdin.write('\x01')
+  await waitFor(() => !JSON.parse(readFileSync(file, 'utf8')).sessions.length)
+  await new Promise((r) => setTimeout(r, 150)) // several poll ticks: the sync must not bring it back
+  expect(JSON.parse(readFileSync(file, 'utf8')).sessions).toEqual([])
+  expect(lastFrame()).not.toContain('bg dispatch')
 })
 
 // #134: Option+Arrow moves the caret a word at a time, and the caret is a real position, not

@@ -32,7 +32,7 @@ test('restoreScreen puts back the input modes as well as the mouse, cursor and a
 const server = { host: '127.0.0.1', port: 4900, pid: null }
 
 test('healthy server → {ok:true, same server}, no spawn', async () => {
-  const deps = { isServerHealthy: () => Promise.resolve(true), spawnServer: () => { throw new Error('should not spawn') }, saveServer: () => { throw new Error('should not save') }, serverFile: '/tmp/s.json' }
+  const deps = { isServerHealthy: () => Promise.resolve(true), spawnServer: () => { throw new Error('should not spawn') }, saveServer: () => { throw new Error('should not save') }, serverFile: '/tmp/s.json', env: {} }
   expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: true, server })
 })
 
@@ -44,6 +44,7 @@ test('adopting a healthy server that does not enforce a set password warns once'
     spawnServer: () => { throw new Error('should not spawn') },
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     warn,
   }
   expect(await makeEnsureServer(deps as any)(server)).toEqual({ ok: true, server })
@@ -59,6 +60,7 @@ test('adopting a healthy server that enforces auth does not warn', async () => {
     spawnServer: () => { throw new Error('should not spawn') },
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     warn,
   }
   await makeEnsureServer(deps as any)(server)
@@ -401,6 +403,7 @@ test('spawn that never becomes healthy, no fallback candidate works → {ok:fals
     spawnServer: () => 777,
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     spawnSyncImpl: () => ({}), // opencode --version succeeds — not an install problem
   }
@@ -414,6 +417,7 @@ test('reap: initial candidate poll timeout kills its pid before the fallback wal
     spawnServer: () => 777,
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     processKill: (pid: any, sig: any) => killed.push([pid, sig]),
     spawnSyncImpl: () => ({}),
@@ -430,6 +434,7 @@ test('reap: a failed fallback candidate is killed before trying the next one (Im
     spawnServer: () => { spawnCalls += 1; return 700 + spawnCalls },
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     processKill: (pid: any, sig: any) => killed.push([pid, sig]),
     spawnSyncImpl: () => ({}),
@@ -445,6 +450,7 @@ test('reap: processKill throwing (already-dead pid) does not crash ensureServer'
     spawnServer: () => 777,
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     processKill: () => { throw new Error('ESRCH') },
     spawnSyncImpl: () => ({}),
@@ -462,6 +468,7 @@ test('ENOENT (opencode not installed) fails before any spawn or poll, with its o
     spawnServer: () => { spawnCalls += 1; return 777 },
     saveServer: () => { throw new Error('should not save a record for a server that cannot exist') },
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     spawnSyncImpl: vi.fn(() => ({ error: { code: 'ENOENT' } })),
   }
@@ -872,6 +879,7 @@ const serverHarness = ({ healthy = true, pid = 4242, identity = { ok: true, comm
     log: (m: any) => out.push(m),
     error: (m: any) => errs.push(m),
     setExitCode: (c: any) => codes.push(c),
+    env: {},
   }
   return { out, errs, codes, killed, deps }
 }
@@ -1229,13 +1237,17 @@ test('port bind-fails on the configured port → falls back to the next free por
     spawnServer: (s: any) => { spawnCalls.push(s.port); return 555 },
     saveServer: (file: any, s: any) => saved.push([file, s]),
     serverFile: '/tmp/s.json',
+    env: {} as NodeJS.ProcessEnv,
     pollMs: 1,
     spawnSyncImpl: () => ({}),
   }
   const result = await makeEnsureServer(deps as any)(server)
-  expect(result).toEqual({ ok: true, server: { host: '127.0.0.1', port: 4901, pid: 555 } })
+  // No password in the environment, so the spawn mints one and the fallback record carries it.
+  const password = deps.env.OPENCODE_SERVER_PASSWORD
+  expect(password).toMatch(/^[0-9a-f-]{36}$/)
+  expect(result).toEqual({ ok: true, server: { host: '127.0.0.1', port: 4901, pid: 555, password } })
   expect(spawnCalls).toEqual([4900, 4901])
-  expect(saved.at(-1)).toEqual(['/tmp/s.json', { host: '127.0.0.1', port: 4901, pid: 555 }])
+  expect(saved.at(-1)).toEqual(['/tmp/s.json', { host: '127.0.0.1', port: 4901, pid: 555, password }])
 })
 
 test('port fallback exhausted (all 10 candidates unhealthy) → {ok:false, reason}', async () => {
@@ -1244,6 +1256,7 @@ test('port fallback exhausted (all 10 candidates unhealthy) → {ok:false, reaso
     spawnServer: () => 555,
     saveServer: () => {},
     serverFile: '/tmp/s.json',
+    env: {},
     pollMs: 1,
     spawnSyncImpl: () => ({}),
   }
@@ -1602,12 +1615,52 @@ test('an out-of-range option lists the real ones instead of answering', async ()
   expect(h.client.respondQuestion).not.toHaveBeenCalled()
 })
 
-// A digit is only an option pick when a question is actually waiting — otherwise it is a short reply.
-test('a number with no question waiting is sent as text', async () => {
+// #175: a bare number is always an option pick; with no question waiting it refuses instead of
+// prompting the model with "2".
+test('a number with no question waiting refuses rather than sending a stray prompt', async () => {
   const h = answerHarness()
   await runAnswer({ command: 'answer', id: 'ses_abc1', reply: '2' }, h.deps)
-  expect(h.client.promptAsync).toHaveBeenCalledWith('ses_abc123', '2', '/x/repo')
-  expect(h.out).toEqual(['sent to ses_abc123'])
+  expect(h.errs).toEqual(['nothing is waiting on ses_abc123'])
+  expect(h.codes).toEqual([1])
+  expect(h.client.promptAsync).not.toHaveBeenCalled()
+})
+
+test('a number on a session waiting for a permission points at y/a/d', async () => {
+  const h = answerHarness({ permissions: [pendingPermission] })
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: '1' }, h.deps)
+  expect(h.errs[0]).toMatch(/waiting on a permission/)
+  expect(h.codes).toEqual([1])
+  expect(h.client.respondPermission).not.toHaveBeenCalled()
+  expect(h.client.promptAsync).not.toHaveBeenCalled()
+})
+
+// #175: an unreadable /question or /permission is not "nothing pending" — a pick or y/a/d refuses.
+test('a failed pending-request read refuses a number or y/a/d instead of prompting with it', async () => {
+  for (const [reply, failing, kind] of [['2', 'listQuestions', 'questions'], ['y', 'listPermissions', 'permissions']]) {
+    const h = answerHarness({ questions: [pendingQuestion] })
+    h.client[failing as 'listQuestions'] = vi.fn(() => Promise.reject(new Error('GET → 503')))
+    await runAnswer({ command: 'answer', id: 'ses_abc1', reply }, h.deps)
+    expect(h.errs).toEqual([`couldn't read pending ${kind} on ses_abc123: GET → 503`])
+    expect(h.codes).toEqual([1])
+    expect(h.client.promptAsync).not.toHaveBeenCalled()
+    expect(h.client.respondQuestion).not.toHaveBeenCalled()
+  }
+})
+
+test('one failing list does not block a reply that only needs the other', async () => {
+  const h = answerHarness({ permissions: [pendingPermission] })
+  h.client.listQuestions = vi.fn(() => Promise.reject(new Error('404')))
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'y' }, h.deps)
+  expect(h.client.respondPermission).toHaveBeenCalledWith('per_1', 'once', '/x/repo')
+  expect(h.codes).toEqual([])
+})
+
+test('free text still sends when the pending-request read fails', async () => {
+  const h = answerHarness()
+  h.client.listQuestions = vi.fn(() => Promise.reject(new Error('503')))
+  await runAnswer({ command: 'answer', id: 'ses_abc1', reply: 'use the other branch' }, h.deps)
+  expect(h.client.promptAsync).toHaveBeenCalledWith('ses_abc123', 'use the other branch', '/x/repo')
+  expect(h.codes).toEqual([])
 })
 
 test('anything else is sent as a follow-up prompt', async () => {
@@ -1684,6 +1737,17 @@ test('watch ignores other sessions on the same project stream', async () => {
   h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
   await done
   expect(h.out).toEqual(['mine'])
+})
+
+test('watch skips reasoning parts and prints only the reply (#174)', async () => {
+  const h = watchHarness()
+  const done = runWatch({ command: 'watch', id: 'ses_abc1' }, h.deps as any)
+  await h.opened()
+  h.emit({ type: 'message.part.updated', properties: { sessionID: 'ses_abc123', part: { type: 'reasoning', id: 'prt_r', text: 'The user wants me to count.' } } })
+  h.emit(part('1 2 3'))
+  h.emit({ type: 'session.status', properties: { sessionID: 'ses_abc123', status: { type: 'idle' } } })
+  await done
+  expect(h.out).toEqual(['1 2 3'])
 })
 
 test('a shorter text under the same key is a new part, printed whole', async () => {

@@ -60,9 +60,9 @@ type AppProps = {
   seen?: SeenMap
   persistSeen?: (snapshot: SeenMap, liveProjectKeys: string[]) => void
   roster?: RosterState
-  // `reload` is optional so any caller can pass a bare callback; only makePersistRoster's carries
-  // it, and without it the #44 external-member sync is simply off.
-  persistRoster?: ((roster: RosterState) => void) & { reload?: () => RosterState | null }
+  // `reload`/`adopt` are optional so any caller can pass a bare callback; only makePersistRoster's
+  // carries them, and without them the #44 external-member sync is simply off.
+  persistRoster?: ((roster: RosterState) => void) & { reload?: () => RosterState | null; adopt?: (members: RosterState['sessions']) => void }
   initialModel?: ModelPair | null
   initialAgent?: string | null
   backends?: Record<string, Backend>
