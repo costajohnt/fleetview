@@ -125,6 +125,19 @@ test('makePersistRoster does not treat a foreign addition as a later deletion (#
   expect(loadRoster(file).sessions.map((s) => s.id)).toEqual(['existing', 'from-bg'])
 })
 
+// #177: a member synced in through reload (not persist) was never in prev, so removing it here
+// looked like a foreign addition to keep, and the next sync re-added it.
+test('makePersistRoster removes a member adopted through reload when this instance drops it (#177)', () => {
+  const file = tmpFile()
+  const mounted = rosterOf(member('existing'))
+  saveRoster(file, mounted)
+  const persist = makePersistRoster({ roster: mounted, file })
+  saveRoster(file, rosterOf(member('existing'), member('from-bg'))) // `fleetview bg` in another terminal
+  expect(persist.reload()?.sessions.map((s) => s.id)).toEqual(['existing', 'from-bg']) // synced into state
+  persist(rosterOf(member('existing'))) // ^x removed from-bg
+  expect(loadRoster(file).sessions.map((s) => s.id)).toEqual(['existing'])
+})
+
 test('makePersistRoster lets this instance win the fields of members it knows', () => {
   const file = tmpFile()
   const mounted = rosterOf(member('a'), member('b'))

@@ -380,8 +380,8 @@ export function useDiscovery({
     //
     // Nothing already in state is ever rewritten from disk — a pin, rank, prompt or collapse this
     // instance just made stays exactly as it is, and groupBy/collapsed are never read at all. And
-    // nothing is persisted here: these members are on disk already, and writing back would hand
-    // makePersistRoster's `prev` a foreign member to later mistake for one of its own.
+    // nothing is persisted here: these members are on disk already. reload itself records them as
+    // known (#177), so a later ^x of one is a removal here rather than a foreign member to keep.
     const syncExternalMembers = () => {
       const disk = persistRoster?.reload?.() // null when unchanged, unreadable, or not wired (tests)
       if (!disk) return
