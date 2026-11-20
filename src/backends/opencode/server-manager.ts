@@ -61,7 +61,13 @@ export async function isServerHealthy(server: ServerRef, fetchImpl = globalThis.
 // listening on that port and enforcing a password fleetview doesn't hold, which is the opposite of
 // "nothing there" even though both read as unhealthy — spawning onto it can never bind, and the
 // occupant may be fleetview's own server under a password only server.json remembers.
-export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetch): Promise<'healthy' | 'unauthorized' | 'unreachable'> {
+//
+// `unconfirmed` (#202): the listener asked for the credential, was shown it, and then failed to answer
+// properly (a non-2xx other than 401, or no answer at all). That is fleetview's own server booting or
+// overloaded, or a stranger that now holds the password; only the caller knows which pid it spawned,
+// so the caller decides, and anything it cannot prove is its own is treated as having seen it.
+export type ProbeState = 'healthy' | 'unauthorized' | 'unreachable' | 'unconfirmed'
+export async function probeServer(server: ServerRef, fetchImpl = globalThis.fetch): Promise<ProbeState> {
   // opencode 1.x answers GET /project with its project list. 2.x serves its web app there (200
   // text/html, no auth) and keeps the JSON API under /api, so a 1.x miss is asked again as 2.x.
   const base = `http://${server.host}:${server.port}`
@@ -83,8 +89,9 @@ async function askServer(
   looksRight: (body: unknown) => boolean,
   fetchImpl: typeof fetch,
   wantsCredential: (res: Response) => Promise<boolean> = async () => true,
-) {
+): Promise<ProbeState> {
   const url = `http://${server.host}:${server.port}${path}`
+  let presented = false
   try {
     // The first request carries NO credential, on purpose. fleetview adopts the password from
     // server.json before it has any evidence about who holds the port, so an authenticated first
@@ -92,24 +99,33 @@ async function askServer(
     // fleetview's server and not opencode at all. Only a 401 is evidence the listener wants a
     // credential, and only then is one presented, on a single retry. Costs one extra round trip on
     // the password path; changes no adoption semantics.
-    let res = await fetchImpl(url, { signal: AbortSignal.timeout(2000) })
-    if (res.status === 401) {
-      const auth = authHeader()
-      if (!auth || !(await wantsCredential(res))) return 'unauthorized'
-      res = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
-      if (res.status === 401) return 'unauthorized'
-    }
-    // 2.x answers 503 while it boots; like any other non-2xx, that is "not yet", and the poll asks again.
-    if (!res.ok) return 'unreachable'
-    let body
-    try {
-      body = await res.json()
-    } catch {
-      return 'unreachable'
-    }
-    return looksRight(body) ? 'healthy' : 'unreachable'
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(2000) })
+    if (res.status !== 401) return (await answered(res, looksRight)) ? 'healthy' : 'unreachable'
+    const auth = authHeader()
+    if (!auth || !(await wantsCredential(res))) return 'unauthorized'
+    presented = true
+    const authed = await fetchImpl(url, { headers: { authorization: auth }, signal: AbortSignal.timeout(2000) })
+    // #202: the credential has now been shown. A 401 or a 2xx that isn't opencode is a rejection;
+    // any other non-2xx is `unconfirmed` (see ProbeState), never plain `unreachable`, since any
+    // listener can answer 503 with a copied boot body to keep the password from being burned.
+    if (authed.ok) return (await bodyLooksRight(authed, looksRight)) ? 'healthy' : 'unauthorized'
+    return authed.status === 401 ? 'unauthorized' : 'unconfirmed'
   } catch {
-    return 'unreachable'
+    // Same rule for a listener that took the credential and then hung or reset.
+    return presented ? 'unconfirmed' : 'unreachable'
+  }
+}
+
+// 2.x answers 503 while it boots; like any other non-2xx, that is "not yet", and the poll asks again.
+async function answered(res: Response, looksRight: (body: unknown) => boolean) {
+  return res.ok && bodyLooksRight(res, looksRight)
+}
+
+async function bodyLooksRight(res: Response, looksRight: (body: unknown) => boolean) {
+  try {
+    return looksRight(await res.json())
+  } catch {
+    return false
   }
 }
 
@@ -151,18 +167,22 @@ function isProjectList(body: unknown): boolean {
 // set there is nothing to enforce, and that no-password case is exactly where adopting a foreign
 // listener is most likely and least visible. Saying so is the adoption notice's job in
 // makeEnsureServer, which reports the no-password case rather than leaving this `true` silent.
-export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.fetch) {
+//
+// null: the check itself failed, so there is no evidence either way. #202: that used to read as true,
+// and a listener that answered the probe and then hung this one request kept receiving the password.
+export async function isAuthEnforced(server: ServerRef, fetchImpl = globalThis.fetch): Promise<boolean | null> {
   if (!authHeader()) return true
   try {
     // Either API refusing counts. 2.x serves /project (its web app) to anyone and enforces on /api,
     // so asking /project alone would call every 2.x server unprotected.
-    for (const path of ['/project', '/api/info']) {
-      const res = await fetchImpl(`http://${server.host}:${server.port}${path}`, { signal: AbortSignal.timeout(2000) })
-      if (res.status === 401) return true
-    }
-    return false
+    // On /api/info only 2.x's own 401 body counts: a 1.x without its embedded UI proxies that path to
+    // app.opencode.ai, whose 401 would otherwise hide an unprotected 1.x (same test as probeServer).
+    const base = `http://${server.host}:${server.port}`
+    if ((await fetchImpl(`${base}/project`, { signal: AbortSignal.timeout(2000) })).status === 401) return true
+    const info = await fetchImpl(`${base}/api/info`, { signal: AbortSignal.timeout(2000) })
+    return info.status === 401 && (await isV2Unauthorized(info))
   } catch {
-    return true // a transient network failure is not evidence auth is off; don't nag
+    return null
   }
 }
 
