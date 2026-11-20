@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, join, resolve } from 'node:path'
-import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
+import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, Part, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 import { opencodeRequest } from './request.ts'
 import { stateDir } from '../../paths.ts'
@@ -108,7 +108,7 @@ export function v2Answer(form: Record<string, unknown>, answers: unknown) {
 // `state.output`, which messageBody shows for a turn with no text: a 2.x tool's result is a list of
 // content blocks, a shell job's is `output.output`. Everything else (compaction, switches) has no
 // 1.x row.
-const toolPart = (output: string, messageID: string | undefined) => ({ type: 'tool', state: { output }, messageID })
+const toolPart = (output: string, messageID: string | undefined): Part => ({ type: 'tool', state: { output }, messageID })
 const contentText = (value: unknown) => records(value).filter((c) => c.type === 'text').map((c) => asString(c.text) ?? '').join('\n')
 export function v1Messages(rows: Record<string, unknown>[]): OpencodeMessage[] {
   const out: OpencodeMessage[] = []
@@ -116,7 +116,7 @@ export function v1Messages(rows: Record<string, unknown>[]): OpencodeMessage[] {
     const id = asString(m.id)
     if (m.type === 'user') out.push({ info: { id, role: 'user' }, parts: [{ type: 'text', text: asString(m.text) ?? '', messageID: id }] })
     else if (m.type === 'assistant') {
-      const parts = records(m.content).flatMap((c) =>
+      const parts = records(m.content).flatMap((c): Part[] =>
         c.type === 'text'
           ? [{ type: 'text', text: asString(c.text) ?? '', messageID: id }]
           : c.type === 'tool'
