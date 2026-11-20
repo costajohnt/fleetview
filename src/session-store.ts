@@ -68,8 +68,8 @@ type SessionRecord = {
   statusSeq?: number
   // The `seq` at which something last REMOVED pending entries from this record — a
   // permission.replied, a question.replied/rejected, or the idle transition that clears both maps.
-  // Only the additive seed reads it, and it is the answer to the resurrection race: an additive
-  // seed carries a snapshot taken at `mark`, and any removal stamped >= mark happened after that
+  // The seeds read it, and it is the answer to the resurrection race: a seed (additive or
+  // authoritative, #178) carries a snapshot taken at `mark`, and any removal stamped >= mark happened after that
   // snapshot was taken, so re-adding from it would resurrect a request the user has already
   // answered. The plain `__seq` watermark cannot cover this on its own — it stamps entries that
   // EXIST, and the whole problem here is an entry that no longer does, so there is nothing left to
@@ -906,11 +906,16 @@ export function createStore() {
           if (isRunOpen(r)) r.runEndedAt = Date.now() // closes the span ranForMs reports
           r.pendingPermissions.clear()
           r.pendingQuestions.clear()
-          // Must be >= mark, or the SAME seedLiveState call's additive seedPermissions/seedQuestions
-          // re-inserts everything this just cleared (they skip a record whose pendingClearedSeq >=
-          // their mark). `seq++` when no mark was passed: an unbounded Infinity here would block
-          // additive re-adds on that record forever, and the live counter is what the event path uses.
+          // Must be >= mark, or the SAME seedLiveState call's seedPermissions/seedQuestions
+          // re-inserts everything this just cleared (they refuse a re-insert on a record whose
+          // pendingClearedSeq >= their mark, additive or not since #178). `seq++` when no mark was
+          // passed: an unbounded Infinity here would block additive re-adds on that record forever,
+          // and the live counter is what the event path uses.
           r.pendingClearedSeq = Number.isFinite(mark) ? mark : seq++
+          // #178: and the next seed's mark must be above it. seedMark() is just `seq`, so on a quiet
+          // store the next poll got this same mark and refused a request asked after the idle until
+          // some unrelated event moved the counter.
+          if (seq <= r.pendingClearedSeq) seq = r.pendingClearedSeq + 1
         }
         if (isRunningStatus(r.lastStatus)) {
           r.hasRun = true
@@ -982,6 +987,13 @@ export function createStore() {
         // `__askedAt` stamps that order the queue and drive the "waiting Nm" clock, and a seed
         // overwrite would reset them to the moment fleetview happened to re-read the list.
         if (additive && (r.origin || r.pendingClearedSeq >= mark || r.pendingPermissions.has(perm.id))) return
+        // #178: the answered-race is not additive-only. A mount/onOnline/reconcile seed whose GET was
+        // in flight when a reply landed lists the answered request too, and re-adding it left a
+        // phantom `waiting` (bell, tab count, needs-input hook) the additive pass never deletes.
+        // Entries still present are refreshed as before; only a re-insert is refused. Per-record like
+        // the additive rule, so a different request the store missed on the same session waits one
+        // poll for the next additive pass (its fresh mark is above this clear) instead of now.
+        if (r.pendingClearedSeq >= mark && !r.pendingPermissions.has(perm.id)) return
         const existing = r.pendingPermissions.get(perm.id)
         // #55: strictly inside (mark-1, mark) — above every already-issued integer stamp (all
         // <= mark-1), below anything applied live during the seed's flight (>= mark), and preserving
@@ -1019,6 +1031,7 @@ export function createStore() {
         const r = upsert(projectKey, q.sessionID)
         if (!r) return
         if (additive && (r.origin || r.pendingClearedSeq >= mark || r.pendingQuestions.has(q.id))) return
+        if (r.pendingClearedSeq >= mark && !r.pendingQuestions.has(q.id)) return // #178: see seedPermissions
         const existing = r.pendingQuestions.get(q.id)
         const seedSeq = mark - 1 + (i + 1) / (fresh.length + 1) // #55: see seedPermissions
         r.pendingQuestions.set(q.id, {
