@@ -20,7 +20,7 @@ import { isRecord, type ListedSession, type OpencodeEvent } from './types.ts'
 type StoreEvent = OpencodeEvent
 
 // Rows for `setSessions`, one function per backend, referenced from each adapter's
-// `normaliseSessions` (Backend contract, H3). opencode has no entry here: its own listings pass
+// `normaliseSessions` (ProcessBackend contract, H3). opencode has no entry here: its own listings pass
 // through untouched (no normaliser at all), and this file must never become a place opencode's
 // payloads get rewritten, because that is the one path where behaviour is fixed.
 

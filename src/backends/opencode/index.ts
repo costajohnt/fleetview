@@ -10,7 +10,7 @@ import { isAbsolute } from 'node:path'
 // opencode is the server-backed family, so every flag is true — which is exactly why the flags could
 // not be inferred from it. It is the parity baseline the process-backed backends are measured
 // against, not the default. Exported because it doubles as the fallback capability set where a
-// row's backend cannot be resolved (app.ts, use-peek.ts).
+// row's backend cannot be resolved (use-peek.ts's `capabilitiesOf` default).
 export const OPENCODE_CAPABILITIES = {
   rename: true, // PATCH /session/:id
   delete: true, // DELETE /session/:id
@@ -33,9 +33,9 @@ export function createOpencodeBackend({ server, client }: { server: ServerRef; c
     name: 'opencode',
     capabilities: OPENCODE_CAPABILITIES,
     prompt: (id, text, directory) => client.promptAsync(id, text, directory),
-    fork: (id, directory) => client.forkSession(id, directory), // POST /session/:id/fork
-    listMessages: (id, directory) => client.listMessages(id, directory), // GET /session/:id/message, what peek renders
-    shell: (id, command, directory) => client.runShell(id, command, directory), // POST /session/:id/shell, peek's `!` reply
+    fork: (id, directory) => client.forkSession(id, directory),
+    listMessages: (id, directory) => client.listMessages(id, directory),
+    shell: (id, command, directory) => client.runShell(id, command, directory),
     // 2.x has no `attach`: its TUI takes the server as a flag and the directory as an argument, and
     // reads the password from the environment (OPENCODE_PASSWORD, else OPENCODE_SERVER_PASSWORD).
     attach: ({ id, directory }) => serverApi() === 2

@@ -1,4 +1,5 @@
 import { withMember, type Roster } from './roster-store.ts'
+import { DEFAULT_BACKEND } from './backends/index.ts'
 import type { AppAction, AttachTarget, Backend, ModelPair } from './types.ts'
 import type { SeenMap } from './seen-store.ts'
 import type { SessionStore } from './session-store.ts'
@@ -54,10 +55,8 @@ export function useSlashCommands({
     }
     if (command === 'fork') {
       if (!current) return flash('select a session to fork')
-      // Capability gate, driven only by the row's own adapter: claude has --fork-session but its
-      // adapter has no fork(), and copilot has no fork at all — either way the honest answer is to
-      // say so. The fork and its prompt go through that adapter too (#187), so a session id never
-      // reaches a server that doesn't own it.
+      // Gated on the row's own adapter: claude's has no fork() yet (--fork-session exists), copilot
+      // has no fork at all.
       const backend = backendFor(current)
       const fork = backend.fork
       if (!fork) {
@@ -71,15 +70,23 @@ export function useSlashCommands({
         try {
           const forked = await fork(row.id, row.projectKey)
           forkedId = forked.id
-          updateRoster((prev) => withMember(prev, row.projectKey, forked.id, args ? { prompt: args.slice(0, 2000) } : {}))
+          // The fork belongs to the backend that made it, tagged the way dispatchOnBackend tags a
+          // dispatch, so its later keys go to that adapter and not to opencode.
+          const external = backend.name !== DEFAULT_BACKEND
+          if (external) store.noteOrigin(row.projectKey, forked.id, backend.name)
+          updateRoster((prev) =>
+            withMember(prev, row.projectKey, forked.id, { ...(args ? { prompt: args.slice(0, 2000) } : {}), ...(external ? { backend: backend.name } : {}) }),
+          )
           if (args) await backend.prompt(forked.id, args, row.projectKey)
           done = true
           flash(`forked → ${forked.id.slice(0, 12)}${args ? ' (prompt sent)' : ''}`)
-          store.setSessions(row.projectKey, await client.listSessions(row.projectKey), seen)
+          // opencode's listing is the only one that knows an opencode fork; another backend's row
+          // is picked up by its own periodic listing.
+          if (!external) store.setSessions(row.projectKey, await client.listSessions(row.projectKey), seen)
         } catch {
           // Only the refresh failed: the fork and its prompt landed, and the next poll relists.
           if (done) return
-          // The fork exists once forkSession answered: "couldn't fork" would invite a retry that
+          // The fork exists once fork() answered: "couldn't fork" would invite a retry that
           // makes a second one. Say which half failed.
           flash(forkedId ? `forked → ${forkedId.slice(0, 12)}, but the prompt was not sent` : "couldn't fork — server refused", 4000)
         }

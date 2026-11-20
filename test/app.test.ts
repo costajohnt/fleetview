@@ -3560,6 +3560,8 @@ test("/fork and peek on a non-opencode row that can fork and read messages use t
   await waitFor(() => claude.prompt.mock.calls.length > 0)
   expect(claude.fork).toHaveBeenCalledWith('c1', '/x/alpha')
   expect(claude.prompt).toHaveBeenCalledWith('c2', 'go on', '/x/alpha')
+  // the fork is claude's row, not an opencode one, so a restart routes it back to the claude adapter
+  await waitFor(() => deps.persistRoster.mock.calls.some(([r]: any) => r.sessions.some((m: any) => m.id === 'c2' && m.backend === 'claude')))
   expect(deps.client.forkSession).not.toHaveBeenCalled()
   expect(deps.client.promptAsync).not.toHaveBeenCalled()
   stdin.write(' ') // peek the selected claude row

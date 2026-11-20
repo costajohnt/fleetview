@@ -1,7 +1,8 @@
 // The backend registry: the one place that knows which agent CLIs fleetview can drive and how to
 // build one. Everything else takes a `Record<string, Backend>` and a name — normalisation included,
-// since every process-backed adapter carries its own normaliseSessions/createNormaliser (#83) — so adding a fourth
-// CLI is a line here plus its own folder, not a branch in the roster or in backend-normalise.ts.
+// since every process-backed adapter carries its own normaliseSessions/createNormaliser (#83) — so
+// adding a fourth CLI is a line here plus its own folder, not a branch in the roster or in
+// backend-normalise.ts.
 import { accessSync, constants } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import type { Backend, ProcessBackend, ServerRef } from '../types.ts'

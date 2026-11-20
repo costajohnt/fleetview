@@ -32,7 +32,8 @@ export function usePeek({
   serverReady,
   attached,
   // Per-row backend wiring from App. `backendFor` resolves a row's adapter — opencode's included
-  // (H2), so the paths below branch on the adapter's own name rather than on whether one exists;
+  // (H2): the transcript and `!` paths below ask whether it has listMessages/shell, and only the
+  // saved-reply queue branches on its name;
   // `capabilitiesOf` is the only thing allowed to decide whether an answer key does anything, and
   // falls back to opencode's flags for a row whose backend cannot be resolved.
   backendFor,
@@ -100,11 +101,8 @@ export function usePeek({
     const refetch = fetchedFor.current === peekTarget
     if (!refetch) setPeekMessages(null)
     fetchedFor.current = peekTarget
-    // A backend without `listMessages` keeps its transcript in a file on disk in the CLI's own
-    // format, so asking the opencode server about an id it has never heard of would render a fetch
-    // failure for a session that is perfectly healthy. Say what is actually true instead. The
-    // row's own adapter, not `backendFor(...) !== null` (M13) or a raw client (#187): the contract
-    // exists so nothing identity-tests adapters.
+    // No listMessages (claude, copilot): the transcript is a file in the CLI's own state dir, so
+    // say so rather than render a fetch failure for a healthy session.
     const backend = backendFor(peekTarget)
     if (!backend.listMessages) {
       setPeekMessages('unsupported')
@@ -148,9 +146,10 @@ export function usePeek({
     const external = backend.name !== DEFAULT_BACKEND
     // A `!` reply is the backend's shell route; the process-backed CLIs have no equivalent, and
     // sending the command as a prompt would run something else entirely.
-    if (bang && !backend.shell) return setPeekError({ id: row.id, message: "! shell replies run on opencode only" })
+    const shell = backend.shell
+    if (bang && !shell) return setPeekError({ id: row.id, message: "! shell replies run on opencode only" })
     try {
-      if (bang) await backend.shell!(row.id, body, row.projectKey)
+      if (shell && bang) await shell(row.id, body, row.projectKey)
       // A follow-up IS in the Backend contract (prompt()) — on opencode it is the same promptAsync
       // call this always made, and on both process backends it is a resume of the same session.
       else await backend.prompt(row.id, body, row.projectKey)

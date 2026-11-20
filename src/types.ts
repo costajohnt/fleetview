@@ -232,9 +232,8 @@ export type ServerRef = {
 
 // What a backend can actually do, so the UI can degrade honestly instead of offering a key that
 // silently does nothing. Every flag is required — a new backend has to state its answer rather than
-// inherit opencode's by omission. Fork and a readable transcript are not flags: they are the
-// optional `fork`/`listMessages` methods on Backend, whose presence is the capability (#187), so a
-// "supported" fork can never route to a server that does not own the session.
+// inherit opencode's by omission. Fork, a readable transcript and shell are optional Backend methods
+// instead of flags (#187).
 export type BackendCapabilities = {
   rename: boolean
   delete: boolean // the CLI can remove a stored session; false means ^x^x can only stop, not delete

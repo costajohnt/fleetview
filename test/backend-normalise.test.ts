@@ -6,7 +6,7 @@ import { BACKEND_NAMES, DEFAULT_BACKEND, defaultBackendName, isBackendName } fro
 import { createClaudeBackend } from '../src/backends/claude/index.ts'
 import { createCopilotBackend } from '../src/backends/copilot/index.ts'
 
-// The normalisers live on each process-backed adapter (Backend contract, #83), so the fixtures reach
+// The normalisers live on each process-backed adapter (ProcessBackend contract, #83), so the fixtures reach
 // them the way the roster does: through the adapter. opencode has none: its payloads are the
 // store's vocabulary already (#187).
 const adapters: Record<string, any> = {
