@@ -1,8 +1,9 @@
 // opencode 2.x support (#166): the 2.x API translated to the 1.x shapes the rest of fleetview reads.
 // Wire shapes here are from opencode v2.3.2's source, not a live server.
 import { test, expect, vi } from 'vitest'
+import { homedir } from 'node:os'
 import { OpencodeClient } from '../src/backends/opencode/client.ts'
-import { v1Messages, v1Question, v2Answer } from '../src/backends/opencode/client-v2.ts'
+import { serverHome, v1Messages, v1Question, v2Answer } from '../src/backends/opencode/client-v2.ts'
 import { createV2Translator } from '../src/backends/opencode/event-mux.ts'
 import { probeServer } from '../src/backends/opencode/server-manager.ts'
 import { createOpencodeBackend } from '../src/backends/opencode/index.ts'
@@ -59,6 +60,43 @@ test('projects map canonical to worktree, with worktrees filled into sandboxes (
     'GET /api/worktree': [{ directory: '/repo' }, { directory: '/wt/feature' }],
   })
   expect(await c.listProjects()).toEqual([expect.objectContaining({ worktree: '/repo', sandboxes: ['/wt/feature'] })])
+})
+
+// #172: 2.x makes the directory a request resolves to a project, and ~ as a project floods the
+// roster with every Claude Code session run from home.
+test('the ~ an earlier fleetview registered and the pinned directory are not projects', async () => {
+  const { c } = client({
+    'GET /api/project': [
+      { id: 'home', canonical: homedir(), sandboxes: [] },
+      { id: 'pinned', canonical: serverHome(), sandboxes: [] },
+      { id: 'p1', canonical: '/repo', vcs: 'git', sandboxes: [] },
+    ],
+    'GET /api/worktree': [],
+    'GET /api/session': { data: [] },
+  })
+  expect((await c.listProjects()).map((p) => p.worktree)).toEqual(['/repo'])
+})
+
+test('a ~ with opencode sessions of its own, or that is a repository, stays a project', async () => {
+  const withSessions = client({
+    'GET /api/project': [{ id: 'home', canonical: homedir(), sandboxes: [] }],
+    'GET /api/worktree': [],
+    'GET /api/session': { data: [{ id: 'ses_1', location: { directory: homedir() }, time: {} }] },
+  })
+  expect((await withSessions.c.listProjects()).map((p) => p.worktree)).toEqual([homedir()])
+  const repo = client({ 'GET /api/project': [{ id: 'home', canonical: homedir(), vcs: 'git', sandboxes: [] }], 'GET /api/worktree': [] })
+  expect((await repo.c.listProjects()).map((p) => p.worktree)).toEqual([homedir()])
+})
+
+test('agents, commands and models are asked for in the pinned directory, never the server cwd', async () => {
+  const { c, calls } = client({ 'GET /api/agent': { data: [] }, 'GET /api/command': { data: [] }, 'GET /api/model': { data: [] } })
+  await c.listAgents()
+  await c.listCommands()
+  await c.providers()
+  const pinned = encodeURIComponent(serverHome())
+  for (const route of ['/api/agent', '/api/command', '/api/model']) {
+    expect(calls.find((call) => new URL(call.url).pathname === route)!.headers['x-opencode-directory']).toBe(pinned)
+  }
 })
 
 test('session status keeps only this directory\'s running sessions, as busy', async () => {

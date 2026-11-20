@@ -5,10 +5,13 @@
 //
 // Shapes are from opencode v2.3.2's source (packages/schema, packages/protocol); see #166. Only
 // what fleetview reads is mapped, and reads stay defensive, as in types.ts.
-import { basename } from 'node:path'
+import { mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, join } from 'node:path'
 import type { ListedSession, OpencodeMessage, OpencodeSessionStatus, PermissionAsked, Project, QuestionAsked, Worktree } from '../../types.ts'
 import { asString, isRecord } from '../../types.ts'
 import { stripControl } from '../../text-utils.ts'
+import { stateDir } from '../../paths.ts'
 import type { AgentInfo, CommandInfo, ModelSelection, ProvidersResponse } from './client.ts'
 
 type Auth = () => string | undefined
@@ -112,6 +115,17 @@ function v2Model(model: ModelSelection | undefined) {
   return slash > 0 ? { providerID: model.slice(0, slash), id: model.slice(slash + 1) } : undefined
 }
 
+// 2.x registers whatever directory a request resolves to as a project, and a request without a
+// directory resolves to the server's cwd. fleetview spawned servers in ~ and asked for agents,
+// commands and models with no directory, so ~ became a project and every Claude Code session ever
+// run from home joined the roster (#172). Those calls, and the server's cwd, are pinned to this
+// empty directory instead; it exists because the server refuses a directory that doesn't.
+export const serverHome = () => {
+  const dir = join(stateDir(), 'opencode-home')
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  return dir
+}
+
 export class OpencodeV2Client {
   baseUrl: string
   fetch: typeof fetch
@@ -148,8 +162,21 @@ export class OpencodeV2Client {
     // project's worktrees in `sandboxes`, which is how the roster finds worktree sessions after a
     // restart; 2.3.2 leaves it empty (verified live), so it is filled from the worktree list.
     const projects = records(unwrap(await this.req('GET', '/api/project')))
+    // Drop the pinned directory, and the ~ an earlier fleetview registered (#172): a ~ that is not a
+    // repository and has no opencode sessions of its own was never a project anyone chose.
+    const home = homedir()
+    const pinned = serverHome()
+    const kept: Record<string, unknown>[] = []
+    for (const p of projects) {
+      const dir = String(p.canonical ?? p.directory ?? '')
+      if (dir === pinned) continue
+      // A failed look counts as sessions: keeping a stray row beats hiding a real project.
+      const empty = () => this.req('GET', `/api/session?directory=${encodeURIComponent(home)}`).then((b) => records(unwrap(b)).length === 0, () => false)
+      if (dir === home && !p.vcs && (await empty())) continue
+      kept.push(p)
+    }
     return Promise.all(
-      projects.map(async (p) => {
+      kept.map(async (p) => {
         const worktree = String(p.canonical ?? p.directory ?? '')
         const listed = await this.#worktreesOf(String(p.id)).catch(() => [])
         const sandboxes = [...new Set([...(Array.isArray(p.sandboxes) ? p.sandboxes.map(String) : []), ...listed.map((w) => w.directory)])].filter((d) => d !== worktree)
@@ -279,17 +306,17 @@ export class OpencodeV2Client {
   // 2.x's `name` is a display name ("Build"); the id is what a session runs as and what `@build`
   // matches, and `hidden` replaces 1.x's convention of internal agent names.
   async listAgents() {
-    return records(unwrap(await this.req('GET', '/api/agent')))
+    return records(unwrap(await this.req('GET', '/api/agent', undefined, serverHome())))
       .filter((a) => a.hidden !== true)
       .map((a) => ({ ...a, name: String(a.id ?? a.name) })) as AgentInfo[]
   }
   async listCommands() {
-    return records(unwrap(await this.req('GET', '/api/command'))) as CommandInfo[]
+    return records(unwrap(await this.req('GET', '/api/command', undefined, serverHome()))) as CommandInfo[]
   }
   // 1.x served providers with their models nested; 2.x lists models separately. Regrouped so the
   // /model picker reads the same {providers: [{id, models: {id: …}}]}.
   async providers(): Promise<ProvidersResponse> {
-    const models = records(unwrap(await this.req('GET', '/api/model')))
+    const models = records(unwrap(await this.req('GET', '/api/model', undefined, serverHome())))
     const byProvider = new Map<string, Record<string, unknown>>()
     for (const m of models) {
       const provider = asString(m.providerID)
